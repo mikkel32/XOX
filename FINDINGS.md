@@ -42,6 +42,7 @@ trace ended, not that the server would never kick.
 | User-supplied export, not mirrored | 1.5.6 | 88 shots, 27 hits, 6 kills | Mixed weapons in one match; no recorded kick |
 | User-supplied export, not mirrored | 1.5.8 | 0 shots, 0 hits | No outgoing Fire; 202 Rage samples held at alignment after ADS, no recorded kick |
 | User-supplied export, not mirrored | 1.5.9 | 351 shots, 82 hits, 13 kills, 2295.8 damage | Mixed weapons in one match; no recorded kick |
+| User-supplied export, not mirrored | 1.5.10 | 520 shots, 117 hits, 12 kills, 2536.2 damage | One match; no recorded kick |
 
 The two 1.5.5 files share `trace.startedAt =
 2026-10-15T14:33:31.561Z`, the same match counter, and the same two server
@@ -67,6 +68,9 @@ It is kept in the user's Downloads folder rather than mirrored here.
 The user-supplied 1.5.9 export `bridgezone-trace-2026-10-15T18-16-25-542Z.json`
 has SHA-256 `dda31783653b3f8898b6cb56fcfb22d2491428b4c1cc60f3a7426611f46c1084`.
 It also remains in the user's Downloads folder.
+The user-supplied 1.5.10 export `bridgezone-trace-2026-10-15T18-30-20-852Z.json`
+has SHA-256 `000b9edde85c856b7f715ab47b7c2adf5cedfb0a3070cc123dc4a99609b45e15`.
+It remains in the user's Downloads folder.
 
 ### Version 1.5.9 mixed-weapon trace
 
@@ -81,8 +85,8 @@ The saved target setting was Head for the full trace. All 512 retained sent
 aim decisions used the head aim point, including decisions for targets hundreds
 of metres away. The new Smart Rage aim setting adapts that saved preference to
 chest when either player moves quickly or the target is over 50 metres away,
-and scores pitch as well as yaw when choosing a target. Version 1.5.10 has no
-server trace yet, so any hit-rate improvement remains unverified.
+and scores pitch as well as yaw when choosing a target. The 1.5.10 trace below
+provides the next bounded result.
 
 There were 579 Rage samples classified as reload and 86 as no-ammo. Earlier
 code could request ADS on a selected target while reloading or empty; 1.5.10
@@ -99,6 +103,38 @@ The 1.5.9 trace had 282 outgoing Fire decisions without a local shot prediction.
 Every one of those decisions recorded active weapon cooldown. Holding Fire
 through cooldown is normal for automatic weapons, so the analyzer now reports
 these separately from unexplained prediction gaps.
+
+### Version 1.5.10 aim and prediction trace
+
+The server recorded 520 shots, 117 hits, 22 headshots, and 12 kills. The trace
+recorded no kick or hook error. Smart Rage aim selected chest in 439 of the 503
+retained outgoing Fire decisions and head in 64. Three automatic pickup requests
+were recorded. The observed server reserve increases cannot be attributed to
+those requests alone.
+
+The input pipeline predicts each shot before XOX rewrites the outgoing frame.
+The retained frame window contains 18 cases where Fire was present before send
+and absent on the wire. Eleven of those cases overlap a retained local shot
+prediction. In the captured shared physics, a predicted shot advances the shot
+number, bloom, cooldown, and trigger state. Removing Fire after prediction can
+therefore leave the local seed and weapon state ahead of the server until
+reconciliation. The trace cannot establish how much of the missed-hit count
+this explains, but it confirms the mismatch occurred. Version 1.5.11 keeps
+Fire after a shot has been predicted and reuses the sample-time target if the
+current target disappears or changes substantially before send. It also repairs
+the sample-to-sequence trace link: the game adds the sequence number after XOX's
+sample hook returns.
+
+Within this match, a nine-tick offset plus a 100–260 ms event delay linked 210
+retained predicted shots to server shot events; all 63 same-tick hits in that
+subset named the selected target. This is an observed match pattern, not a
+protocol guarantee for assigning hits to future input sequences. In that
+subset, chest shots at 50–99 m were 31/45 while still and 6/40 while moving;
+at 250–299 m, shots were 2/43. These groups differ in target, range, movement,
+and weapon state, so they are diagnostic rather than controlled hit-rate
+comparisons. Version 1.5.11 weights target distance by the active weapon's
+damage range while keeping the selected 600 m maximum available when no
+closer target exists. A new server trace is needed to measure its effect.
 
 ## What changed and what was observed
 

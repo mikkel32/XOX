@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.10.** The portable local suite reports 71 passes and 3
+> **Current version: 1.5.11.** The portable local suite reports 74 passes and 3
 > skips without the optional captured client archive. Live traces include both server anti-cheat
 > removals and short matches without one. They do **not** prove a general bypass.
 
@@ -27,7 +27,7 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Xray | Draws player boxes, names, and distances, including opponents behind cover when they are present in client snapshots. |
 | Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. |
-| Rage | Selects a clear target across 360 degrees up to the range slider, scopes when a target is available, waits for the weapon's ADS ramp, and fires. Smart Rage aim uses chest for distant or moving shots, even with a saved Head preference. Target choice accounts for horizontal and vertical turn, range, and target speed. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
+| Rage | Selects a clear target across 360 degrees up to the range slider, scopes when a target is available, waits for the weapon's ADS ramp, and fires. Smart Rage aim uses chest for distant or moving shots, even with a saved Head preference. Target choice weighs turn, target speed, and distance against the active weapon's damage-falloff range without imposing a hard cutoff. Once a shot is predicted, the send path keeps Fire and reuses its sampled target if the current target disappears or changes substantially, to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
 | Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It still follows local aim alignment, weapon cooldown, and server ammunition. |
 | Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation or the average direction of multiple pellets. Server spread and visible camera recoil may remain. |
 | Ammo assist | Requests a normal reload and pulses Interact when the game's own pickup target is compatible ammo below the observed reserve cap. It never changes the local or server ammo count directly. |
@@ -35,7 +35,7 @@ extension built from the same source, local tests, and the saved JSON traces.
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
-between tabs. In 1.5.10, Xray, loot vision, Silent AIM, Smart Rage aim, and Stealth start enabled;
+between tabs. In 1.5.11, Xray, loot vision, Silent AIM, Smart Rage aim, and Stealth start enabled;
 Rage starts disabled unless saved settings override them. Fast fire is enabled
 for Rage when it is turned on. After an aim-related
 server removal, Aim and Rage are disabled and remain off across the next match.
@@ -87,7 +87,7 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable local suite passed **71 tests with 3 skips** on 2026-10-15. Three
+The portable local suite passed **74 tests with 3 skips** on 2026-10-15. Three
 tests use locally captured client bundles that are intentionally not mirrored
 here. Tests validate local behavior and
 fixtures, not a live server outcome.
@@ -121,7 +121,8 @@ combat events do not have a guaranteed input sequence, so the report does not
 claim per-weapon hit rates. The analyzer separates missing local shot predictions
 during recorded weapon cooldown from those without cooldown. New traces also
 record automatic ammo pickup requests and server reserve increases separately;
-they do not establish which request caused a reserve change.
+they do not establish which request caused a reserve change. It also counts
+retained locally predicted shots whose Fire bit was removed before send.
 Only allowlisted game-state fields are exported; match IDs and raw connection
 errors are omitted. Older format v1 exports remain readable by the analyzer.
 
@@ -138,7 +139,8 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.7 | No live trace yet | Local tests cover range selection, continuous ADS input, moving-shot correction, and diagnostic export. Server hit rate, physical weapon range, and camera recoil remain unverified. |
 | 1.5.8 | 0 shots, 0 hits | User-supplied trace recorded 202 alignment holds after ADS, with no outgoing Fire. No recorded kick; see [findings](FINDINGS.md). |
 | 1.5.9 | 351 shots, 82 hits, 13 kills | User-supplied mixed-weapon trace; no recorded kick. F/E reached outgoing input. Saved Head targeting stayed active at long range, and Rage scoped during reload. Raw export is not mirrored; see [findings](FINDINGS.md). |
-| 1.5.10 | No live trace yet | Adapts Head preference to chest for long-range or moving shots, accounts for pitch in Rage selection, releases automatic ADS during reload, and requests nearby matching ammo pickups. Local tests pass; server hit rate and ammo pickup outcome await a new trace. |
+| 1.5.10 | 520 shots, 117 hits, 12 kills | User-supplied trace with Smart Rage aim and three automatic ammo pickup requests; no recorded kick. Retained input shows 11 locally predicted shots whose Fire bit was removed before send. Raw export is not mirrored; see [findings](FINDINGS.md). |
+| 1.5.11 | No live trace yet | Keeps Fire after prediction, reuses the sample-time target if it disappears or changes substantially before send, and favors nearer targets for the active weapon. Local tests pass; server hit rate awaits a new trace. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

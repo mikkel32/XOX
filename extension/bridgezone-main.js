@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.10
+// @version      1.5.11
 // @description  Xray, adaptive Rage aim, auto fire, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.10';
+  const VERSION = '1.5.11';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
@@ -122,6 +122,7 @@
     runtime.renderedAt = 0;
     runtime.predictions.clear();
     runtime.sampleContexts.clear();
+    runtime.pendingSampleContext = null;
     runtime.target = null;
     runtime.ammoPickup = { id: null, nextAt: 0 };
     lootCacheClient = null;
@@ -209,6 +210,9 @@
     const minDot = options.rage ? -1 : Math.cos(options.fov * Math.PI / 180);
     // The captured kernel uses rangeEnd for damage falloff, not target reach.
     const maxRange = options.range;
+    const weaponRange = client.predictor?.activeStats?.rangeEnd;
+    const effectiveRange = Number.isFinite(weaponRange)
+      ? Math.max(25, Math.min(maxRange, weaponRange)) : maxRange;
     const approachYaw = runtime.outgoingAim.yaw ?? frame.yaw;
     const approachPitch = runtime.outgoingAim.pitch ?? frame.pitch;
     const ownVelocity = vector3(me.vel) || vector3(me.v) || [0, 0, 0];
@@ -286,10 +290,13 @@
       }
       const yaw = Math.atan2(-aimDelta[0], -aimDelta[2]);
       noteScan(scan, snap, distance, 'eligible');
-      // Favor targets that need little turning, then keep the current target stable.
+      // The captured hitbox narrows with distance. Favor targets inside the
+      // active weapon's damage range without imposing an artificial cutoff.
       const score = options.rage
-        ? Math.max(Math.abs(normalizedDelta(approachYaw, yaw)), Math.abs(approachPitch - pitch)) +
-          0.5 * distance / maxRange + 0.012 * Math.min(speed, 20) -
+        ? 0.45 * Math.max(Math.abs(normalizedDelta(approachYaw, yaw)), Math.abs(approachPitch - pitch)) +
+          0.9 * Math.log1p(distance / effectiveRange) +
+          (ownSpeed > 1 ? 0.2 * Math.min(3, distance / effectiveRange) : 0) +
+          0.02 * Math.min(speed, 20) -
           (snap.i === runtime.outgoingAim.targetIndex ? 0.15 : 0)
         : 1 - dot;
       if (score >= bestScore) continue;
@@ -541,6 +548,12 @@
     return !(options.rage && options.rapidFire);
   }
 
+  function sampledTargetPreferred(current, sampled) {
+    return sampled && (!current || current.index !== sampled.index ||
+      Math.abs(normalizedDelta(current.yaw, sampled.yaw)) > MAX_OUTGOING_TURN ||
+      Math.abs(current.pitch - sampled.pitch) > MAX_OUTGOING_TURN);
+  }
+
   function stealthSkip() {
     const state = runtime.stealth;
     const now = performance.now();
@@ -657,9 +670,12 @@
       if (state.pendingManualUntil && performance.now() > state.pendingManualUntil) state.pendingManualUntil = 0;
       const shot = runtime.predictions.get(frame.s);
       runtime.predictions.delete(frame.s);
-      const target = !(frame.buttons & 4) &&
+      const sampledTarget = runtime.sampleContexts.get(frame.s)?.liveTarget;
+      let target = !(frame.buttons & 4) &&
         ((options.rage && client.predictor?.activeStats) || state.pendingManualUntil || (frame.buttons & 1))
         ? selectTarget(client, frame, shot?.eye) : null;
+      if (options.rage && shot && (frame.buttons & 1) && !(frame.buttons & 4) &&
+          sampledTargetPreferred(target, sampledTarget)) target = sampledTarget;
       let desired = target || { yaw: frame.yaw, pitch: frame.pitch };
       let correction = null;
       if (target && (frame.buttons & 1)) {
@@ -687,11 +703,15 @@
         const ready = target ? state.ready : !options.rage &&
           Math.abs(normalizedDelta(nextYaw, frame.yaw)) <= OUTGOING_AIM_TOLERANCE &&
           Math.abs(nextPitch - frame.pitch) <= OUTGOING_AIM_TOLERANCE;
-        const paceHeld = ready && target && paceShot() && stealthSkip();
-        if (!ready || paceHeld) {
+        const paceHeld = ready && target && !shot && paceShot() && stealthSkip();
+        if ((!ready || paceHeld) && !shot) {
           buttons &= ~1;
           runtime.stealth.heldShots++;
           reason = !ready ? (target ? 'aligning' : 'no-target') : 'stealth-delay';
+        } else if (!ready && shot) {
+          // The predictor has already advanced its shot seed, bloom, and cooldown.
+          // Sending the bounded turn preserves the same Fire event for reconciliation.
+          reason = target ? 'predicted-turn' : 'predicted-no-target';
         } else if (target) {
           runtime.rewrites++;
           if (correction) runtime.compensated++;
@@ -725,11 +745,14 @@
           ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) return frame;
       const shot = runtime.predictions.get(frame.s);
       runtime.predictions.delete(frame.s);
-      const target = selectTarget(client, frame, shot?.eye);
+      const sampledTarget = runtime.sampleContexts.get(frame.s)?.liveTarget;
+      let target = selectTarget(client, frame, shot?.eye);
+      if (options.rage && shot && sampledTargetPreferred(target, sampledTarget))
+        target = sampledTarget;
       if (!target) {
-        const buttons = options.rage ? frame.buttons & ~1 : frame.buttons;
+        const buttons = options.rage && !shot ? frame.buttons & ~1 : frame.buttons;
         recordAimDecision(client, frame, null, shot, null, buttons, frame.yaw, frame.pitch,
-          options.rage ? 'no-target' : 'manual-unassisted');
+          options.rage ? shot ? 'predicted-no-target' : 'no-target' : 'manual-unassisted');
         if (buttons !== frame.buttons) {
           modified = true;
           return { ...frame, buttons };
@@ -774,6 +797,13 @@
     hookedPredictors.add(predictor);
     const original = predictor.predict;
     replaceMethod(predictor, 'predict', function (frame, ...args) {
+      const sampled = runtime.pendingSampleContext;
+      runtime.pendingSampleContext = null;
+      if (runtime.client === client && sampled && Number.isSafeInteger(frame?.s)) {
+        runtime.sampleContexts.set(frame.s, sampled);
+        while (runtime.sampleContexts.size > 64)
+          runtime.sampleContexts.delete(runtime.sampleContexts.keys().next().value);
+      }
       const result = Reflect.apply(original, this, [frame, ...args]);
       if (runtime.client === client && result?.weapon?.fired) {
         // These are the exact pre-recoil shot directions produced by the shared game kernel.
@@ -851,9 +881,11 @@
       if (name !== 'eligible') counters.targetRejects[name] = (counters.targetRejects[name] || 0) + count;
     }
     const now = performance.now(), weapon = weaponSnapshot(client);
+    const sampled = { at: now, reason, weaponAds: weapon.ads,
+      target: targetSnapshot(gate.target), liveTarget: gate.target };
+    runtime.pendingSampleContext = sampled;
     if (Number.isSafeInteger(original.s)) {
-      runtime.sampleContexts.set(original.s, { at: now, reason, weaponAds: weapon.ads,
-        target: targetSnapshot(gate.target) });
+      runtime.sampleContexts.set(original.s, sampled);
       while (runtime.sampleContexts.size > 64) runtime.sampleContexts.delete(runtime.sampleContexts.keys().next().value);
     }
     const key = [reason, gate.target?.index ?? '-', weapon.id ?? '-',
@@ -937,6 +969,7 @@
     runtime.outgoingAim = { yaw: null, pitch: null, targetIndex: null, ready: false, pendingManualUntil: 0 };
     runtime.predictions.clear();
     runtime.sampleContexts.clear();
+    runtime.pendingSampleContext = null;
     seenServerEvents.clear();
     runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
     runtime.target = null;
@@ -1019,6 +1052,7 @@
         let prepared = frame;
         runtime.sampleGate = null;
         runtime.sampleHoldReason = null;
+        runtime.pendingSampleContext = null;
         runtime.autoPickupRequested = false;
         try { prepared = autoPickupAmmoFrame(client, prepared); }
         catch (error) { recordTrace('errors', { at: new Date().toISOString(),
@@ -1040,11 +1074,14 @@
       replaceMethod(connection, 'sendInput', function (matchId, frames, ...rest) {
         let outgoing = frames;
         if (runtime.client === client && matchId === client.start?.matchId) {
+          const alreadyPredicted = new Set(Array.isArray(frames)
+            ? frames.filter(frame => runtime.predictions.has(frame?.s)).map(frame => frame.s) : []);
           try { outgoing = rewriteFrames(client, frames); }
           catch (error) {
             runtime.error = 'Aim hook: ' + error.message;
             if (Array.isArray(frames)) {
-              const held = frames.map(holdOnAimError);
+              const held = frames.map(frame => options.rage && alreadyPredicted.has(frame?.s)
+                ? frame : holdOnAimError(frame));
               if (held.some((frame, index) => frame !== frames[index])) outgoing = held;
             }
           }

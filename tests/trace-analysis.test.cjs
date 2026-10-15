@@ -86,6 +86,7 @@ test('no-fire report distinguishes sampled gates, outbound frames, and server ev
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.8', trace: {
     match: 1,
+    localShots: [{ match: 1, sequence: 10 }, { match: 3, sequence: 1 }],
     counters: { rageSamples: 100, gateReasons: { unplayable: 80, aligning: 20 },
       highestAckByMatch: { 1: 10 } },
     frames: [
@@ -139,6 +140,10 @@ test('no-fire report distinguishes sampled gates, outbound frames, and server ev
   assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 1);
   assert.equal(report.inputButtons.frameSendChanges.comparable, 3);
   assert.equal(report.inputButtons.frameSendChanges.removed.fire, 1);
+  assert.deepEqual(report.predictionConsistency, {
+    retainedLocalShots: 2, overlappingFrames: 1,
+    predictedFireRemovedOnWire: 1, predictedFireOnWire: 0
+  });
   assert.equal(report.inputButtons.frameSendChanges.removed.interact, 0);
   assert.equal(report.inputButtons.gateSampleChanges.removed.fire, 2);
   assert.equal(report.inputButtons.gateSampleChanges.removed.interact, 0);

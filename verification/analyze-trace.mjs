@@ -125,6 +125,7 @@ export function analyzeTrace(document) {
   const events = list(trace.serverEvents);
   const snapshots = list(trace.serverSnapshots);
   const frames = list(trace.frames);
+  const localShots = list(trace.localShots);
   const gates = list(trace.fireGates);
   const interactions = list(trace.interactions);
   const settingsHistory = summarizeSettings(list(trace.settings));
@@ -294,6 +295,18 @@ export function analyzeTrace(document) {
   const sampledFrameButtons = countButtons(frames, frame => frame?.sampledButtons);
   const frameSendChanges = compareButtons(frames, frame => frame?.sampledButtons,
     frame => frame?.buttons);
+  const shotKey = item => `${item.match ?? 'unknown'}:${item.sequence}`;
+  const predictedSequences = new Set(localShots.filter(shot => Number.isSafeInteger(shot?.sequence))
+    .map(shotKey));
+  const predictedFrames = frames.filter(frame => Number.isSafeInteger(frame?.sequence) &&
+    predictedSequences.has(shotKey(frame)));
+  const predictionConsistency = { retainedLocalShots: localShots.length,
+    overlappingFrames: predictedFrames.length,
+    predictedFireRemovedOnWire: predictedFrames.filter(frame =>
+      (buttonMask(frame.sampledButtons) & BUTTONS.fire) &&
+      !(buttonMask(frame.buttons) & BUTTONS.fire)).length,
+    predictedFireOnWire: predictedFrames.filter(frame =>
+      buttonMask(frame.buttons) & BUTTONS.fire).length };
   const originalGateButtons = countButtons(gates, gate => gate?.originalButtons);
   const sampledGateButtons = countButtons(gates, gate => gate?.sampledButtons);
   const gateButtonChanges = compareButtons(gates, gate => gate?.originalButtons,
@@ -323,7 +336,7 @@ export function analyzeTrace(document) {
     retention: { retained, dropped: trace.retention?.dropped || null },
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
-    inputButtons, firingEvidence, interactionEvidence, ammoAssist,
+    inputButtons, firingEvidence, interactionEvidence, ammoAssist, predictionConsistency,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
       ackCoverage, missingWeapon, missingDistance,
       missingPrediction, missingPredictionWithCooldown, missingPredictionWithoutCooldown,
@@ -339,6 +352,7 @@ export function analyzeTrace(document) {
       'Older traces may lack F/E keyboard events; absent Interact bits do not prove F/E was never pressed.',
       'Button names use the captured client bit map: Fire 1, Aim 2, Interact 64 (F/E).',
       'A Fire input held during recorded weapon cooldown may have no local shot prediction; this is normal for automatic fire.',
+      'A locally predicted shot whose Fire bit is removed before send can desynchronize shot seed, bloom, and cooldown until reconciliation.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
       'Retained buffers may cover different time windows; inspect dropped counts before comparing totals.'
@@ -368,6 +382,8 @@ export function formatReport(report) {
       `${report.firingEvidence.sampledFireFrames ?? 'unavailable'}, outgoing frames ` +
       `${report.firingEvidence.outgoingFireFrames}, sent decisions ${report.firingEvidence.sentDecisionRows}, ` +
       `server shot events ${report.firingEvidence.serverShotEvents}`,
+    `Prediction/send overlap: ${report.predictionConsistency.overlappingFrames} retained frames with local shots; ` +
+      `${report.predictionConsistency.predictedFireRemovedOnWire} had Fire removed before send`,
     `Interact button bit 64 (retained rows): original game samples ` +
       `${report.inputButtons.originalGateSamples.byButton.interact}, prepared samples ` +
       `${report.inputButtons.preparedGateSamples.byButton.interact}, pre-send frames ` +

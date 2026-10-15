@@ -775,7 +775,7 @@ test('fast fire predicts and sends a distant shot after a small target movement'
   h.api.destroy();
 });
 
-test('Rage drops Fire when the target disappears after input sampling', () => {
+test('Rage drops unpredicted Fire when the target disappears after input sampling', () => {
   for (const stealth of [true, false]) {
     const h = harness();
     const fake = attach(h, rageClient());
@@ -793,6 +793,36 @@ test('Rage drops Fire when the target disappears after input sampling', () => {
     assert.equal(decision.sampled.target.index, 1,
       'the trace preserves the sample-time target after it disappears at send time');
     assert.equal(decision.target, null);
+    h.api.destroy();
+  }
+});
+
+test('a predicted Rage shot keeps Fire and the sampled target when snapshots change before send', () => {
+  for (const stealth of [true, false]) {
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => Object.freeze(frame({ s: undefined, vt: undefined, buttons: 16 }));
+    fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+      weapon: { fired: !!(input.buttons & 1), dirs: [[0, 0, -1]] } });
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth, rapidFire: true });
+    if (stealth) for (let sequence = 1200; sequence < 1204; sequence++)
+      send(fake, [frame({ s: sequence, buttons: 0 })]);
+    const sampled = fake.client.input.sample();
+    assert.equal(sampled.buttons & 1, 1);
+    const predicted = frame({ ...sampled, s: 1210, vt: 100 });
+    fake.client.predictor.predict(predicted);
+    fake.client.remoteFrames = [];
+    const outgoing = send(fake, [predicted])[0];
+    assert.equal(outgoing.buttons & 1, 1,
+      `the ${stealth ? 'bounded' : 'direct'} send keeps the predicted shot`);
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(decision.localShotPredicted, true);
+    assert.equal(decision.fireSent, true);
+    assert.equal(decision.sampled.target.index, 1,
+      'sample context is tied to the real sequence after the game adds it');
+    assert.equal(decision.target.index, 1,
+      'the sampled target is retained for this already predicted shot');
     h.api.destroy();
   }
 });
@@ -833,6 +863,26 @@ test('aim hook errors hold Fire instead of sending an unassisted shot', () => {
   assert.match(h.api.runtime.error, /Aim hook: broken snapshots/);
   assert.equal(h.api.runtime.stealth.heldShots, 2);
   assert.equal(original.buttons & 1, 1);
+  h.api.destroy();
+});
+
+test('a send-time aim error preserves an already predicted Rage shot', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: !!(input.buttons & 1), dirs: [[0, 0, -1]] } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true });
+  for (let sequence = 1300; sequence < 1304; sequence++)
+    send(fake, [frame({ s: sequence, buttons: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 1);
+  const predicted = frame({ ...sampled, s: 1310 });
+  fake.client.predictor.predict(predicted);
+  Object.defineProperty(fake.client, 'remoteFrames', { get() { throw new Error('lost snapshots'); } });
+  const outgoing = send(fake, [predicted])[0];
+  assert.equal(outgoing.buttons & 1, 1);
+  assert.match(h.api.runtime.error, /Aim hook: lost snapshots/);
   h.api.destroy();
 });
 
@@ -885,6 +935,24 @@ test('Rage prefers a nearer aim angle and honors the range slider beyond rangeEn
   assert.equal(gate.reason, 'no-target');
   assert.equal(gate.scan.closest.reason, 'range');
   assert.ok(gate.scan.closest.distance > 600);
+});
+
+test('Rage prefers a nearer weapon-range target over a distant target near the crosshair', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, range: 600 });
+  fake.client.predictor.activeStats.rangeEnd = 90;
+  fake.client.remoteFrames = [
+    { snap: opponent(1, { p: [0, 0, -250] }) },
+    { snap: opponent(2, { p: [38, 0, -46] }) }
+  ];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.index, 2);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -250] }) }];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.index, 1,
+    'long shots remain available when no closer target exists');
+  h.api.destroy();
 });
 
 test('Rage scopes when a target appears and holds ADS through the weapon ramp', () => {
@@ -1705,7 +1773,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.10');
+  assert.equal(exported.scriptVersion, '1.5.11');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -1737,7 +1805,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.10');
+  assert.equal(payload.scriptVersion, '1.5.11');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
