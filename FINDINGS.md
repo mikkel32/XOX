@@ -564,6 +564,47 @@ near corner and verifies selection; a fully blocked target remains rejected.
 This is a clear opening into the hitbox, not penetration through solid world
 geometry. No live XOX 1.5.27 match trace is available yet.
 
+### Version 1.5.28: proactive ammo and more useful ray evidence
+
+The default combat agent now seeks observed matching ammo within 45 m before
+reserve falls to zero, if reserve is below one magazine and no enemy is
+observed within 45 m. With an empty magazine and no reserve it can seek ammo
+within 75 m. An urgent storm move, loaded backup, or nearby fight still takes
+priority. A local test checks ammo travel and that a nearby visible or covered
+opponent keeps priority; no live pickup or survival outcome has been observed.
+
+The analyzer can measure the maximum angle between rays reported in the same
+server shot event without pairing that event to a local shot. For ambiguous
+local/server shot candidates it reports a bounded range of angular differences
+for comparable candidate rays and keeps those candidates unpaired. Neither
+measurement proves a server spread setting, hit, or shot-specific aim error.
+The latest live trace has no server-reported directions, so these new fields
+remain empty for it. Two synthetic trace tests exercise multi-ray, ambiguous,
+single-ray, and over-limit cases.
+
+The captured kernel adds pellet spread around an already perturbed base ray.
+Rigidly rotating final predicted rays could therefore count a hit at the
+outgoing angle that the kernel did not produce. Version 1.5.28 captures only
+the in-memory shot seed and spread inputs, replays the kernel at a candidate
+angle, and uses that replay for local pellet scoring only when it reproduces
+the predictor's original directions within a small numerical tolerance.
+Single-projectile correction iterates against the calibrated replay. A
+captured-kernel test checks 312 combinations of shot seed, elevation, ADS,
+movement, crouch, airborne state, and pellet count; replayed intersections
+matched the kernel in every case, and all tested single-projectile rays
+intersected the sampled head box. The trace exports a calibration flag but
+never the seed. Equal server/client shot counts do not prove equal spread
+seeds: a same-count, different-seed negative control produced different rays.
+These are local predictor results, not server hit or zero-spread proof.
+
+On 2026-10-16 the live lobby loaded public physics chunk `3ep-katvfqbjo.js`
+and runtime chunk `turbopack-37jd2rjmtu1y9.js`. Fresh downloads matched the
+captured test inputs at SHA-256
+`2027d73bd9daea6e44f954bfce014af3ee8b5df3550bec44a2b9c046b7b71b1e`
+and `94e60212916d8b767ffa7df350c496c14eb7a0a0787028f6a207761bb27d9b11`.
+This checks the current public client chunks, not the private server code or
+its hit validation. No live XOX 1.5.28 match trace exists yet.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

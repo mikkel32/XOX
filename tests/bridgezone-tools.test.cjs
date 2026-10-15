@@ -1075,6 +1075,43 @@ test('combat agent aims at nearby matching ammo before issuing Interact', () => 
   assert.equal(h.api.inspect().agent.action, 'no-ammo');
   assert.equal(empty.mx, 0);
   assert.equal(empty.mz, 0, 'without ammo the agent does not rush an opponent');
+  delete fake.client.predictor.ammo.light;
+  const unknownReserve = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'no-ammo');
+  assert.equal(unknownReserve.mz, 0,
+    'an unavailable reserve reading cannot make an empty weapon rush an opponent');
+  h.api.destroy();
+});
+
+test('combat agent replenishes a low reserve before it is empty without abandoning a nearby fight', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 816, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  Object.assign(fake.client.predictor.activeStats,
+    { class: 'rifle', rangeEnd: 90, magSize: 30 });
+  fake.client.predictor.slots[0].mag = 30;
+  fake.client.predictor.ammo.light = 2;
+  fake.client.loot = { items: new Map([['ammo-2',
+    { id: 'ammo-2', kind: 'ammo', ammo: 'light', pos: [0, 0, -5] }]]) };
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  const scavenging = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'loot-travel');
+  assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'ammo');
+  assert.ok(scavenging.mz > 0.9, 'the agent moves toward observed matching ammo');
+  assert.equal(scavenging.buttons & 64, 0, 'it does not interact outside item reach');
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  const defending = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'engage');
+  assert.equal(defending.mx, 0);
+  assert.equal(defending.mz, 0, 'a nearby opponent takes priority over reserve ammo');
+  h.api.runtime.physics.getCollisionWorld = () => ({});
+  h.api.runtime.physics.hasLineOfSight = () => false;
+  fake.client.input.sample();
+  assert.equal(h.api.runtime.agent.goal?.kind, 'opponent',
+    'an observed nearby threat still takes priority when its shot is covered');
   h.api.destroy();
 });
 
@@ -1166,7 +1203,7 @@ test('authoritative shot-count divergence disables adaptive hip fire', () => {
   h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
     sequence: 23, weapon: { shots: 1 } });
   fake.client.ingestEvents({ t: 100, me: { ack: 23, shots: 5 }, events: [] });
-  assert.equal(h.api.inspect().seedSync.status, 'diverged');
+  assert.equal(h.api.inspect().seedSync.status, 'count-diverged');
   assert.equal(h.api.trace().serverSnapshots.at(-1).acknowledgedShot.delta, 4);
   assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2);
   h.api.destroy();
@@ -1191,7 +1228,7 @@ test('shot-count divergence skips seeded spread correction until ACK alignment r
     h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
       sequence: 23, weapon: { shots: 1 } });
     fake.client.ingestEvents({ t: 100, me: { ack: 23, shots: 5 }, events: [] });
-    assert.equal(h.api.inspect().seedSync.status, 'diverged');
+    assert.equal(h.api.inspect().seedSync.status, 'count-diverged');
     const first = frame({ s: 30, buttons: 1, mx: 0, mz: 0 });
     fake.client.predictor.predict(first);
     const unseeded = send(fake, [first])[0];
@@ -1199,7 +1236,7 @@ test('shot-count divergence skips seeded spread correction until ACK alignment r
     assert.equal(unseeded.buttons & 1, 1, 'a predicted Fire remains on the wire');
     assert.equal(decision.correctionApplied, false);
     assert.equal(decision.correctionSkipReason, 'ack-shot-count-mismatch');
-    assert.equal(decision.seedSyncStatus, 'diverged');
+    assert.equal(decision.seedSyncStatus, 'count-diverged');
     const [x, y, z] = decision.target.point;
     const [ox, oy, oz] = decision.target.origin;
     close(unseeded.yaw, Math.atan2(-(x - ox), -(z - oz)));
@@ -1209,7 +1246,7 @@ test('shot-count divergence skips seeded spread correction until ACK alignment r
     h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
       sequence: 31, weapon: { shots: 6 } });
     fake.client.ingestEvents({ t: 101, me: { ack: 31, shots: 6 }, events: [] });
-    assert.equal(h.api.inspect().seedSync.status, 'aligned');
+    assert.equal(h.api.inspect().seedSync.status, 'count-aligned');
     const second = frame({ s: 32, buttons: 1, mx: 0, mz: 0 });
     fake.client.predictor.predict(second);
     const corrected = send(fake, [second])[0];
@@ -2338,6 +2375,104 @@ test('captured eight-pellet spread lands a chest ray after outgoing correction',
   h.api.destroy();
 });
 
+test('calibrated spread replay matches the captured kernel at varied elevation and seeds', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const kernel = fs.readFileSync(physicsPath, 'utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const { shotSeed, mulberry32, directions, spreadDegrees } = vm.runInNewContext(
+    ['ti', 'tl', 'tn', 'tz', 'tW', 'tU', 'tG'].map(capturedFunction).join('\n') +
+      ';({shotSeed:tn,mulberry32:tl,directions:tU,spreadDegrees:tG})', {
+      tt: Math.PI / 180, e9: { walkSpeed: 5 },
+      tr: (from, to, amount) => from + (to - from) * amount,
+      ta: (value, min, max) => Math.min(max, Math.max(min, value))
+    });
+  const rayHitsBox = (origin, ray, center, half) => {
+    let near = 0, far = 600;
+    for (let axis = 0; axis < 3; axis++) {
+      const low = center[axis] - half[axis], high = center[axis] + half[axis];
+      if (Math.abs(ray[axis]) < 1e-9) {
+        if (origin[axis] < low || origin[axis] > high) return false;
+      } else {
+        const first = (low - origin[axis]) / ray[axis];
+        const last = (high - origin[axis]) / ray[axis];
+        near = Math.max(near, Math.min(first, last));
+        far = Math.min(far, Math.max(first, last));
+        if (near > far) return false;
+      }
+    }
+    return far >= 0;
+  };
+  for (const pellets of [1, 8]) {
+    const h = harness();
+    const fake = rageClient();
+    const predictor = fake.client.predictor;
+    const weapon = { ...predictor.activeStats, class: pellets === 1 ? 'rifle' : 'shotgun',
+      hipSpread: 3, adsSpread: 1.2, moveSpread: 0.7,
+      pellets, pelletSpread: 3.6, rangeEnd: 600 };
+    predictor.activeStats = weapon;
+    predictor.index = 0;
+    Object.assign(predictor.ws, { ads: 1, bloom: 0, shots: 0 });
+    Object.assign(predictor.ps, { vel: [0, 0, 0], grounded: true, crouch: 0 });
+    predictor.predict = input => {
+      const seed = shotSeed(predictor.seed, predictor.index, predictor.ws.shots + 1);
+      predictor.ws.shots++;
+      return { eye: [0, 1.62, 0], weapon: { fired: true,
+        dirs: directions(weapon, input.yaw, input.pitch,
+          spreadDegrees(predictor.ws, weapon, predictor.ps), seed) } };
+    };
+    attach(h, fake);
+    h.api.runtime.physics.shotSeed = shotSeed;
+    h.api.runtime.physics.mulberry32 = mulberry32;
+    h.api.setOptions({ rage: true, point: 'head', range: 600 });
+    let caseIndex = 0;
+    const conditions = [
+      { ads: 1, bloom: 0, vel: [0, 0, 0], grounded: true, crouch: 0 },
+      { ads: 0.65, bloom: 0.4, vel: [2, 0, 1], grounded: true, crouch: 0 },
+      { ads: 1, bloom: 0.2, vel: [0, 0, 0], grounded: true, crouch: 1 },
+      { ads: 0.2, bloom: 0.5, vel: [3, 0, 0], grounded: false, crouch: 0 }
+    ];
+    for (const condition of conditions) for (const elevation of [0, 4, 10])
+      for (const seed of [...Array.from({ length: 12 }, (_, index) => index + 1), 102]) {
+      predictor.seed = seed;
+      predictor.ws.shots = 0;
+      predictor.ws.ads = condition.ads;
+      predictor.ws.bloom = condition.bloom;
+      Object.assign(predictor.ps, { vel: condition.vel,
+        grounded: condition.grounded, crouch: condition.crouch });
+      fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, elevation, -100] }) }];
+      const input = frame({ s: 5200 + ++caseIndex, yaw: 0, pitch: 0, buttons: 1 });
+      predictor.predict(input);
+      assert.equal(h.api.trace().localShots.at(-1).spreadReplayCalibrated, true,
+        `kernel replay calibrates for ${pellets} pellets, elevation ${elevation}, seed ${seed}`);
+      const output = send(fake, [input])[0];
+      const decision = h.api.trace().aimDecisions.at(-1);
+      const center = decision.target.hitboxCenter;
+      const actual = directions(weapon, output.yaw, output.pitch,
+        spreadDegrees(predictor.ws, weapon, predictor.ps),
+        shotSeed(seed, predictor.index, 1));
+      const hits = actual.filter(ray =>
+        rayHitsBox([0, 1.62, 0], ray, center, [0.14, 0.14, 0.14])).length;
+      assert.equal(decision.geometry.projectedPelletHitsOutgoing, hits,
+        `replayed intersections match the captured kernel for ${pellets} pellets, ` +
+          `elevation ${elevation}, seed ${seed}`);
+      if (pellets === 1) assert.equal(hits, 1,
+        `single-projectile correction lands inside the sampled head at elevation ${elevation}, seed ${seed}`);
+    }
+    h.api.destroy();
+  }
+  const sameCountDifferentSeed = [101, 102].map(seed =>
+    directions({ pellets: 1 }, 0, 0, 3, shotSeed(seed, 0, 1))[0]);
+  assert.ok(Math.hypot(...sameCountDifferentSeed[0].map((value, axis) =>
+    value - sameCountDifferentSeed[1][axis])) > 0.001,
+  'equal shot counts do not establish that the spread seeds match');
+});
+
 test('multiple projectile predictions center a pellet when their average misses the hitbox', () => {
   const h = harness();
   const fake = rageClient();
@@ -2965,7 +3100,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.27');
+  assert.equal(exported.scriptVersion, '1.5.28');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2998,7 +3133,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.27');
+  assert.equal(payload.scriptVersion, '1.5.28');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -3044,7 +3179,7 @@ test('a terminal match downloads one trace even when IndexedDB is unavailable', 
     assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
     assert.ok(h.api.inspect().archive.downloadRequestedAt);
     const payload = JSON.parse(await h.createdBlobs[0].text());
-    assert.equal(payload.scriptVersion, '1.5.27');
+    assert.equal(payload.scriptVersion, '1.5.28');
     assert.equal(payload.trace.frames.at(-1).sequence, 199);
     h.tick();
     assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
@@ -3065,7 +3200,7 @@ test('detaching an eliminated client exports the trace before the next timer tic
   assert.equal(h.downloads.length, 1);
   const payload = JSON.parse(await h.createdBlobs[0].text());
   assert.equal(payload.trace.frames.at(-1).sequence, 200);
-  assert.equal(payload.scriptVersion, '1.5.27');
+  assert.equal(payload.scriptVersion, '1.5.28');
 });
 
 test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {

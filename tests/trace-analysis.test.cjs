@@ -320,6 +320,109 @@ test('comparable ray angles break down by weapon, selected distance, and recorde
   assert.match(formatReport(report), /does not establish the server scope state/);
 });
 
+test('server-reported ray fan is measured even when local shot pairing is ambiguous', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const direction = degrees => {
+    const angle = degrees * Math.PI / 180;
+    return [-Math.sin(angle), 0, -Math.cos(angle)];
+  };
+  const localShots = Array.from({ length: 12 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, tick: 100 + index * 30,
+    sequence: index + 1, yaw: 0, pitch: 0,
+    directions: [direction(0), direction(index === 0 ? 2 : 0)],
+    weapon: { id: 'rifle' }
+  }));
+  const serverEvents = localShots.map((shot, index) => ({
+    at: shot.at + 180, match: 1, tick: shot.tick + 9, type: 'shot',
+    shot: { weaponId: 'rifle', directions: [direction(0),
+      direction(index === 0 ? 2 : index === 1 ? 3 : 0)] }
+  }));
+  serverEvents.push({ ...serverEvents[0], at: serverEvents[0].at + 1,
+    shot: { weaponId: 'rifle', directions: [direction(0), direction(6)] } });
+  serverEvents.push({ at: 99999, match: 1, tick: 999, type: 'shot',
+    shot: { weaponId: 'rifle', directions: [direction(0)] } });
+  serverEvents.push({ at: 99999, match: 1, tick: 1999, type: 'shot',
+    shot: { weaponId: 'rifle', directions: Array.from({ length: 33 },
+      () => direction(0)) } });
+  const trace = { formatVersion: 2, trace: { match: 1, localShots, serverEvents,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0, 0, 0, 0] })) } };
+  const report = analyzeTrace(trace);
+  const fan = report.correlatedShots.reportedRayFan;
+  assert.equal(report.correlatedShots.paired, 11);
+  assert.equal(report.correlatedShots.pairing.unmatchedByReason.multipleCompatibleServerShots, 1);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 22);
+  assert.deepEqual(report.correlatedShots.ambiguousRayBounds, {
+    ambiguousLocalShots: 1, measuredLocalShots: 1, incompleteCandidateSets: 0,
+    overLimitCandidateSets: 0, examples: [{ match: 1, sequence: 1, tick: 100,
+      reason: 'multipleCompatibleServerShots', serverCandidates: 2,
+      competingLocalShots: 1, comparableCandidates: 2,
+      minMaxRayDifferenceDegrees: 0, maxMaxRayDifferenceDegrees: 4 }]
+  });
+  assert.equal(fan.serverShotEvents, 15);
+  assert.equal(fan.eventsWithMultipleDirections, 14);
+  assert.equal(fan.measuredEvents, 13);
+  assert.equal(fan.skippedInvalidOrOverLimit, 1);
+  assert.equal(fan.maxSeparationDegrees, 6);
+  assert.deepEqual(fan.byPairing, {
+    paired: { events: 11, overHalfDegreeEvents: 1, medianMaxSeparationDegrees: 0 },
+    ambiguousCandidate: { events: 2, overHalfDegreeEvents: 2,
+      medianMaxSeparationDegrees: 4 },
+    unpaired: { events: 0, overHalfDegreeEvents: 0,
+      medianMaxSeparationDegrees: null }
+  });
+  assert.deepEqual(fan.examples.map(item =>
+    [item.tick, item.pairingStatus, item.maxSeparationDegrees]), [
+    [109, 'ambiguousCandidate', 6],
+    [139, 'paired', 3],
+    [109, 'ambiguousCandidate', 2]
+  ]);
+  const withoutLocalShots = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, serverEvents
+  } });
+  assert.equal(withoutLocalShots.correlatedShots.paired, 0);
+  assert.equal(withoutLocalShots.correlatedShots.reportedRayFan.maxSeparationDegrees, 6);
+  assert.equal(withoutLocalShots.correlatedShots.reportedRayFan.measuredEvents, 13);
+  assert.equal(withoutLocalShots.correlatedShots.reportedRayFan.byPairing.unpaired.events, 13);
+  assert.match(formatReport(report), /Within-shot server-reported ray separation \(pairing independent\)/);
+  assert.match(formatReport(report), /Ambiguous shot candidate ray-difference ranges/);
+  assert.match(formatReport(report), /not a server spread parameter or per-shot aim error/);
+});
+
+test('single-ray ambiguity reports candidate differences without inventing spread', async () => {
+  const { analyzeTrace } = await analyzer;
+  const direction = degrees => {
+    const angle = degrees * Math.PI / 180;
+    return [-Math.sin(angle), 0, -Math.cos(angle)];
+  };
+  const localShots = Array.from({ length: 12 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, tick: 100 + index * 30,
+    sequence: index + 1, yaw: 0, pitch: 0,
+    directions: [direction(0)], weapon: { id: 'rifle' }
+  }));
+  const serverEvents = localShots.map(shot => ({
+    at: shot.at + 180, match: 1, tick: shot.tick + 9, type: 'shot',
+    shot: { weaponId: 'rifle', directions: [direction(0)] }
+  }));
+  serverEvents.push({ ...serverEvents[0], at: serverEvents[0].at + 1,
+    shot: { weaponId: 'rifle', directions: [direction(4)] } });
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, localShots, serverEvents,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0, 0, 0, 0] }))
+  } });
+  assert.equal(report.correlatedShots.paired, 11);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 11);
+  assert.equal(report.correlatedShots.reportedRayFan.measuredEvents, 0);
+  assert.equal(report.correlatedShots.reportedRayFan.maxSeparationDegrees, null);
+  assert.deepEqual(report.correlatedShots.ambiguousRayBounds.examples[0], {
+    match: 1, sequence: 1, tick: 100,
+    reason: 'multipleCompatibleServerShots', serverCandidates: 2,
+    competingLocalShots: 1, comparableCandidates: 2,
+    minMaxRayDifferenceDegrees: 0, maxMaxRayDifferenceDegrees: 4
+  });
+});
+
 test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.10', trace: {
@@ -496,4 +599,21 @@ test('interaction key evidence separates pointer lock and input state from sent 
     keyDownsFromToolsPanel: 1, pointerLockChanges: 1
   });
   assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 0);
+});
+
+test('spread replay calibration shows live eligibility without treating old traces as failures', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: { localShots: [
+    { weapon: { id: 'rifle' }, spreadReplayCalibrated: true },
+    { weapon: { id: 'rifle' }, spreadReplayCalibrated: false },
+    { weapon: { id: 'shotgun' }, spreadReplayCalibrated: true },
+    { weapon: { id: 'shotgun' } }
+  ] } });
+  assert.deepEqual(report.spreadReplayEvidence, {
+    calibrated: 2, uncalibrated: 1, unrecorded: 1,
+    byWeapon: { rifle: { calibrated: 1, uncalibrated: 1, unrecorded: 0 },
+      shotgun: { calibrated: 1, uncalibrated: 0, unrecorded: 1 } }
+  });
+  assert.match(formatReport(report), /Local spread replay calibration/);
+  assert.match(formatReport(report), /does not verify the private server seed or ray/);
 });

@@ -173,6 +173,6 @@ test('predicted Fire counts recorded ACK mismatch skips and seed states only', a
   });
   assert.equal(report.authoritative.acknowledgedShotCount.diverged, 1);
   assert.equal(report.serverEvents.hits, 0);
-  assert.match(formatReport(report), /Predicted Fire correction and seed sync/);
-  assert.match(formatReport(report), /does not identify a server hit/);
+  assert.match(formatReport(report), /Predicted Fire correction and shot-count proxy/);
+  assert.match(formatReport(report), /Neither an ACK shot-count match nor a mismatch identifies a server ray/);
 });

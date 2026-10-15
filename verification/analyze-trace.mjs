@@ -172,7 +172,8 @@ const validVector = value => Array.isArray(value) && value.length === 3 && value
 function unitVector(value) {
   if (!validVector(value)) return null;
   const length = Math.hypot(...value);
-  return length > 1e-9 ? value.map(component => component / length) : null;
+  return finite(length) && length > 1e-9
+    ? value.map(component => component / length) : null;
 }
 
 function directionBasis(yaw, pitch) {
@@ -233,6 +234,24 @@ function shotPairMismatch(shot, event) {
   return null;
 }
 
+function candidateMaxRayDifference(shot, event, frame) {
+  const predicted = shot.directions, reported = event.shot?.directions;
+  if (!Array.isArray(predicted) || !Array.isArray(reported) ||
+      !predicted.length || predicted.length !== reported.length || reported.length > 32 ||
+      shotPairMismatch(shot, event)) return null;
+  const source = directionBasis(shot.yaw, shot.pitch);
+  const destination = directionBasis(frame?.after?.[0], frame?.after?.[1]);
+  if (!source || !destination) return null;
+  let maximum = 0;
+  for (let index = 0; index < reported.length; index++) {
+    const rotated = rotatedShotRay(predicted[index], source, destination);
+    const difference = angleDegrees(reported[index], rotated);
+    if (!finite(difference)) return null;
+    maximum = Math.max(maximum, difference);
+  }
+  return maximum;
+}
+
 function correlateServerShots(localShots, events, decisions, frames, ackLatencyMs) {
   const serverShotRows = events.filter(event => event?.type === 'shot');
   const serverShots = serverShotRows.filter(event =>
@@ -283,6 +302,8 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
       sameOffsetOutsideDelayWindow: 0, differentTickOffset: 0, incompatible: 0,
       multipleCompatibleServerShots: 0, sharedServerShot: 0 },
     ambiguousExamples: [] };
+  const ambiguousRayBounds = { ambiguousLocalShots: 0, measuredLocalShots: 0,
+    incompleteCandidateSets: 0, overLimitCandidateSets: 0, examples: [] };
   const hitEvidence = { hitEvents: hitRows.length, hitEventsWithMatchAndTick:
     hitRows.length - hitRows.filter(event => !Number.isSafeInteger(event.match) ||
       !Number.isSafeInteger(event.tick)).length,
@@ -291,6 +312,8 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
   const expectedDelay = finite(ackLatencyMs) ? ackLatencyMs + 50 : 200;
   const pairedDelays = [];
   const delaysByMatch = new Map();
+  const pairedServerEvents = new Set();
+  const ambiguousCandidateServerEvents = new Set();
   for (const match of new Set(local.map(shot => shot.match))) {
     const shots = local.filter(shot => shot.match === match);
     const server = serverShots.filter(event => event.match === match);
@@ -342,6 +365,21 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
         pairing.ambiguousExamples.push({ match, sequence: shot.sequence, tick: shot.tick,
           reason, compatibleServerShots: candidateCount });
     };
+    const measureAmbiguousRays = (reason, shot, candidates, competingLocalShots = 1) => {
+      ambiguousRayBounds.ambiguousLocalShots++;
+      if (candidates.length > 32) { ambiguousRayBounds.overLimitCandidateSets++; return; }
+      const frame = outgoing.get(`${match}:${shot.sequence}`);
+      const differences = candidates.map(event => candidateMaxRayDifference(shot, event, frame));
+      const comparable = differences.filter(finite);
+      if (comparable.length) ambiguousRayBounds.measuredLocalShots++;
+      if (comparable.length !== candidates.length) ambiguousRayBounds.incompleteCandidateSets++;
+      if (ambiguousRayBounds.examples.length < 10) ambiguousRayBounds.examples.push({
+        match, sequence: shot.sequence, tick: shot.tick, reason,
+        serverCandidates: candidates.length, competingLocalShots,
+        comparableCandidates: comparable.length,
+        minMaxRayDifferenceDegrees: comparable.length ? rounded(Math.min(...comparable)) : null,
+        maxMaxRayDifferenceDegrees: comparable.length ? rounded(Math.max(...comparable)) : null });
+    };
     let matchPairs = 0;
     for (const shot of shots) {
       if (!supported) {
@@ -367,14 +405,20 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
         continue;
       }
       if (compatible.length > 1) {
+        for (const candidate of compatible) ambiguousCandidateServerEvents.add(candidate);
+        measureAmbiguousRays('multipleCompatibleServerShots', shot, compatible);
         unmatched('multipleCompatibleServerShots', shot, compatible.length);
         continue;
       }
       const event = compatible[0];
       if (contendersByServer.get(event).length > 1) {
+        ambiguousCandidateServerEvents.add(event);
+        measureAmbiguousRays('sharedServerShot', shot, compatible,
+          contendersByServer.get(event).length);
         unmatched('sharedServerShot', shot, contendersByServer.get(event).length);
         continue;
       }
+      pairedServerEvents.add(event);
       matchPairs++; paired++;
       const delay = event.at - shot.at;
       pairedDelays.push(delay);
@@ -525,6 +569,48 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
   pairing.pairedDelayMs = timing(pairedDelays);
   pairing.unpairedEligibleServerShots = serverShots.length - paired;
   for (const [match, values] of delaysByMatch) byMatch[match].pairedDelayMs = timing(values);
+  const fanByPairing = { paired: [], ambiguousCandidate: [], unpaired: [] };
+  const fanExamples = [];
+  let eventsWithMultipleDirections = 0, skippedInvalidOrOverLimit = 0;
+  for (const event of serverShotRows) {
+    const directions = event.shot?.directions;
+    if (!Array.isArray(directions) || directions.length < 2) continue;
+    eventsWithMultipleDirections++;
+    // The trace producer retains at most 32 rays in one shot event.
+    if (directions.length > 32) { skippedInvalidOrOverLimit++; continue; }
+    const rays = directions.map(unitVector);
+    if (rays.some(ray => !ray)) { skippedInvalidOrOverLimit++; continue; }
+    let maxSeparation = 0;
+    for (let first = 0; first < rays.length; first++) {
+      for (let second = first + 1; second < rays.length; second++) {
+        const cosine = Math.max(-1, Math.min(1, dot3(rays[first], rays[second])));
+        maxSeparation = Math.max(maxSeparation, Math.acos(cosine) * 180 / Math.PI);
+      }
+    }
+    const pairingStatus = pairedServerEvents.has(event) ? 'paired' :
+      ambiguousCandidateServerEvents.has(event) ? 'ambiguousCandidate' : 'unpaired';
+    fanByPairing[pairingStatus].push(maxSeparation);
+    if (maxSeparation > 0.5) {
+      fanExamples.push({ match: Number.isSafeInteger(event.match) ? event.match : null,
+        tick: Number.isSafeInteger(event.tick) ? event.tick : null,
+        weaponId: typeof event.shot.weaponId === 'string' ? event.shot.weaponId : null,
+        rays: rays.length, pairingStatus, maxSeparationDegrees: rounded(maxSeparation) });
+      fanExamples.sort((a, b) => b.maxSeparationDegrees - a.maxSeparationDegrees);
+      if (fanExamples.length > 5) fanExamples.length = 5;
+    }
+  }
+  const fanAngles = Object.values(fanByPairing).flat();
+  const reportedRayFan = {
+    serverShotEvents: serverShotRows.length, eventsWithMultipleDirections,
+    measuredEvents: fanAngles.length, skippedInvalidOrOverLimit,
+    byPairing: Object.fromEntries(Object.entries(fanByPairing).map(([status, angles]) =>
+      [status, { events: angles.length,
+        overHalfDegreeEvents: angles.filter(angle => angle > 0.5).length,
+        medianMaxSeparationDegrees: median(angles) }])),
+    medianMaxSeparationDegrees: median(fanAngles),
+    maxSeparationDegrees: fanAngles.length
+      ? rounded(fanAngles.reduce((maximum, angle) => Math.max(maximum, angle), 0)) : null,
+    examples: fanExamples };
   rayEvidence.medianLocalToServerDegrees = median(rayDifferences);
   rayEvidence.maxLocalToServerDegrees = rayDifferences.length ? rounded(Math.max(...rayDifferences)) : null;
   rayEvidence.medianServerRayFromOutgoingAimDegrees = median(reportedSpread);
@@ -542,8 +628,8 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     }).sort((a, b) => a.weapon.localeCompare(b.weapon) ||
       a.distance.localeCompare(b.distance) || a.localFireMode.localeCompare(b.localFireMode));
   return { method: 'provisional same-match tick and arrival-time alignment',
-    paired, pairedWithDecision, pairedHits, pairing, hitEvidence,
-    byMatch, byVisibility,
+    paired, pairedWithDecision, pairedHits, pairing, ambiguousRayBounds, hitEvidence,
+    byMatch, byVisibility, reportedRayFan,
     reportedHitboxByVisibility, rayEvidence,
     comparableRaysByWeaponDistanceMode,
     byModeDistanceMovement: Object.values(byModeDistanceMovement).sort((a, b) =>
@@ -569,6 +655,20 @@ export function analyzeTrace(document) {
   const snapshots = list(trace.serverSnapshots);
   const frames = list(trace.frames);
   const localShots = list(trace.localShots);
+  const spreadReplayEvidence = { calibrated: 0, uncalibrated: 0,
+    unrecorded: 0, byWeapon: {} };
+  const replayByWeapon = new Map();
+  for (const shot of localShots) {
+    const status = shot?.spreadReplayCalibrated === true ? 'calibrated' :
+      shot?.spreadReplayCalibrated === false ? 'uncalibrated' : 'unrecorded';
+    spreadReplayEvidence[status]++;
+    const weapon = typeof shot?.weapon?.id === 'string' ? shot.weapon.id : 'unknown';
+    if (!replayByWeapon.has(weapon)) replayByWeapon.set(weapon,
+      { calibrated: 0, uncalibrated: 0, unrecorded: 0 });
+    const group = replayByWeapon.get(weapon);
+    group[status]++;
+  }
+  spreadReplayEvidence.byWeapon = Object.fromEntries(replayByWeapon);
   const gates = list(trace.fireGates);
   const interactions = list(trace.interactions);
   const settings = list(trace.settings);
@@ -929,7 +1029,8 @@ export function analyzeTrace(document) {
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, coverEvidence,
     targetRejects: trace.counters?.targetRejects || null,
-    inputButtons, firingEvidence, hipFireEvidence, predictedFireSync, correlatedShots,
+    inputButtons, firingEvidence, hipFireEvidence, predictedFireSync,
+    spreadReplayEvidence, correlatedShots,
     agentActions, agentRoutes, interactionEvidence, ammoAssist, inventoryEvidence,
     predictionConsistency,
     pelletProjection,
@@ -947,6 +1048,8 @@ export function analyzeTrace(document) {
       'Pairing requires one compatible local shot and one compatible server shot within the selected tick offset and delay window. Unsupported offsets, missing fields, and ambiguous candidates remain unmatched.',
       'A paired shot at a unique server-shot hit tick is only a same-tick observation. Multiple own-player server shots at one hit tick are excluded from paired-hit groups; neither case proves which ray hit.',
       'Server-reported shot directions are visual event data from the game. Their difference from a rotated local prediction can diagnose spread-seed or aim-state drift only when provisional pairing is correct.',
+      'Within-shot ray separation uses directions in one server shot event and does not require local/server pairing. It describes a reported ray fan, not a server spread parameter or per-shot aim error; single-ray events provide no separation measurement.',
+      'Ray-fan pairing labels and ambiguous-candidate angular ranges use the provisional pairing window. Candidate ranges compare rays by array index after rotating the local prediction to outgoing aim; they do not choose a server shot or establish spread or aim as the cause.',
       'Reported-ray intersections use the locally sampled target hitbox; they do not prove the target occupied that box on the server or that cover allowed the shot.',
       'Comparable-ray groups use locally selected distance and recorded local fire-mode flags. ADS requested or hip selected does not establish the server scope state.',
       'Server ray versus outgoing aim is an observed angular difference, not a direct server spread parameter. A small selected-point miss does not prove the target occupied that point on the server.',
@@ -959,7 +1062,8 @@ export function analyzeTrace(document) {
       'A locally predicted shot whose Fire bit is removed before send can desynchronize shot seed, bloom, and cooldown until reconciliation.',
       'Projected pellet hits use the captured client hitboxes and locally predicted spread; they are not server-confirmed hits.',
       'Adaptive hip-fire decisions use local shot-seed and spread estimates; only server events can establish actual hits.',
-      'Correction skip reasons and seed-sync statuses are recorded client decision state. An ACK shot-count mismatch does not identify a server hit or prove which ray missed.',
+      'The seedSyncStatus field records a shot-count comparison, not verified seed equality. Neither an ACK shot-count match nor a mismatch identifies a server ray or proves which shot hit.',
+      'Spread replay calibration checks whether the local captured-kernel model reproduces the client predictor rays; it does not verify the private server seed or ray.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Agent Interact and Swap requests and later server inventory changes are separate observations; they cannot be attributed to a particular request without a server receipt.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
@@ -1003,9 +1107,13 @@ export function formatReport(report) {
       `locally predicted ${report.hipFireEvidence.locallyPredicted}, ` +
       `corrected ${report.hipFireEvidence.corrected}, seeded ${report.hipFireEvidence.seeded}; ` +
       `by weapon ${JSON.stringify(report.hipFireEvidence.byWeapon)}`,
-    `Predicted Fire correction and seed sync (recorded decision fields): ` +
+    `Predicted Fire correction and shot-count proxy (recorded seedSyncStatus field): ` +
       `${JSON.stringify(report.predictedFireSync)}`,
+    `Local spread replay calibration (retained shots): ` +
+      `${JSON.stringify(report.spreadReplayEvidence)}`,
     `Shot-pair eligibility and timing (provisional): ${JSON.stringify(report.correlatedShots.pairing)}`,
+    `Ambiguous shot candidate ray-difference ranges (provisional, at most 10 examples): ` +
+      `${JSON.stringify(report.correlatedShots.ambiguousRayBounds)}`,
     `Provisional server-shot pairs: ${report.correlatedShots.paired} paired, ` +
       `${report.correlatedShots.pairedWithDecision} with retained decisions, ` +
       `${report.correlatedShots.pairedHits} at a unique-server-shot hit tick; ` +
@@ -1018,6 +1126,8 @@ export function formatReport(report) {
     `Server-reported rays through sampled hitboxes by visibility (provisional): ` +
       `${JSON.stringify(report.correlatedShots.reportedHitboxByVisibility)}`,
     `Server-reported ray comparison (provisional pairs): ${JSON.stringify(report.correlatedShots.rayEvidence)}`,
+    `Within-shot server-reported ray separation (pairing independent): ` +
+      `${JSON.stringify(report.correlatedShots.reportedRayFan)}`,
     'Comparable ray angular differences by weapon / selected distance / local fire mode (provisional):',
     ...(report.correlatedShots.comparableRaysByWeaponDistanceMode.length
       ? report.correlatedShots.comparableRaysByWeaponDistanceMode.map(group =>

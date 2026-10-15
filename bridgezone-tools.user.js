@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.27
+// @version      1.5.28
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.27';
+  const VERSION = '1.5.28';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -572,9 +572,9 @@
     if (!Array.isArray(shot?.directions) || !shot.directions.length ||
         !shot.directions.every(direction => Array.isArray(direction) &&
           direction.length === 3 && direction.every(Number.isFinite))) return null;
-    // The shared kernel rotates the same sampled spread offsets with outgoing
-    // yaw/pitch. For pellets, try centering each ray and keep the angle that
-    // intersects the most of the selected hitbox.
+    // Try centering each predicted ray. Score the candidates with a calibrated
+    // replay of the captured spread kernel when available; its second pellet
+    // perturbation is not a rigid rotation of the original final rays.
     const directions = shot.directions.slice(0, 32);
     const average = directions.reduce((sum, direction) => sum.map((value, i) => value + direction[i]), [0, 0, 0]);
     const y = shot.yaw, p = shot.pitch;
@@ -596,7 +596,25 @@
       const yaw = Math.atan2(Math.sin(rawYaw), Math.cos(rawYaw));
       if (turnFrom && (Math.abs(normalizedDelta(turnFrom.yaw, yaw)) > MAX_OUTGOING_TURN ||
           Math.abs(pitch - turnFrom.pitch) > MAX_OUTGOING_TURN)) continue;
-      if (directions.length === 1) return { yaw, pitch };
+      if (directions.length === 1) {
+        if (!shot.replay) return { yaw, pitch };
+        let exactYaw = yaw, exactPitch = pitch;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const ray = replayShotDirections(shot, exactYaw, exactPitch)?.[0];
+          if (!ray) break;
+          const rayYaw = Math.atan2(-ray[0], -ray[2]);
+          const rayPitch = Math.asin(Math.max(-1, Math.min(1, ray[1])));
+          const yawError = normalizedDelta(rayYaw, target.yaw);
+          const pitchError = target.pitch - rayPitch;
+          if (Math.max(Math.abs(yawError), Math.abs(pitchError)) < 1e-9) break;
+          exactYaw = Math.atan2(Math.sin(exactYaw + yawError), Math.cos(exactYaw + yawError));
+          exactPitch += pitchError;
+          if (Math.abs(exactPitch) > 1.54 || turnFrom &&
+              (Math.abs(normalizedDelta(turnFrom.yaw, exactYaw)) > MAX_OUTGOING_TURN ||
+                Math.abs(exactPitch - turnFrom.pitch) > MAX_OUTGOING_TURN)) return null;
+        }
+        return { yaw: exactYaw, pitch: exactPitch };
+      }
       const hits = projectedPelletHits(shot, target, yaw, pitch) ?? 0;
       const miss = predictedMiss(shot, target, yaw, pitch)?.meanMeters ?? Infinity;
       if (hits > bestHits || (hits === bestHits && miss < bestMiss)) {
@@ -688,10 +706,10 @@
       ? me.shots - acknowledgedShot.weapon.shots : null;
     if (shotCountDelta === 0) {
       runtime.seedSync.aligned++;
-      runtime.seedSync.status = 'aligned';
+      runtime.seedSync.status = 'count-aligned';
     } else if (shotCountDelta !== null) {
       runtime.seedSync.diverged++;
-      runtime.seedSync.status = 'diverged';
+      runtime.seedSync.status = 'count-diverged';
     }
     recordTrace('serverSnapshots', {
       at: now, match, tick: Number.isFinite(snapshot.t) ? snapshot.t : null, ack,
@@ -754,6 +772,51 @@
     return { forward: [-sy * cp, sp, -cy * cp], right: [cy, 0, -sy], up: [sy * sp, cp, cy * sp] };
   }
 
+  function spreadRay(direction, degrees, random) {
+    if (degrees <= 0) return direction;
+    const radius = Math.sqrt(random()) * degrees * Math.PI / 180;
+    const angle = 2 * random() * Math.PI;
+    const pitch = Math.asin(Math.max(-1, Math.min(1, direction[1])));
+    const yaw = Math.atan2(-direction[0], -direction[2]);
+    const sy = Math.sin(yaw), cy = Math.cos(yaw);
+    const sp = Math.sin(pitch), cp = Math.cos(pitch);
+    const tangent = Math.tan(radius);
+    const across = tangent * Math.cos(angle), above = tangent * Math.sin(angle);
+    const x = direction[0] + cy * across + sy * sp * above;
+    const y = direction[1] + cp * above;
+    const z = direction[2] - sy * across + cy * sp * above;
+    const length = Math.hypot(x, y, z);
+    return [x / length, y / length, z / length];
+  }
+
+  function replayShotDirections(shot, yaw, pitch) {
+    const replay = shot?.replay;
+    const random = runtime.physics.mulberry32;
+    if (!replay || typeof random !== 'function' ||
+        !Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;
+    const next = random(replay.seed);
+    const base = spreadRay(aimBasis(yaw, pitch).forward, replay.spreadDegrees, next);
+    if (replay.pellets <= 1) return [base];
+    const directions = [];
+    for (let index = 0; index < replay.pellets; index++)
+      directions.push(spreadRay(base, replay.pelletSpread, next));
+    return directions;
+  }
+
+  function shotDirectionsAt(shot, yaw, pitch) {
+    const replayed = replayShotDirections(shot, yaw, pitch);
+    if (replayed) return replayed;
+    const source = aimBasis(shot.yaw, shot.pitch), destination = aimBasis(yaw, pitch);
+    const dot = (a, b) => a.reduce((sum, value, index) => sum + value * b[index], 0);
+    return shot.directions.slice(0, 32).filter(vector3).map(direction => {
+      const components = [dot(direction, source.right), dot(direction, source.up),
+        dot(direction, source.forward)];
+      return destination.forward.map((value, index) =>
+        components[0] * destination.right[index] +
+        components[1] * destination.up[index] + components[2] * value);
+    });
+  }
+
   function angularMiss(target, yaw, pitch) {
     if (!target || !Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;
     const forward = aimBasis(yaw, pitch).forward;
@@ -767,16 +830,11 @@
     if (!shot || !target || !Number.isFinite(yaw) || !Number.isFinite(pitch) ||
         !Number.isFinite(shot.yaw) || !Number.isFinite(shot.pitch) ||
         !Array.isArray(shot.directions)) return null;
-    const source = aimBasis(shot.yaw, shot.pitch), destination = aimBasis(yaw, pitch);
     const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
     let min = Infinity, max = 0, sum = 0, ahead = 0, behind = 0;
-    for (const direction of shot.directions.slice(0, 32)) {
-      if (!vector3(direction)) continue;
-      const components = [dot(direction, source.right), dot(direction, source.up), dot(direction, source.forward)];
-      const rotated = destination.forward.map((value, i) =>
-        components[0] * destination.right[i] + components[1] * destination.up[i] + components[2] * value);
-      const length = Math.hypot(...rotated);
-      const alignment = length ? dot(rotated, target.direction) / length : -1;
+    for (const direction of shotDirectionsAt(shot, yaw, pitch)) {
+      const length = Math.hypot(...direction);
+      const alignment = length ? dot(direction, target.direction) / length : -1;
       if (alignment <= 0) { behind++; continue; }
       const miss = target.distance * Math.sqrt(Math.max(0, 1 - Math.min(1, alignment * alignment)));
       min = Math.min(min, miss);
@@ -793,18 +851,12 @@
     if (!eye || !center || !Array.isArray(shot.directions) ||
         !Number.isFinite(shot.yaw) || !Number.isFinite(shot.pitch) ||
         !Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;
-    const source = aimBasis(shot.yaw, shot.pitch), destination = aimBasis(yaw, pitch);
-    const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
     const halfWidth = target.aimPart === 'head' ? 0.14 : 0.25;
     const halfHeight = target.aimPart === 'head' ? 0.14 :
       Math.max(0.1, (Number.isFinite(target.bodyHeight) ? target.bodyHeight : 1.8) / 4 - 0.14);
     const half = [halfWidth, halfHeight, halfWidth];
     let hits = 0;
-    for (const direction of shot.directions.slice(0, 32)) {
-      if (!vector3(direction)) continue;
-      const components = [dot(direction, source.right), dot(direction, source.up), dot(direction, source.forward)];
-      const ray = destination.forward.map((value, i) =>
-        components[0] * destination.right[i] + components[1] * destination.up[i] + components[2] * value);
+    for (const ray of shotDirectionsAt(shot, yaw, pitch)) {
       let near = 0, far = 600;
       for (let axis = 0; axis < 3; axis++) {
         const low = center[axis] - half[axis], high = center[axis] + half[axis];
@@ -1024,7 +1076,7 @@
       let desired = target || { yaw: frame.yaw, pitch: frame.pitch };
       let correction = null;
       const correctionSkipReason = target && (frame.buttons & 1) && shot &&
-        runtime.seedSync.status === 'diverged' ? 'ack-shot-count-mismatch' : null;
+        runtime.seedSync.status === 'count-diverged' ? 'ack-shot-count-mismatch' : null;
       if (target && (frame.buttons & 1)) {
         // Do not defer a predicted shot to chase an unreachable correction.
         correction = correctionSkipReason ? null : compensateSpread(shot, target, state);
@@ -1113,7 +1165,7 @@
           frame.yaw, frame.pitch, 'stealth-delay');
         return { ...frame, buttons: frame.buttons & ~1 };
       }
-      const correctionSkipReason = shot && runtime.seedSync.status === 'diverged'
+      const correctionSkipReason = shot && runtime.seedSync.status === 'count-diverged'
         ? 'ack-shot-count-mismatch' : null;
       const correction = correctionSkipReason ? null : compensateSpread(shot, target);
       if (correction) runtime.compensated++;
@@ -1152,17 +1204,58 @@
         while (runtime.sampleContexts.size > 64)
           runtime.sampleContexts.delete(runtime.sampleContexts.keys().next().value);
       }
+      const bloomBefore = predictor.ws?.bloom;
+      const shotsBefore = predictor.ws?.shots;
+      const shotSeed = runtime.physics.shotSeed;
+      let replaySeed = null;
+      if (typeof shotSeed === 'function' && Number.isSafeInteger(predictor.seed) &&
+          Number.isSafeInteger(predictor.index) && Number.isSafeInteger(shotsBefore) &&
+          shotsBefore >= 0) {
+        try { replaySeed = shotSeed(predictor.seed, predictor.index, shotsBefore + 1); }
+        catch { /* Keep the original prediction when this optional hook differs. */ }
+      }
       const result = Reflect.apply(original, this, [frame, ...args]);
       if (runtime.client === client && result?.weapon?.fired) {
         // These are the exact pre-recoil shot directions produced by the shared game kernel.
-        runtime.predictions.set(frame.s, {
+        const shot = {
           yaw: frame.yaw, pitch: frame.pitch, eye: [...result.eye],
           directions: result.weapon.dirs.map(direction => [...direction])
-        });
+        };
+        const ws = predictor.ws, player = predictor.ps, weapon = predictor.activeStats;
+        const velocity = vector3(player?.vel);
+        if (Number.isSafeInteger(replaySeed) && typeof runtime.physics.mulberry32 === 'function' &&
+            velocity && Number.isFinite(bloomBefore) && Number.isFinite(ws?.ads) &&
+            [weapon?.hipSpread, weapon?.adsSpread, weapon?.moveSpread,
+              weapon?.pellets].every(Number.isFinite) &&
+            (weapon.pellets <= 1 || Number.isFinite(weapon.pelletSpread)) &&
+            weapon.pellets === shot.directions.length && weapon.pellets <= 32) {
+          try {
+            const ads = ws.ads;
+            const motion = Math.min(1, Math.hypot(velocity[0], velocity[2]) / 5);
+            let spreadDegrees = weapon.hipSpread * (1 - ads) + weapon.adsSpread * ads +
+              weapon.moveSpread * motion * (1 - 0.6 * ads) +
+              bloomBefore * (1 - 0.7 * ads);
+            if (player.grounded) {
+              if (player.crouch > 0.5) spreadDegrees *= 0.85;
+            } else spreadDegrees += 2.5 * (1 - 0.5 * ads);
+            const replay = { seed: replaySeed, spreadDegrees,
+              pelletSpread: weapon.pelletSpread || 0, pellets: weapon.pellets };
+            const reconstructed = replayShotDirections({ replay }, frame.yaw, frame.pitch);
+            const mismatch = reconstructed?.length === shot.directions.length
+              ? Math.max(...reconstructed.flatMap((direction, index) =>
+                direction.map((value, axis) => Math.abs(value - shot.directions[index][axis]))))
+              : Infinity;
+            // Only use exact replay after it reproduces the predictor's original
+            // rays. Keep the match-derived seed in memory, never in a trace.
+            if (mismatch < 1e-6) shot.replay = replay;
+          } catch { /* The game prediction and outgoing Fire still proceed. */ }
+        }
+        runtime.predictions.set(frame.s, shot);
         recordTrace('localShots', { at: performance.now(), match: runtime.trace.match,
           sequence: frame.s, tick: frame.vt, yaw: frame.yaw, pitch: frame.pitch,
           inputMovement: [frame.mx, frame.mz], weapon: weaponSnapshot(client), player: playerSnapshot(client),
-          eye: [...result.eye], directions: result.weapon.dirs.map(direction => [...direction]) });
+          eye: [...result.eye], directions: result.weapon.dirs.map(direction => [...direction]),
+          spreadReplayCalibrated: !!shot.replay });
         while (runtime.predictions.size > 16) runtime.predictions.delete(runtime.predictions.keys().next().value);
       }
       return result;
@@ -1231,7 +1324,7 @@
       Math.max(0, weapon.moveSpread) * movementRatio * (1 - 0.6 * value) +
       Math.max(0, ws.bloom) * (1 - 0.7 * value) +
       (player?.grounded === false ? 2.5 * (1 - 0.5 * value) : 0));
-    const sample = runtime.seedSync.status === 'diverged'
+    const sample = runtime.seedSync.status === 'count-diverged'
       ? { scale: 1 } : nextShotSpreadScale(client, ws);
     const radius = Math.max(spreadAt(ads), spreadAt(nextAds)) * sample.scale * Math.PI / 180;
     const yawRadius = radius / Math.cos(Math.min(1.54, Math.abs(target.pitch) + radius));
@@ -1245,7 +1338,7 @@
     if (weapon.pellets !== 1 || target.distance > Math.min(options.hipRange, HIP_RANGE_LIMIT) ||
         player?.grounded !== true ||
         Math.hypot(player.vel?.[0] || 0, player.vel?.[2] || 0) > 0.5 ||
-        runtime.seedSync.status === 'diverged' ||
+        runtime.seedSync.status === 'count-diverged' ||
         (frame.buttons & (4 | 32 | 128)) ||
         ![weapon.hipSpread, weapon.adsSpread, weapon.moveSpread,
           ws.ads, ws.bloom, ws.switching].every(Number.isFinite) ||
@@ -1505,6 +1598,17 @@
     return best;
   }
 
+  function agentAmmoLoot(client, me, ammoType, maxDistance) {
+    let nearest = null, nearestDistance = maxDistance;
+    for (const item of client.loot?.items?.values?.() || []) {
+      if (item?.kind !== 'ammo' || item.ammo !== ammoType || !vector3(item.pos) ||
+          Math.abs(item.pos[1] - me.pos[1]) > 2.5) continue;
+      const distance = Math.hypot(item.pos[0] - me.pos[0], item.pos[2] - me.pos[2]);
+      if (distance < nearestDistance) { nearest = item; nearestDistance = distance; }
+    }
+    return nearest;
+  }
+
   function agentInput(client, frame) {
     const agent = runtime.agent;
     agent.target = null;
@@ -1548,8 +1652,8 @@
     const stormDistance = storm ? Math.hypot(me.pos[0] - storm.center[0], me.pos[2] - storm.center[1]) : 0;
     const stormMargin = storm ? Math.min(8, Math.max(0, storm.radius) * 0.25) : 0;
     const stormUrgent = storm && stormDistance > Math.max(0, storm.radius - stormMargin);
-    const reserve = client.predictor?.ammo?.[weapon?.ammo] || 0;
-    const outOfAmmo = !!slot && slot.mag <= 0 && reserve <= 0;
+    const reserve = client.predictor?.ammo?.[weapon?.ammo];
+    const outOfAmmo = !!slot && slot.mag <= 0 && !(reserve > 0);
     const otherSlot = client.predictor?.slots?.[1 - (client.predictor?.active ?? 0)];
     const alternateSlotReady = !!otherSlot?.weapon && otherSlot.mag > 0;
     const sidearmUpgrade = weapon?.class === 'pistol' &&
@@ -1567,6 +1671,14 @@
     const weaponItem = !stormUrgent && !shouldSwap && weakWeapon &&
       (!target || target.distance > 30 || !weapon || outOfAmmo)
       ? agentWeaponLoot(client, me, slot) : null;
+    const nearbyThreat = (client.remoteFrames || []).some(({ snap }) =>
+      enemy(client, snap, true) &&
+      Math.hypot(snap.p[0] - me.pos[0], snap.p[2] - me.pos[2]) < 45);
+    const ammoItem = !stormUrgent && !shouldSwap && !weaponItem && slot &&
+      (outOfAmmo || (Number.isFinite(reserve) &&
+        reserve < Math.max(1, weapon?.magSize || 0) &&
+        !nearbyThreat && (!target || target.distance > 60)))
+      ? agentAmmoLoot(client, me, weapon?.ammo, outOfAmmo ? 75 : 45) : null;
     let goal = null, action = 'engage', stopAt = 0, sprint = false;
     if (stormUrgent) {
       const safeRadius = Math.max(0, storm.radius - stormMargin - 1);
@@ -1582,6 +1694,12 @@
       const itemDistance = Math.hypot(weaponItem.pos[0] - me.pos[0],
         weaponItem.pos[1] + 0.15 - (me.pos[1] + 1.62), weaponItem.pos[2] - me.pos[2]);
       action = itemDistance <= 2.5 ? 'loot-aim' : 'loot-travel';
+    } else if (ammoItem) {
+      goal = { kind: 'ammo', id: ammoItem.id,
+        position: [ammoItem.pos[0], ammoItem.pos[2]], height: ammoItem.pos[1] };
+      const itemDistance = Math.hypot(ammoItem.pos[0] - me.pos[0],
+        ammoItem.pos[1] + 0.15 - (me.pos[1] + 1.62), ammoItem.pos[2] - me.pos[2]);
+      action = itemDistance <= 2.5 ? 'loot-aim' : 'loot-travel';
     } else if (target && weapon && !(slot && slot.mag <= 0 &&
         !(client.predictor?.ammo?.[weapon.ammo] > 0))) {
       const classDistance = { sniper: 150, rifle: 70, smg: 30, pistol: 25, shotgun: 13 };
@@ -1593,25 +1711,7 @@
         action = 'approach'; sprint = true;
       }
     } else {
-      const ammoType = weapon?.ammo;
-      const reserve = client.predictor?.ammo?.[ammoType] || 0;
-      if (slot && slot.mag <= 0 && reserve <= 0) {
-        let nearest = null, nearestDistance = 40;
-        for (const item of client.loot?.items?.values?.() || []) {
-          if (item?.kind !== 'ammo' || item.ammo !== ammoType || !vector3(item.pos) ||
-              Math.abs(item.pos[1] - me.pos[1]) > 2.5) continue;
-          const distance = Math.hypot(item.pos[0] - me.pos[0], item.pos[2] - me.pos[2]);
-          if (distance < nearestDistance) { nearest = item; nearestDistance = distance; }
-        }
-        if (nearest) {
-          goal = { kind: 'ammo', id: nearest.id, position: [nearest.pos[0], nearest.pos[2]],
-            height: nearest.pos[1] };
-          const itemDistance = Math.hypot(nearest.pos[0] - me.pos[0],
-            nearest.pos[1] + 0.15 - (me.pos[1] + 1.62), nearest.pos[2] - me.pos[2]);
-          action = itemDistance <= 2.5 ? 'loot-aim' : 'loot-travel';
-        }
-      }
-      if (!goal && slot && slot.mag <= 0 && reserve <= 0) {
+      if (outOfAmmo) {
         agentNote('no-ammo');
         return frame;
       }
@@ -2371,7 +2471,7 @@
     const metrics = 'AIM ' + runtime.rewrites + ' redirected / ' + runtime.stealth.heldShots +
       ' fire frames held / SERVER ' + runtime.server.hits + ' hits, ' + runtime.server.shots +
       ' shots / AGENT ' + (options.agent ? runtime.agent.action : 'off') +
-      ' / SEED ' + runtime.seedSync.status;
+      ' / SHOT COUNT ' + runtime.seedSync.status;
     root.querySelector('[data-live-metrics]').textContent = metrics;
     stats.textContent = 'TARGET ' + targetName + targetRange + targetPart +
       ' / ' + runtime.compensated + ' shot corrections / ' + metrics +
