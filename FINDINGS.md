@@ -165,6 +165,34 @@ switch body parts. The analyzer now reports requested and selected aim points
 by weapon, using saved settings for older traces and a direct per-decision
 field in new traces. Server headshot and hit outcomes for 1.5.12 remain untested.
 
+### Version 1.5.13 multi-pellet correction
+
+The 1.5.11 export retained three locally predicted Breacher shotgun shots at
+188.7, 207.4, and 206.1 m. Although 1.5.11 corrected the *average* pellet
+direction toward the selected chest, the nearest projected pellets still missed
+the selected point by 2.58, 3.25, and 5.16 m respectively. A local replay of the
+1.5.13 correction functions using those recorded pellet directions, shot eyes,
+and target points projects zero intersections with the captured client's torso
+box under the old outgoing angles and one under the new candidate angle for
+each shot. The captured client defines the torso box as 0.5 m wide in both
+horizontal axes, with height derived from crouch. The replay used standing
+height because the older target snapshots did not retain crouch. Even at a
+crouched height, the new candidate centers one pellet in the selected box.
+An independent 1,000-seed local sweep used the hash-matched captured spread
+function with the Breacher's eight pellets, 3.6-degree pellet spread, and a
+standing chest at 200 m. The old average-direction angle produced a local
+hitbox intersection in 10 of 1,000 simulated shots; the new angle did so in
+1,000 of 1,000. This checks the spread rotation against the captured kernel,
+not the current server or its target rewind.
+
+Version 1.5.13 evaluates the average and each sampled pellet offset, then
+chooses the reachable outgoing angle with the most projected intersections.
+It records projected pellet counts before and after correction in future traces.
+Single-projectile correction and the existing Fire cadence remain unchanged.
+These are local geometric predictions, not server-confirmed hits; no 1.5.13
+server match has been recorded. The captured weapon model still enforces its
+fire mode, cooldown, and ammunition; this change does not create extra shots.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

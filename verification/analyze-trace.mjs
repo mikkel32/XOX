@@ -235,6 +235,22 @@ export function analyzeTrace(document) {
   })).sort((a, b) => a.weapon.localeCompare(b.weapon) ||
     a.distance.localeCompare(b.distance) || a.movement.localeCompare(b.movement));
 
+  const multiPellet = sent.filter(item => item.localShotPredicted &&
+    finite(item.weapon?.stats?.pellets) && item.weapon.stats.pellets > 1);
+  const measuredPellets = multiPellet.filter(item =>
+    finite(item.geometry?.projectedPelletHitsInput) &&
+    finite(item.geometry?.projectedPelletHitsOutgoing));
+  const pelletProjection = { retainedMultiPelletShots: multiPellet.length,
+    measured: measuredPellets.length,
+    noProjectedHitsBefore: measuredPellets.filter(item =>
+      item.geometry.projectedPelletHitsInput === 0).length,
+    noProjectedHitsAfter: measuredPellets.filter(item =>
+      item.geometry.projectedPelletHitsOutgoing === 0).length,
+    projectedHitsBefore: measuredPellets.reduce((sum, item) =>
+      sum + item.geometry.projectedPelletHitsInput, 0),
+    projectedHitsAfter: measuredPellets.reduce((sum, item) =>
+      sum + item.geometry.projectedPelletHitsOutgoing, 0) };
+
   const server = { shots: 0, hits: 0, kills: 0, damage: 0, headshots: 0 };
   for (const event of events) {
     if (event?.type === 'shot') server.shots++;
@@ -371,6 +387,7 @@ export function analyzeTrace(document) {
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
     inputButtons, firingEvidence, interactionEvidence, ammoAssist, predictionConsistency,
+    pelletProjection,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
       ackCoverage, missingWeapon, missingDistance,
       missingPrediction, missingPredictionWithCooldown, missingPredictionWithoutCooldown,
@@ -387,6 +404,7 @@ export function analyzeTrace(document) {
       'Button names use the captured client bit map: Fire 1, Aim 2, Interact 64 (F/E).',
       'A Fire input held during recorded weapon cooldown may have no local shot prediction; this is normal for automatic fire.',
       'A locally predicted shot whose Fire bit is removed before send can desynchronize shot seed, bloom, and cooldown until reconciliation.',
+      'Projected pellet hits use the captured client hitboxes and locally predicted spread; they are not server-confirmed hits.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
       'Retained buffers may cover different time windows; inspect dropped counts before comparing totals.'
@@ -420,6 +438,7 @@ export function formatReport(report) {
       `server shot events ${report.firingEvidence.serverShotEvents}`,
     `Prediction/send overlap: ${report.predictionConsistency.overlappingFrames} retained frames with local shots; ` +
       `${report.predictionConsistency.predictedFireRemovedOnWire} had Fire removed before send`,
+    `Local multi-pellet projection: ${JSON.stringify(report.pelletProjection)}`,
     `Interact button bit 64 (retained rows): original game samples ` +
       `${report.inputButtons.originalGateSamples.byButton.interact}, prepared samples ` +
       `${report.inputButtons.preparedGateSamples.byButton.interact}, pre-send frames ` +

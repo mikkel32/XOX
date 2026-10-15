@@ -80,6 +80,27 @@ test('aim report exposes explicit point overrides in old and new trace rows', as
   assert.match(formatReport(report), /Requested vs selected aim points/);
 });
 
+test('multi-pellet report keeps local hit projections separate from server hits', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.13', trace: {
+    aimDecisions: [
+      { fireSent: true, localShotPredicted: true, weaponId: 'breacher',
+        weapon: { stats: { pellets: 8 } },
+        geometry: { projectedPelletHitsInput: 0, projectedPelletHitsOutgoing: 1 } },
+      { fireSent: true, localShotPredicted: true, weaponId: 'breacher',
+        weapon: { stats: { pellets: 8 } },
+        geometry: { projectedPelletHitsInput: 2, projectedPelletHitsOutgoing: 3 } }
+    ],
+    serverEvents: [{ type: 'shot' }]
+  } });
+  assert.deepEqual(report.pelletProjection, {
+    retainedMultiPelletShots: 2, measured: 2,
+    noProjectedHitsBefore: 1, noProjectedHitsAfter: 0,
+    projectedHitsBefore: 2, projectedHitsAfter: 4
+  });
+  assert.equal(report.serverEvents.hits, 0);
+});
+
 test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.10', trace: {

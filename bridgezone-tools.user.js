@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.12
+// @version      1.5.13
 // @description  Xray, adaptive Rage aim, auto fire, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.12';
+  const VERSION = '1.5.13';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
@@ -304,7 +304,8 @@
       best = {
         index: snap.i, distance, direction: aimDelta.map(value => value / Math.hypot(...aimDelta)),
         yaw, pitch, origin: [...origin], point: [...point], position: [...snap.p],
-        velocity: vector3(snap.v), aimPart: visibility === 'fallback'
+        velocity: vector3(snap.v), bodyHeight: bodyHeight(snap.c),
+        aimPart: visibility === 'fallback'
           ? (preferred === 'chest' ? 'head' : 'chest') : (preferred === 'chest' ? 'chest' : 'head'),
         visibility, sampled
       };
@@ -324,29 +325,44 @@
       !client.localDead?.() && !client.localDowned?.() && client.latest?.phase !== 'finished';
   }
 
-  function compensateSpread(shot, target) {
+  function compensateSpread(shot, target, turnFrom = null) {
     if (!Array.isArray(shot?.directions) || !shot.directions.length ||
         !shot.directions.every(direction => Array.isArray(direction) &&
           direction.length === 3 && direction.every(Number.isFinite))) return null;
-    // A single projectile can be corrected directly. For multiple pellets,
-    // align their average direction; their individual spread still remains.
-    const d = shot.directions.reduce((sum, direction) => sum.map((value, i) => value + direction[i]), [0, 0, 0]);
+    // The shared kernel rotates the same sampled spread offsets with outgoing
+    // yaw/pitch. For pellets, try centering each ray and keep the angle that
+    // intersects the most of the selected hitbox.
+    const directions = shot.directions.slice(0, 32);
+    const average = directions.reduce((sum, direction) => sum.map((value, i) => value + direction[i]), [0, 0, 0]);
     const y = shot.yaw, p = shot.pitch;
     const forward = [-Math.sin(y) * Math.cos(p), Math.sin(p), -Math.cos(y) * Math.cos(p)];
     const right = [Math.cos(y), 0, -Math.sin(y)];
     const up = [Math.sin(y) * Math.sin(p), Math.cos(p), Math.cos(y) * Math.sin(p)];
     const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
-    const denom = dot(d, forward);
-    if (denom <= 0 || !Number.isFinite(denom)) return null;
-    const u = dot(d, right) / denom, m = dot(d, up) / denom;
-    const arg = Math.hypot(1, u, m) * target.direction[1] / Math.hypot(1, m);
-    if (!Number.isFinite(arg) || Math.abs(arg) > 1) return null;
-    const pitch = Math.asin(arg) - Math.atan(m);
-    if (Math.abs(pitch) > 1.54) return null;
-    const a = -Math.cos(pitch) + m * Math.sin(pitch);
-    const rawYaw = target.yaw + Math.atan2(u, -a);
-    const yaw = Math.atan2(Math.sin(rawYaw), Math.cos(rawYaw));
-    return { yaw, pitch };
+    let best = null, bestHits = -1, bestMiss = Infinity;
+    for (const direction of directions.length === 1 ? directions : [average, ...directions]) {
+      const denom = dot(direction, forward);
+      if (denom <= 0 || !Number.isFinite(denom)) continue;
+      const u = dot(direction, right) / denom, m = dot(direction, up) / denom;
+      const arg = Math.hypot(1, u, m) * target.direction[1] / Math.hypot(1, m);
+      if (!Number.isFinite(arg) || Math.abs(arg) > 1) continue;
+      const pitch = Math.asin(arg) - Math.atan(m);
+      if (Math.abs(pitch) > 1.54) continue;
+      const a = -Math.cos(pitch) + m * Math.sin(pitch);
+      const rawYaw = target.yaw + Math.atan2(u, -a);
+      const yaw = Math.atan2(Math.sin(rawYaw), Math.cos(rawYaw));
+      if (turnFrom && (Math.abs(normalizedDelta(turnFrom.yaw, yaw)) > MAX_OUTGOING_TURN ||
+          Math.abs(pitch - turnFrom.pitch) > MAX_OUTGOING_TURN)) continue;
+      if (directions.length === 1) return { yaw, pitch };
+      const hits = projectedPelletHits(shot, target, yaw, pitch) ?? 0;
+      const miss = predictedMiss(shot, target, yaw, pitch)?.meanMeters ?? Infinity;
+      if (hits > bestHits || (hits === bestHits && miss < bestMiss)) {
+        best = { yaw, pitch };
+        bestHits = hits;
+        bestMiss = miss;
+      }
+    }
+    return best;
   }
 
   function safeWeaponId(value) {
@@ -448,6 +464,7 @@
     return target ? { index: target.index, distance: target.distance,
       origin: vector3(target.origin), point: vector3(target.point),
       position: vector3(target.position), velocity: vector3(target.velocity),
+      bodyHeight: Number.isFinite(target.bodyHeight) ? target.bodyHeight : null,
       aimPart: target.aimPart, visibility: target.visibility, sampled: target.sampled } : null;
   }
 
@@ -490,6 +507,40 @@
       minMeters: ahead ? min : null, meanMeters: ahead ? sum / ahead : null, maxMeters: ahead ? max : null };
   }
 
+  function projectedPelletHits(shot, target, yaw, pitch) {
+    const eye = vector3(shot?.eye), center = vector3(target?.point);
+    if (!eye || !center || !Array.isArray(shot.directions) ||
+        !Number.isFinite(shot.yaw) || !Number.isFinite(shot.pitch) ||
+        !Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;
+    const source = aimBasis(shot.yaw, shot.pitch), destination = aimBasis(yaw, pitch);
+    const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
+    const halfWidth = target.aimPart === 'head' ? 0.14 : 0.25;
+    const halfHeight = target.aimPart === 'head' ? 0.14 :
+      Math.max(0.1, (Number.isFinite(target.bodyHeight) ? target.bodyHeight : 1.8) / 4 - 0.14);
+    const half = [halfWidth, halfHeight, halfWidth];
+    let hits = 0;
+    for (const direction of shot.directions.slice(0, 32)) {
+      if (!vector3(direction)) continue;
+      const components = [dot(direction, source.right), dot(direction, source.up), dot(direction, source.forward)];
+      const ray = destination.forward.map((value, i) =>
+        components[0] * destination.right[i] + components[1] * destination.up[i] + components[2] * value);
+      let near = 0, far = 600;
+      for (let axis = 0; axis < 3; axis++) {
+        const low = center[axis] - half[axis], high = center[axis] + half[axis];
+        if (Math.abs(ray[axis]) < 1e-9) {
+          if (eye[axis] < low || eye[axis] > high) { far = -1; break; }
+        } else {
+          const first = (low - eye[axis]) / ray[axis], last = (high - eye[axis]) / ray[axis];
+          near = Math.max(near, Math.min(first, last));
+          far = Math.min(far, Math.max(first, last));
+          if (near > far) break;
+        }
+      }
+      if (near <= far && far >= 0) hits++;
+    }
+    return hits;
+  }
+
   function recordAimDecision(client, frame, target, shot, correction, buttons, yaw, pitch, reason) {
     const weapon = weaponSnapshot(client);
     const player = playerSnapshot(client);
@@ -520,7 +571,9 @@
         inputAim: angularMiss(target, frame.yaw, frame.pitch),
         outgoingAim: angularMiss(target, yaw, pitch),
         predictedInput: predictedMiss(shot, target, frame.yaw, frame.pitch),
-        predictedOutgoing: predictedMiss(shot, target, yaw, pitch)
+        predictedOutgoing: predictedMiss(shot, target, yaw, pitch),
+        projectedPelletHitsInput: projectedPelletHits(shot, target, frame.yaw, frame.pitch),
+        projectedPelletHitsOutgoing: projectedPelletHits(shot, target, yaw, pitch)
       } : null
     });
   }
@@ -680,10 +733,8 @@
       let desired = target || { yaw: frame.yaw, pitch: frame.pitch };
       let correction = null;
       if (target && (frame.buttons & 1)) {
-        const candidate = compensateSpread(shot, target);
-        // Do not defer a locally predicted shot just to chase an unreachable spread correction.
-        if (candidate && Math.abs(normalizedDelta(state.yaw, candidate.yaw)) <= MAX_OUTGOING_TURN &&
-            Math.abs(candidate.pitch - state.pitch) <= MAX_OUTGOING_TURN) correction = candidate;
+        // Do not defer a predicted shot to chase an unreachable correction.
+        correction = compensateSpread(shot, target, state);
         desired = applyStealth(frame, correction || target);
       }
       const yawStep = Math.max(-MAX_OUTGOING_TURN, Math.min(MAX_OUTGOING_TURN,

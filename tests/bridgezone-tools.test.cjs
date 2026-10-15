@@ -1240,7 +1240,48 @@ test('captured single-projectile spread is inverted against the actual game func
   assert.equal(fake.client.input.sample, fake.originalSample);
 });
 
-test('multiple projectile predictions correct their average direction', () => {
+test('captured eight-pellet spread lands a chest ray after outgoing correction', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const pellets = vm.runInNewContext(['tl', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') + ';tU', {
+    tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value))
+  });
+  const weapon = { pellets: 8, pelletSpread: 3.6 };
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -200] }) }];
+  let seed = 1;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: true, dirs: pellets(weapon, input.yaw, input.pitch, 3.2, seed) } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, point: 'chest', range: 600 });
+  for (seed = 1; seed <= 32; seed++) {
+    const input = frame({ s: 5000 + seed, yaw: 0, pitch: 0, buttons: 1 });
+    fake.client.predictor.predict(input);
+    const output = send(fake, [input])[0];
+    const actual = pellets(weapon, output.yaw, output.pitch, 3.2, seed);
+    assert.ok(actual.some(direction => {
+      if (direction[2] >= 0) return false;
+      const distance = -200 / direction[2];
+      const x = distance * direction[0], y = 1.62 + distance * direction[1];
+      return Math.abs(x) <= 0.25 && y >= 0.9 && y <= 1.52;
+    }), `seed ${seed} should land at least one pellet in the captured torso box`);
+  }
+  h.api.destroy();
+});
+
+test('multiple projectile predictions center a pellet when their average misses the hitbox', () => {
   const h = harness();
   const fake = rageClient();
   fake.client.predictor.predict = () => ({
@@ -1249,10 +1290,50 @@ test('multiple projectile predictions correct their average direction', () => {
   attach(h, fake);
   const input = frame();
   fake.client.predictor.predict(input);
-  const output = send(fake, [input])[0];
-  assert.ok(output.yaw > Math.atan2(-2, 10), 'outgoing yaw offsets the pellet centroid');
-  assert.ok(output.yaw < 0, 'the correction remains toward the target');
+  send(fake, [input]);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.geometry.projectedPelletHitsInput, 0);
+  assert.equal(decision.geometry.projectedPelletHitsOutgoing, 1,
+    'centering one pellet lands a local ray that the average would miss');
+  assert.ok(decision.geometry.predictedOutgoing.minMeters < 0.001);
   assert.equal(h.api.runtime.compensated, 1);
+});
+
+test('bounded stealth correction lands a predicted pellet without exceeding one turn', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -200] }) }];
+  fake.client.predictor.predict = () => ({
+    eye: [0, 1.62, 0], weapon: { fired: true, dirs: [[0, 0, -1], [0.1, 0, -0.99]] }
+  });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, point: 'chest', range: 600 });
+  const input = frame({ s: 24 });
+  fake.client.predictor.predict(input);
+  const output = send(fake, [input])[0];
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(decision.geometry.projectedPelletHitsInput, 0);
+  assert.equal(decision.geometry.projectedPelletHitsOutgoing, 1);
+  assert.ok(Math.abs(output.yaw) <= 8 * Math.PI / 180);
+  assert.ok(Math.abs(output.pitch) <= 8 * Math.PI / 180);
+  h.api.destroy();
+});
+
+test('multiple projectile correction keeps the average when it lands more pellets', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -5] }) }];
+  fake.client.predictor.predict = () => ({
+    eye: [0, 1.62, 0], weapon: { fired: true, dirs: [[-0.02, 0, -1], [0.02, 0, -1]] }
+  });
+  attach(h, fake);
+  const input = frame({ s: 26 });
+  fake.client.predictor.predict(input);
+  send(fake, [input]);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.geometry.projectedPelletHitsOutgoing, 2);
+  assert.equal(decision.target.aimPart, 'head');
 });
 
 const runtimePath = path.join(__dirname, '..', 'research', 'turbopack-37jd2rjmtu1y9.js');
@@ -1801,7 +1882,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.12');
+  assert.equal(exported.scriptVersion, '1.5.13');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -1833,7 +1914,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.12');
+  assert.equal(payload.scriptVersion, '1.5.13');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
