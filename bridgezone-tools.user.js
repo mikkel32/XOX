@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.8
+// @version      1.5.9
 // @description  Xray, 360-degree Rage, auto fire, and server-consistent reloads.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,13 +15,14 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.8';
+  const VERSION = '1.5.9';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
+  const INTERACT_BUTTON = 64;
   const TRACE_LIMITS = Object.freeze({ frames: 4096, localShots: 512, aimDecisions: 512,
     fireGates: 512, serverSnapshots: 1024, serverEvents: 1024,
-    settings: 64, kicks: 64, connectionStates: 128, errors: 128 });
+    settings: 64, interactions: 128, kicks: 64, connectionStates: 128, errors: 128 });
   const defaults = { xray: true, loot: true, silent: true, rage: false, rapidFire: true, fov: 90, range: 600, point: 'auto', visibleOnly: true, stealth: true, smooth: 1, ammo: true };
   const options = { ...defaults };
   const runtime = {
@@ -54,6 +55,7 @@
     serverSnapshots: [],
     serverEvents: [],
     settings: [],
+    interactions: [],
     kicks: [],
     connectionStates: [],
     errors: [],
@@ -82,6 +84,7 @@
       recordTrace('frames', {
         at: performance.now(), match: runtime.trace.match,
         sequence: after.s, tick: after.vt, buttons: after.buttons,
+        sampledButtons: before.buttons,
         before: [before.yaw, before.pitch, before.mx, before.mz],
         after: [after.yaw, after.pitch, after.mx, after.mz]
       });
@@ -533,9 +536,28 @@
   function holdStealthShot(client, frame) {
     if (!options.stealth || !playable(client) || !frame ||
         ![frame.yaw, frame.pitch].every(Number.isFinite)) return frame;
+    if (frame.buttons & INTERACT_BUTTON) return frame.buttons & 1
+      ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     const state = runtime.outgoingAim;
     const now = performance.now();
-    if (options.rage) state.pendingManualUntil = 0;
+    if (options.rage) {
+      state.pendingManualUntil = 0;
+      if (!(frame.buttons & 1)) return frame;
+      const tick = Number.isFinite(frame.vt) ? frame.vt : client.renderTick?.();
+      const target = selectTarget(client, { ...frame, vt: tick });
+      const reachable = target && state.yaw !== null && state.pitch !== null &&
+        Math.abs(normalizedDelta(state.yaw, target.yaw)) <= MAX_OUTGOING_TURN &&
+        Math.abs(state.pitch - target.pitch) <= MAX_OUTGOING_TURN;
+      // Exact prior-frame alignment deadlocks on moving targets. Let one-turn
+      // shots reach the outgoing rewrite, which checks current alignment and
+      // holds any shot it cannot aim on the wire.
+      if (!reachable) {
+        runtime.sampleHoldReason = target ? 'aligning' : 'target-lost-at-sample';
+        runtime.stealth.heldShots++;
+        return { ...frame, buttons: frame.buttons & ~1 };
+      }
+      return frame;
+    }
     if (state.pendingManualUntil && now > state.pendingManualUntil) state.pendingManualUntil = 0;
     const requestedFire = !!(frame.buttons & 1);
     if (!requestedFire && !state.pendingManualUntil) return frame;
@@ -602,6 +624,15 @@
     let modified = false;
     const result = frames.map(frame => {
       if (!frame || ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) return frame;
+      if (frame.buttons & INTERACT_BUTTON) {
+        // Interaction and pickup use the player's real view. Match the next
+        // turn to the angles that were actually sent during this frame.
+        state.yaw = frame.yaw;
+        state.pitch = frame.pitch;
+        state.targetIndex = null;
+        state.ready = false;
+        return frame;
+      }
       if (state.yaw === null) { state.yaw = frame.yaw; state.pitch = frame.pitch; }
       if (state.pendingManualUntil && performance.now() > state.pendingManualUntil) state.pendingManualUntil = 0;
       const shot = runtime.predictions.get(frame.s);
@@ -670,7 +701,8 @@
 
     let modified = false;
     const result = frames.map(frame => {
-      if (!(frame.buttons & 1) || (frame.buttons & 4) || ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) return frame;
+      if (!(frame.buttons & 1) || (frame.buttons & (4 | INTERACT_BUTTON)) ||
+          ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) return frame;
       const shot = runtime.predictions.get(frame.s);
       runtime.predictions.delete(frame.s);
       const target = selectTarget(client, frame, shot?.eye);
@@ -742,6 +774,10 @@
 
   function rageInput(client, frame) {
     if (!options.rage) return frame;
+    if (frame.buttons & INTERACT_BUTTON) {
+      runtime.sampleGate = { reason: 'interaction', target: null, scan: null };
+      return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
+    }
     if (!playable(client)) {
       runtime.sampleGate = { reason: 'unplayable', target: null, scan: null };
       return frame;
@@ -760,9 +796,9 @@
       observed: 0, counts: {}, closest: null, selected: null };
     const target = selectTarget(client, { ...frame, vt: tick }, null, scan);
     if (!target) {
-      // Stay scoped before a target appears so the first shot is not a hip shot.
+      // Do not hold ADS or suppress sprint while travelling between targets.
       runtime.sampleGate = { reason: 'no-target', target: null, scan };
-      return { ...frame, buttons: scopedButtons };
+      return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
     const ws = predictor.ws;
     let buttons = scopedButtons;
@@ -798,14 +834,25 @@
       Math.round((gate.target?.distance || 0) / 25)].join(':');
     if (runtime.lastGateTrace?.key === key && now - runtime.lastGateTrace.at < 250) return;
     runtime.lastGateTrace = { key, at: now };
+    const aim = runtime.outgoingAim;
+    const target = gate.target;
+    const yawGap = target && Number.isFinite(aim.yaw)
+      ? Math.abs(normalizedDelta(aim.yaw, target.yaw)) : null;
+    const pitchGap = target && Number.isFinite(aim.pitch)
+      ? Math.abs(aim.pitch - target.pitch) : null;
     recordTrace('fireGates', { at: now, match: runtime.trace.match, sequence: original.s,
       tick: original.vt, reason, originalButtons: original.buttons, sampledButtons: prepared.buttons,
       inputMovement: [original.mx, original.mz], weapon, player: playerSnapshot(client),
-      target: targetSnapshot(gate.target), scan: gate.scan });
+      target: targetSnapshot(target), scan: gate.scan,
+      aimState: { targetIndex: aim.targetIndex, ready: aim.ready,
+        yawGapDegrees: yawGap === null ? null : yawGap * 180 / Math.PI,
+        pitchGapDegrees: pitchGap === null ? null : pitchGap * 180 / Math.PI,
+        withinOneTurn: yawGap !== null && pitchGap !== null &&
+          yawGap <= MAX_OUTGOING_TURN && pitchGap <= MAX_OUTGOING_TURN } });
   }
 
   function autoReloadFrame(client, frame) {
-    if (!options.ammo) return frame;
+    if (!options.ammo || (frame.buttons & INTERACT_BUTTON)) return frame;
     const predictor = client.predictor;
     const weapon = predictor?.activeStats;
     if (!predictor || !weapon || !Number.isInteger(predictor.active)) return frame;
@@ -1169,23 +1216,31 @@
       const loot = client.loot;
       const now = performance.now();
       if (lootCacheClient !== client || now - lootCacheAt >= 200) {
-      const nearby = [];
-      for (const item of loot.items?.values() || []) {
-        if (item.kind !== 'weapon' || !Array.isArray(item.pos) || item.pos.length !== 3 || !item.pos.every(Number.isFinite)) continue;
-        const distance = Math.hypot(...item.pos.map((value, i) => value - me.pos[i]));
-        if (distance <= 100) nearby.push({ id: item.id, kind: 'item', pos: item.pos, distance, rarity: item.rarity });
+        const nearby = [];
+        const activeAmmo = client.predictor?.activeStats?.ammo;
+        for (const item of loot.items?.values() || []) {
+          if (!['weapon', 'ammo'].includes(item.kind) || !Array.isArray(item.pos) ||
+              item.pos.length !== 3 || !item.pos.every(Number.isFinite)) continue;
+          const distance = Math.hypot(...item.pos.map((value, i) => value - me.pos[i]));
+          if (distance <= 100) nearby.push({ id: item.id, kind: 'item', pos: item.pos,
+            distance, rarity: item.kind === 'ammo' ? 'ammo' : item.rarity,
+            priority: item.kind === 'ammo' && typeof activeAmmo === 'string' &&
+              item.ammo === activeAmmo ? 1 : 0 });
+        }
+        for (const crate of loot.crates || []) {
+          if (loot.opened?.has(crate.id) || !Array.isArray(crate.pos) ||
+              crate.pos.length !== 3 || !crate.pos.every(Number.isFinite)) continue;
+          const distance = Math.hypot(...crate.pos.map((value, i) => value - me.pos[i]));
+          if (distance <= 100) nearby.push({ id: crate.id, kind: 'crate', pos: crate.pos,
+            distance, rarity: 'legendary', priority: 0 });
+        }
+        nearby.sort((a, b) => b.priority - a.priority || a.distance - b.distance);
+        lootCache = nearby;
+        lootCacheAt = now;
+        lootCacheClient = client;
       }
-      for (const crate of loot.crates || []) {
-        if (loot.opened?.has(crate.id) || !Array.isArray(crate.pos) || crate.pos.length !== 3 || !crate.pos.every(Number.isFinite)) continue;
-        const distance = Math.hypot(...crate.pos.map((value, i) => value - me.pos[i]));
-        if (distance <= 100) nearby.push({ id: crate.id, kind: 'crate', pos: crate.pos, distance, rarity: 'legendary' });
-      }
-      nearby.sort((a, b) => a.distance - b.distance);
-      lootCache = nearby;
-      lootCacheAt = now;
-      lootCacheClient = client;
-      }
-      const colors = { common: '#ccd4df', uncommon: '#87ea9a', rare: '#75baff', epic: '#c69aff', legendary: '#ffbd58' };
+      const colors = { common: '#ccd4df', uncommon: '#87ea9a', rare: '#75baff',
+        epic: '#c69aff', legendary: '#ffbd58', ammo: '#59f6d2' };
       let visible = 0;
       for (const item of lootCache) {
         if (item.kind === 'item' && !loot.items?.has(item.id)) continue;
@@ -1193,7 +1248,8 @@
         const screen = project([item.pos[0], item.pos[1] + 0.3, item.pos[2]], camera, bounds);
         if (!screen || screen[0] < bounds.left || screen[0] > bounds.right || screen[1] < bounds.top || screen[1] > bounds.bottom) continue;
         const description = loot.describe?.({ kind: item.kind, id: item.id }, false);
-        const text = String(description?.label || (item.kind === 'crate' ? 'Crate' : 'Weapon')).slice(0, 30) + ' / ' + Math.round(item.distance) + 'm';
+        const text = String(description?.label || (item.kind === 'crate' ? 'Crate' :
+          item.rarity === 'ammo' ? 'Ammo' : 'Weapon')).slice(0, 30) + ' / ' + Math.round(item.distance) + 'm';
         const color = colors[item.rarity] || '#ccd4df';
         painter.strokeStyle = color; painter.strokeRect(screen[0] - 3, screen[1] - 3, 6, 6);
         labelAt(text, screen[0], screen[1] - 2, color);
@@ -1235,6 +1291,15 @@
     stats.textContent = 'TARGET ' + targetName + targetRange + ' / ' + runtime.compensated + ' shot corrections / ' + metrics;
   }
 
+  function resumeGame() {
+    const canvas = runtime.client?.canvas;
+    if (!canvas || document.pointerLockElement === canvas) return;
+    try {
+      const request = canvas.requestPointerLock?.();
+      if (request && typeof request.catch === 'function') request.catch(() => {});
+    } catch { /* The game can still restore pointer lock with a canvas click. */ }
+  }
+
   function mount() {
     if (host || runtime.stopped || !zonePage()) return;
     host = document.createElement('div');
@@ -1245,7 +1310,8 @@
       :host{color-scheme:dark;font:13px system-ui,sans-serif;color:#edf5ff}
       *{box-sizing:border-box}canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
       aside{position:absolute;top:20px;right:20px;width:300px;max-width:calc(100vw - 32px);max-height:calc(100vh - 40px);pointer-events:auto;background:#0b101ded;border:1px solid #334454;border-top:2px solid #59f6d2;border-radius:12px;box-shadow:0 14px 50px #0008;overflow:auto}
-      header{padding:17px 18px 13px;border-bottom:1px solid #25313e;display:flex;justify-content:space-between;align-items:center}
+      header{padding:17px 18px 13px;border-bottom:1px solid #25313e;display:flex;justify-content:space-between;align-items:center;gap:10px}
+      .header-actions{display:flex;gap:6px}.resume{color:#081019;background:#59f6d2;border-color:#59f6d2}
       small{display:block;font:10px ui-monospace,monospace;letter-spacing:2px;color:#59f6d2;margin-bottom:4px}h2{font-size:18px;letter-spacing:-.5px;margin:0}
       button{font:inherit;color:#9ab0c5;border:1px solid #354252;background:#111b28;border-radius:5px;cursor:pointer;padding:5px 8px}
       .body{padding:6px 18px 14px}label{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;cursor:pointer}
@@ -1259,7 +1325,7 @@
       .show-tools{position:absolute;top:20px;right:20px;pointer-events:auto;border-color:#59f6d2;color:#59f6d2;background:#0b101ded}
       .show-tools[hidden]{display:none}
     </style><canvas aria-hidden="true"></canvas><aside aria-label="BridgeZone tools">
-      <header><div><small>BRIDGEZONE / LOCAL TOOLS v${VERSION}</small><h2>Xray + Silent AIM</h2></div><button aria-label="Hide tools panel">Hide</button></header>
+      <header><div><small>BRIDGEZONE / LOCAL TOOLS v${VERSION}</small><h2>Xray + Silent AIM</h2></div><div class="header-actions"><button class="resume" type="button" data-resume-game>Resume</button><button type="button" data-hide-panel aria-label="Hide tools panel">Hide</button></div></header>
       <div class="live-metrics"><span data-live-metrics>Waiting for a match</span><button type="button" data-download-trace aria-label="Save match trace">Save trace</button></div>
       <div class="body">
         <label class="feature">Xray boxes <span class="key">F8</span><input aria-label="Xray boxes" name="xray" type="checkbox"></label>
@@ -1274,7 +1340,7 @@
         <label class="feature">Anticheat stealth<input name="stealth" aria-label="Anticheat stealth" type="checkbox"></label>
         <label class="feature">Auto reload<input name="ammo" aria-label="Auto reload" type="checkbox"></label>
         <div class="setting"><label for="smooth">Aim smoothing<output data-value="smooth"></output></label><input id="smooth" name="smooth" aria-label="Aim smoothing" type="range" min="0.1" max="0.95" step="0.05"></div>
-        <p class="note">Insert: show/hide. Rage holds scope input between targets, waits for the local scope ramp, and selects clear targets up to the range slider. Fast fire removes the local stealth delay and extra aim jitter, but follows weapon cooldown and server ammo. Shot correction reduces predicted deviation; server spread and camera recoil may remain. Cover still blocks shots. Fire may wait while aim turns; the held count is input frames, not bullets. Use server hits to judge results.</p>
+        <p class="note">Insert: show/hide. Press Resume after using this panel to restore game controls. F/E interaction takes priority over automatic aim and fire. Rage follows weapon scope time, cooldown, and server ammo. Shot correction reduces predicted deviation; server spread and camera recoil may remain. Cover still blocks shots. Use server hits to judge results.</p>
       </div><div class="status"><div role="status"></div><div class="stats"></div></div>
     </aside><button type="button" class="show-tools" data-show-panel hidden aria-label="Show tools panel">Show tools</button>`;
     document.documentElement.appendChild(host);
@@ -1283,9 +1349,11 @@
     showButton = root.querySelector('[data-show-panel]');
     panel.hidden = !panelVisible;
     showButton.hidden = panelVisible;
-    root.querySelector('button').addEventListener('click', () => {
+    root.querySelector('[data-hide-panel]').addEventListener('click', () => {
       panelVisible = false; panel.hidden = true; showButton.hidden = false;
+      resumeGame();
     });
+    root.querySelector('[data-resume-game]').addEventListener('click', resumeGame);
     showButton.addEventListener('click', () => {
       panelVisible = true; panel.hidden = false; showButton.hidden = true;
     });
@@ -1311,7 +1379,7 @@
       const value = control.type === 'checkbox' ? control.checked : control.type === 'range' ? Number(control.value) : control.value;
       setOptions({ [control.name]: value });
     });
-    for (const name of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'keydown', 'keyup', 'wheel']) {
+    for (const name of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'wheel']) {
       root.addEventListener(name, event => event.stopPropagation());
     }
     syncControls();
@@ -1320,6 +1388,7 @@
   }
 
   function onKey(event) {
+    onInteractionKey(event);
     const target = event.composedPath?.()[0] || event.target;
     if (!zonePage() || event.repeat || event.ctrlKey || event.altKey || event.metaKey || target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName)) return;
     if (!['F8', 'F9', 'Insert'].includes(event.code)) return;
@@ -1332,6 +1401,31 @@
       if (showButton) showButton.hidden = panelVisible;
     }
   }
+
+  function recordInteractionEvent(phase, key = null, event = null) {
+    if (!zonePage()) return;
+    const canvas = runtime.client?.canvas;
+    const path = event?.composedPath?.();
+    recordTrace('interactions', {
+      at: performance.now(), match: runtime.trace.match, phase, key,
+      repeat: event ? !!event.repeat : null,
+      pointerLocked: canvas ? document.pointerLockElement === canvas : null,
+      clientAttached: !!runtime.client,
+      inputEnabled: runtime.client?.input?.enabled !== false,
+      fromToolsPanel: Array.isArray(path) ? path.includes(root) : null
+    });
+  }
+
+  function onInteractionKey(event) {
+    if (event.code === 'KeyF' || event.code === 'KeyE')
+      recordInteractionEvent(event.type || 'keydown', event.code, event);
+  }
+
+  window.addEventListener('keyup', onInteractionKey, true);
+  restores.push(() => window.removeEventListener('keyup', onInteractionKey, true));
+  function onPointerLockChange() { recordInteractionEvent('pointerlockchange'); }
+  document.addEventListener('pointerlockchange', onPointerLockChange);
+  restores.push(() => document.removeEventListener('pointerlockchange', onPointerLockChange));
 
   window.addEventListener('keydown', onKey, true);
   restores.push(() => window.removeEventListener('keydown', onKey, true));

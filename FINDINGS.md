@@ -40,6 +40,7 @@ trace ended, not that the server would never kick.
 | [Second trace](verification/live-trace-v1.5.4-active-2026-10-15.json) | 1.5.4 | 51 shots, 14 hits, 228.2 damage | No recorded kick before bot elimination |
 | [Early export](verification/live-trace-v1.5.5-2026-10-15.json) and [later export](verification/live-trace-v1.5.5-25bots-2026-10-15.json) | 1.5.5 | 1 shot, 1 hit, 32 damage | Two snapshots of **one short match**, with no recorded kick |
 | User-supplied export, not mirrored | 1.5.6 | 88 shots, 27 hits, 6 kills | Mixed weapons in one match; no recorded kick |
+| User-supplied export, not mirrored | 1.5.8 | 0 shots, 0 hits | No outgoing Fire; 202 Rage samples held at alignment after ADS, no recorded kick |
 
 The two 1.5.5 files share `trace.startedAt =
 2026-10-15T14:33:31.561Z`, the same match counter, and the same two server
@@ -58,6 +59,10 @@ these SHA-256 values.
 | `live-trace-v1.5.4-active-2026-10-15.json` | `086b22e02bb463ada8dce29f2ebe501e5e313bfcf77fa2dedc433925f151aa69` |
 | `live-trace-v1.5.5-2026-10-15.json` | `16b1d73a03af12b52e193c5e636a39a9ec84febf1822d76d160980d3dbdbde51` |
 | `live-trace-v1.5.5-25bots-2026-10-15.json` | `5f19f7a7845711351b3040e0ede3f91ee868252a8a8f98857675f773870f7284` |
+
+The user-supplied 1.5.8 export `bridgezone-trace-2026-10-15T17-58-42-665Z.json`
+has SHA-256 `15e714ce62166969f4b019ff06ce114a4d505c7a44e19ee72bb2d96ad16399f8`.
+It is kept in the user's Downloads folder rather than mirrored here.
 
 ## What changed and what was observed
 
@@ -147,7 +152,7 @@ errors are classified instead of exporting raw error strings. The local
 and movement and identifies missing predictions or large geometric deviations.
 It keeps server events separate because the observed protocol does not provide
 a guaranteed shot-to-input sequence link. These diagnostics have local test
-coverage but no 1.5.8 live match result yet.
+coverage. The user-supplied 1.5.8 trace below supplies a bounded live result.
 
 Server snapshots additionally record the authoritative input ACK, ADS, weapon,
 magazine, position, and observed acknowledgement latency. The analyzer shows
@@ -164,7 +169,46 @@ weapon ID field therefore reads the active slot first and reports its source;
 it falls back to a stats ID if the slot is unavailable. The same captured
 snapshot path uses `me.ack` and `sentAt` to update its RTT estimate, supporting
 the input acknowledgement and latency fields above. This is static evidence
-for the captured client and still needs a live 1.5.8 trace to confirm coverage.
+for the captured client; the 1.5.8 trace contains slot weapon IDs and input ACKs.
+
+### The 1.5.8 no-fire trace and the 1.5.9 fix
+
+The user-supplied format-v2 trace recorded 1,338 outgoing frames, 789 server
+snapshots observed, no outgoing Fire, no local shot prediction, and no server
+shot event. Rage gate counters show 1,131 unplayable samples, five ADS ramp
+samples, and 202 alignment holds. Many unplayable samples occurred during the
+pre-ground or dead phases. Once on the ground, selected target distances in the
+retained gates ranged from 53.18 to 89.2 m. Two retained gate rows show a manual
+Fire press entering the hook and being removed before prediction. The trace
+contains no Interact bit, which does not prove whether F/E was pressed: it has
+no raw keyboard events and the panel could have lost pointer lock.
+
+Source inspection found that Rage's pre-prediction hold required its previous
+outgoing angle to satisfy a tight tolerance against a freshly sampled moving
+target. The outgoing rewrite could aim at that fresh position but never saw a
+Fire request. Version 1.5.9 allows a shot into prediction when the selected
+target is reachable within one bounded outgoing turn. The outgoing rewrite
+still checks current alignment and suppresses Fire if the turn is incomplete.
+Tests cover a moving target at long range, a large sudden target change, and
+the final outgoing safety check. No 1.5.9 server match has been recorded yet.
+
+Captured client controls map F/E to Interact bit 64 and require pointer lock.
+Version 1.5.9 passes an interaction frame through using the player's real view,
+stops automatic fire and reload during that press, and lets F/E keys leave the
+panel. The panel's Resume button requests pointer lock after settings changes.
+Loot vision now includes nearby ammo and prioritizes the active weapon's ammo.
+New bounded trace fields distinguish sampled and sent buttons and record only
+F/E and pointer-lock state, so the next export can locate an interaction loss
+without recording unrelated keyboard input.
+
+The captured movement simulation reduces speed while ADS is held and disables
+sprint. Version 1.5.9 releases automatic ADS when there is no selected target,
+allowing normal travel and sprint between engagements. Full-speed movement
+while continuously scoped is not supported by the captured movement model.
+The captured ammo reserve has finite caps and snapshots reconcile ammo state;
+auto reload requests a real reload when reserve exists. A client-only ammo
+counter change cannot establish infinite ammunition on the server. These
+mechanics were captured on 2026-10-08 and may differ from the current server.
 
 ### Local display and movement limits
 
@@ -191,7 +235,7 @@ node --check extension/bridgezone-main.js
 node --test tests/*.test.cjs
 ```
 
-The 2026-10-15 portable 1.5.8 run passed 61 tests with three optional tests
+The 2026-10-15 portable 1.5.9 run passed 67 tests with three optional tests
 skipped. One optional test can use the hash-matched captured physics bundle;
 two need the captured runtime. The JSON traces contain allowlisted game-state
 diagnostics, no session token or match ID, and cannot reveal an unshipped server

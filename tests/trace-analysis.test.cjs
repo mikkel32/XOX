@@ -57,3 +57,120 @@ test('older trace format remains readable without inventing weapon or range deta
   assert.equal(report.retention.dropped, null);
   assert.throws(() => analyzeTrace({ formatVersion: 7, trace: {} }), /formatVersion 1 or 2/);
 });
+
+test('no-fire report distinguishes sampled gates, outbound frames, and server evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.8', trace: {
+    match: 1,
+    counters: { rageSamples: 100, gateReasons: { unplayable: 80, aligning: 20 },
+      highestAckByMatch: { 1: 10 } },
+    frames: [
+      { match: 1, sequence: 9, sampledButtons: 64, buttons: 64 },
+      { match: 1, sequence: 10, sampledButtons: 1 | 2, buttons: 2 },
+      { match: 1, sequence: 11, sampledButtons: 0, buttons: 0 },
+      { match: 2, sequence: 1, buttons: 0 }
+    ],
+    fireGates: [
+      { at: 10, match: 1, reason: 'unplayable', originalButtons: 0,
+        sampledButtons: 0, player: { mode: 'parachute' } },
+      { at: 20, match: 1, reason: 'aligning', originalButtons: 1 | 64,
+        sampledButtons: 2 | 64, player: { mode: 'ground' },
+        weapon: { id: 'sidearm' }, target: { distance: 53.2 },
+        aimState: { targetIndex: 42, ready: false, yawGapDegrees: 8,
+          pitchGapDegrees: 3, withinOneTurn: false } },
+      { at: 30, match: 1, reason: 'aligning', originalButtons: 1,
+        sampledButtons: 2, player: { mode: 'ground' },
+        weapon: { id: 'sidearm' }, target: { distance: 89.3 },
+        aimState: { targetIndex: 43, ready: true, yawGapDegrees: 0.4,
+          pitchGapDegrees: 0.5, withinOneTurn: true } }
+    ],
+    settings: [
+      { at: 1, match: 0, reason: 'change', values: { rage: true, range: 600 } },
+      { at: 2, match: 1, reason: 'match-start', values: { rage: true, range: 600 } },
+      { at: 3, match: 1, reason: 'change', values: { rage: false, range: 450 } }
+    ],
+    serverEvents: [], serverSnapshots: []
+  } });
+  assert.deepEqual(report.gateReasons, { unplayable: 80, aligning: 20 });
+  assert.equal(report.gateSamples.retained, 3);
+  assert.deepEqual(report.gateSamples.retainedReasons, { unplayable: 1, aligning: 2 });
+  assert.deepEqual(report.gateSamples.byPlayerMode,
+    { parachute: { unplayable: 1 }, ground: { aligning: 2 } });
+  assert.deepEqual(report.gateSamples.selectedTargets,
+    { retained: 2, minDistanceMeters: 53.2, maxDistanceMeters: 89.3 });
+  assert.deepEqual(report.firingEvidence, {
+    originalFireGateRows: 2, preparedFireGateRows: 0, sampledFireFrames: 1,
+    outgoingFireFrames: 0,
+    sentDecisionRows: 0, serverShotEvents: 0
+  });
+  assert.equal(report.gateSamples.aimState.retained, 2);
+  assert.equal(report.gateSamples.aimState.readyTrue, 1);
+  assert.equal(report.gateSamples.aimState.withinOneTurnFalse, 1);
+  assert.equal(report.gateSamples.aimState.medianYawGapDegrees, 0.4);
+  assert.equal(report.gateSamples.aimState.maxYawGapDegrees, 8);
+  assert.equal(report.gateSamples.latestByReason.aligning.aimState.targetIndex, 43);
+  assert.equal(report.inputButtons.originalGateSamples.byButton.interact, 1);
+  assert.equal(report.inputButtons.preparedGateSamples.byButton.interact, 1);
+  assert.equal(report.inputButtons.sampledFrames.byButton.interact, 1);
+  assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 1);
+  assert.equal(report.inputButtons.frameSendChanges.comparable, 3);
+  assert.equal(report.inputButtons.frameSendChanges.removed.fire, 1);
+  assert.equal(report.inputButtons.frameSendChanges.removed.interact, 0);
+  assert.equal(report.inputButtons.gateSampleChanges.removed.fire, 2);
+  assert.equal(report.inputButtons.gateSampleChanges.removed.interact, 0);
+  assert.deepEqual(report.inputButtons.outgoingFrameAckCoverage,
+    { covered: 2, pendingOrUnobserved: 1, unknown: 1 });
+  assert.equal(report.settingsHistory.retained, 3);
+  assert.deepEqual(report.settingsHistory.transitions, [{
+    at: 3, match: 1, reason: 'change', changed: {
+      rage: { from: true, to: false }, range: { from: 600, to: 450 }
+    }
+  }]);
+  const text = formatReport(report);
+  assert.match(text, /Fire path evidence \(retained rows\): original game samples 2, prepared samples 0, pre-send frames 1, outgoing frames 0/);
+  assert.match(text, /Interact button bit 64/);
+  assert.match(text, /absent Interact bits do not prove F\/E was never pressed/);
+});
+
+test('interaction loss is only reported when visible between original and prepared samples', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    fireGates: [
+      { originalButtons: 64, sampledButtons: 0, reason: 'no-target' },
+      { originalButtons: 64, sampledButtons: 64, reason: 'no-target' },
+      { originalButtons: null, sampledButtons: null, reason: 'no-target' }
+    ],
+    frames: [{ match: 1, sequence: 3, buttons: 64 }]
+  } });
+  assert.equal(report.inputButtons.gateSampleChanges.comparable, 2);
+  assert.equal(report.inputButtons.gateSampleChanges.removed.interact, 1);
+  assert.equal(report.inputButtons.originalGateSamples.missing, 1);
+  assert.equal(report.inputButtons.sampledFrames.observed, 0);
+  assert.equal(report.firingEvidence.sampledFireFrames, null);
+  assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 1);
+  assert.deepEqual(report.inputButtons.outgoingFrameAckCoverage,
+    { covered: 0, pendingOrUnobserved: 0, unknown: 1 });
+  assert.equal(report.serverEvents.shots, 0);
+  assert.equal(report.outgoingFire.retained, 0);
+});
+
+test('interaction key evidence separates pointer lock and input state from sent buttons', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    interactions: [
+      { phase: 'keydown', key: 'KeyF', pointerLocked: false,
+        inputEnabled: true, fromToolsPanel: true },
+      { phase: 'pointerlockchange', pointerLocked: true },
+      { phase: 'keydown', key: 'KeyE', pointerLocked: true,
+        inputEnabled: false, fromToolsPanel: false },
+      { phase: 'keyup', key: 'KeyE', pointerLocked: true }
+    ],
+    frames: [{ match: 1, sequence: 1, sampledButtons: 0, buttons: 0 }]
+  } });
+  assert.deepEqual(report.interactionEvidence, {
+    retained: 4, keyDowns: 2, keyUps: 1,
+    keyDownsWithoutPointerLock: 1, keyDownsWithInputDisabled: 1,
+    keyDownsFromToolsPanel: 1, pointerLockChanges: 1
+  });
+  assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 0);
+});

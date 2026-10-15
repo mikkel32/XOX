@@ -10,6 +10,11 @@ server confirmation, and a session without a recorded kick are different claims.
 are snapshots from the same match. `live-test-bootstrap.js` is a developer-only
 attachment helper used during an already-loaded game test.
 
+Run `node verification/analyze-trace.mjs "C:\path\to\bridgezone-trace.json"`
+from the repository root to inspect Fire gates, button changes, F/E and pointer
+lock evidence, and server events. The user-supplied 1.5.8 no-fire trace is
+summarized in [FINDINGS.md](../FINDINGS.md); it is not copied into this folder.
+
 Raw screenshots are intentionally kept out of this public repository. Some
 show browser context and a private lobby invite URL. The receipts contain no
 session token or match ID, and the [findings document](../FINDINGS.md) provides

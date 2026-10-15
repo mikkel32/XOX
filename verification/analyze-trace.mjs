@@ -6,6 +6,98 @@ import { fileURLToPath } from 'node:url';
 const list = value => Array.isArray(value) ? value : [];
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const rounded = value => finite(value) ? Math.round(value * 100) / 100 : null;
+const BUTTONS = Object.freeze({ fire: 1, aim: 2, jump: 4, crouch: 8,
+  sprint: 16, reload: 32, interact: 64, swap: 128, plate: 256, heal: 512 });
+const buttonMask = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+function countButtons(items, getButtons) {
+  const byButton = Object.fromEntries(Object.keys(BUTTONS).map(name => [name, 0]));
+  const masks = {};
+  let observed = 0;
+  for (const item of items) {
+    const mask = buttonMask(getButtons(item));
+    if (mask === null) continue;
+    observed++;
+    masks[mask] = (masks[mask] || 0) + 1;
+    for (const [name, bit] of Object.entries(BUTTONS)) if (mask & bit) byButton[name]++;
+  }
+  return { rows: items.length, observed, missing: items.length - observed, byButton, masks };
+}
+
+function compareButtons(items, before, after) {
+  const added = Object.fromEntries(Object.keys(BUTTONS).map(name => [name, 0]));
+  const removed = { ...added };
+  let comparable = 0;
+  for (const item of items) {
+    const from = buttonMask(before(item)), to = buttonMask(after(item));
+    if (from === null || to === null) continue;
+    comparable++;
+    for (const [name, bit] of Object.entries(BUTTONS)) {
+      if (!(from & bit) && (to & bit)) added[name]++;
+      if ((from & bit) && !(to & bit)) removed[name]++;
+    }
+  }
+  return { comparable, added, removed };
+}
+
+function ackStatus(item, highestAckByMatch) {
+  const highest = highestAckByMatch[String(item?.match)];
+  if (!Number.isSafeInteger(item?.sequence) || !Number.isSafeInteger(highest)) return 'unknown';
+  return highest >= item.sequence ? 'covered' : 'pendingOrUnobserved';
+}
+
+function summarizeSettings(entries) {
+  const transitions = [];
+  for (let index = 1; index < entries.length; index++) {
+    const previous = entries[index - 1]?.values;
+    const current = entries[index]?.values;
+    if (!previous || !current || typeof previous !== 'object' || typeof current !== 'object') continue;
+    const changed = {};
+    for (const key of new Set([...Object.keys(previous), ...Object.keys(current)])) {
+      if (previous[key] !== current[key]) changed[key] = { from: previous[key] ?? null, to: current[key] ?? null };
+    }
+    if (Object.keys(changed).length) transitions.push({ at: entries[index].at ?? null,
+      match: entries[index].match ?? null, reason: entries[index].reason ?? null, changed });
+  }
+  return { retained: entries.length, baseline: entries[0]?.values || null,
+    latest: entries.at(-1)?.values || null, transitions };
+}
+
+function summarizeGateAim(gates) {
+  const yawGaps = [], pitchGaps = [];
+  const byReason = {};
+  let retained = 0, readyTrue = 0, readyFalse = 0;
+  let withinOneTurnTrue = 0, withinOneTurnFalse = 0;
+  for (const gate of gates) {
+    const aim = gate?.aimState;
+    if (!aim || typeof aim !== 'object') continue;
+    retained++;
+    const reason = typeof gate.reason === 'string' ? gate.reason : 'unspecified';
+    byReason[reason] ||= { rows: 0, readyTrue: 0, readyFalse: 0,
+      withinOneTurnTrue: 0, withinOneTurnFalse: 0 };
+    const row = byReason[reason];
+    row.rows++;
+    if (aim.ready === true) { readyTrue++; row.readyTrue++; }
+    if (aim.ready === false) { readyFalse++; row.readyFalse++; }
+    if (finite(aim.yawGapDegrees)) yawGaps.push(aim.yawGapDegrees);
+    if (finite(aim.pitchGapDegrees)) pitchGaps.push(aim.pitchGapDegrees);
+    // The source writes false for no-target rows; only count a turn test with measured gaps.
+    if (finite(aim.yawGapDegrees) && finite(aim.pitchGapDegrees)) {
+      if (aim.withinOneTurn === true) { withinOneTurnTrue++; row.withinOneTurnTrue++; }
+      if (aim.withinOneTurn === false) { withinOneTurnFalse++; row.withinOneTurnFalse++; }
+    }
+  }
+  const median = values => {
+    values.sort((a, b) => a - b);
+    return values.length ? rounded(values[Math.floor((values.length - 1) / 2)]) : null;
+  };
+  return { retained, readyTrue, readyFalse, withinOneTurnTrue, withinOneTurnFalse,
+    yawGapSamples: yawGaps.length, medianYawGapDegrees: median(yawGaps),
+    maxYawGapDegrees: yawGaps.length ? rounded(yawGaps.at(-1)) : null,
+    pitchGapSamples: pitchGaps.length, medianPitchGapDegrees: median(pitchGaps),
+    maxPitchGapDegrees: pitchGaps.length ? rounded(pitchGaps.at(-1)) : null,
+    byReason };
+}
 
 function distanceBand(value) {
   if (!finite(value)) return 'unknown';
@@ -32,6 +124,11 @@ export function analyzeTrace(document) {
   }
   const events = list(trace.serverEvents);
   const snapshots = list(trace.serverSnapshots);
+  const frames = list(trace.frames);
+  const gates = list(trace.fireGates);
+  const interactions = list(trace.interactions);
+  const settingsHistory = summarizeSettings(list(trace.settings));
+  const gateAimState = summarizeGateAim(gates);
   const highestAckByMatch = { ...(trace.counters?.highestAckByMatch || {}) };
   for (const snapshot of snapshots) {
     if (Number.isSafeInteger(snapshot?.ack) && Number.isSafeInteger(snapshot?.match)) {
@@ -55,10 +152,8 @@ export function analyzeTrace(document) {
     if (!item.localShotPredicted) missingPrediction++;
     const before = item.geometry?.predictedInput?.meanMeters;
     const after = item.geometry?.predictedOutgoing?.meanMeters;
-    const highestAck = highestAckByMatch[String(item.match)];
-    const ackStatus = !Number.isSafeInteger(item.sequence) || !Number.isSafeInteger(highestAck)
-      ? 'unknown' : highestAck >= item.sequence ? 'covered' : 'pendingOrUnobserved';
-    ackCoverage[ackStatus]++;
+    const status = ackStatus(item, highestAckByMatch);
+    ackCoverage[status]++;
     if (!finite(after)) missingGeometry++;
     const key = [weapon, band, movement].join('|');
     if (!groups.has(key)) groups.set(key, { weapon, distance: band, movement,
@@ -66,7 +161,7 @@ export function analyzeTrace(document) {
       geometricSamples: 0, predictedMissBeforeSum: 0, predictedMissAfterSum: 0 });
     const group = groups.get(key);
     group.sent++;
-    if (ackStatus === 'covered') group.ackCovered++;
+    if (status === 'covered') group.ackCovered++;
     if (item.localShotPredicted) group.predicted++;
     if (item.correctionApplied) group.corrected++;
     if (finite(item.localAds) && item.localAds < 0.995) group.adsBelowReady++;
@@ -127,20 +222,80 @@ export function analyzeTrace(document) {
       item.server.magazine !== item.predictorBeforeReconcile.magazine).length };
 
   const retained = Object.fromEntries(['frames', 'localShots', 'aimDecisions', 'fireGates',
-    'serverSnapshots', 'serverEvents', 'settings', 'kicks', 'connectionStates', 'errors']
+    'serverSnapshots', 'serverEvents', 'settings', 'interactions', 'kicks', 'connectionStates', 'errors']
     .map(key => [key, list(trace[key]).length]));
-  const gateCounts = trace.counters?.gateReasons || Object.fromEntries(
-    [...new Set(list(trace.fireGates).map(gate => gate.reason))].map(reason => [reason,
-      list(trace.fireGates).filter(gate => gate.reason === reason).length]));
+  const interactionEvidence = { retained: interactions.length, keyDowns: 0, keyUps: 0,
+    keyDownsWithoutPointerLock: 0, keyDownsWithInputDisabled: 0,
+    keyDownsFromToolsPanel: 0, pointerLockChanges: 0 };
+  for (const entry of interactions) {
+    if (entry?.phase === 'pointerlockchange') interactionEvidence.pointerLockChanges++;
+    if (entry?.phase === 'keydown' && ['KeyF', 'KeyE'].includes(entry.key)) {
+      interactionEvidence.keyDowns++;
+      if (entry.pointerLocked === false) interactionEvidence.keyDownsWithoutPointerLock++;
+      if (entry.inputEnabled === false) interactionEvidence.keyDownsWithInputDisabled++;
+      if (entry.fromToolsPanel === true) interactionEvidence.keyDownsFromToolsPanel++;
+    }
+    if (entry?.phase === 'keyup' && ['KeyF', 'KeyE'].includes(entry.key))
+      interactionEvidence.keyUps++;
+  }
+  const retainedGateReasons = {};
+  const byPlayerMode = {};
+  const selectedDistances = [];
+  const latestGateByReason = {};
+  for (const gate of gates) {
+    const reason = typeof gate?.reason === 'string' ? gate.reason : 'unspecified';
+    const mode = typeof gate?.player?.mode === 'string' ? gate.player.mode : 'unknown';
+    retainedGateReasons[reason] = (retainedGateReasons[reason] || 0) + 1;
+    byPlayerMode[mode] ||= {};
+    byPlayerMode[mode][reason] = (byPlayerMode[mode][reason] || 0) + 1;
+    if (finite(gate?.target?.distance)) selectedDistances.push(gate.target.distance);
+    latestGateByReason[reason] = { at: gate?.at ?? null, match: gate?.match ?? null,
+      sequence: gate?.sequence ?? null, playerMode: mode, weapon: gate?.weapon?.id ?? null,
+      targetDistanceMeters: rounded(gate?.target?.distance), originalButtons: gate?.originalButtons ?? null,
+      sampledButtons: gate?.sampledButtons ?? null,
+      aimState: gate?.aimState && typeof gate.aimState === 'object' ? {
+        targetIndex: gate.aimState.targetIndex ?? null,
+        ready: gate.aimState.ready ?? null,
+        yawGapDegrees: rounded(gate.aimState.yawGapDegrees),
+        pitchGapDegrees: rounded(gate.aimState.pitchGapDegrees),
+        withinOneTurn: gate.aimState.withinOneTurn ?? null
+      } : null };
+  }
+  const gateCounts = trace.counters?.gateReasons || retainedGateReasons;
+  const frameButtons = countButtons(frames, frame => frame?.buttons);
+  const sampledFrameButtons = countButtons(frames, frame => frame?.sampledButtons);
+  const frameSendChanges = compareButtons(frames, frame => frame?.sampledButtons,
+    frame => frame?.buttons);
+  const originalGateButtons = countButtons(gates, gate => gate?.originalButtons);
+  const sampledGateButtons = countButtons(gates, gate => gate?.sampledButtons);
+  const gateButtonChanges = compareButtons(gates, gate => gate?.originalButtons,
+    gate => gate?.sampledButtons);
+  const frameAckCoverage = { covered: 0, pendingOrUnobserved: 0, unknown: 0 };
+  for (const frame of frames) frameAckCoverage[ackStatus(frame, highestAckByMatch)]++;
+  const gateSamples = { retained: gates.length, retainedReasons: retainedGateReasons,
+    byPlayerMode, latestByReason: latestGateByReason, aimState: gateAimState,
+    selectedTargets: { retained: selectedDistances.length,
+      minDistanceMeters: selectedDistances.length ? rounded(Math.min(...selectedDistances)) : null,
+      maxDistanceMeters: selectedDistances.length ? rounded(Math.max(...selectedDistances)) : null } };
+  const inputButtons = { outgoingFrames: frameButtons, sampledFrames: sampledFrameButtons,
+    frameSendChanges, originalGateSamples: originalGateButtons,
+    preparedGateSamples: sampledGateButtons, gateSampleChanges: gateButtonChanges,
+    outgoingFrameAckCoverage: frameAckCoverage };
+  const firingEvidence = { originalFireGateRows: originalGateButtons.byButton.fire,
+    preparedFireGateRows: sampledGateButtons.byButton.fire,
+    sampledFireFrames: sampledFrameButtons.observed ? sampledFrameButtons.byButton.fire : null,
+    outgoingFireFrames: frameButtons.byButton.fire, sentDecisionRows: sent.length,
+    serverShotEvents: server.shots };
   anomalies.sort((a, b) => (b.predictedMissMeters ?? 0) - (a.predictedMissMeters ?? 0) ||
     b.reasons.length - a.reasons.length);
   return {
     formatVersion: document.formatVersion, scriptVersion: document.scriptVersion || 'unknown',
     capturedAt: document.capturedAt || null, matchesObserved: trace.match || 0,
-    latestSettings: list(trace.settings).at(-1)?.values || null,
+    latestSettings: settingsHistory.latest, settingsHistory,
     retention: { retained, dropped: trace.retention?.dropped || null },
     rageSamples: trace.counters?.rageSamples ?? null,
-    gateReasons: gateCounts, targetRejects: trace.counters?.targetRejects || null,
+    gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
+    inputButtons, firingEvidence, interactionEvidence,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
       ackCoverage, missingWeapon, missingDistance,
       missingPrediction, missingGeometry, byWeaponRangeMovement },
@@ -150,6 +305,10 @@ export function analyzeTrace(document) {
       'Distances and geometric miss estimates describe local client predictions, not authoritative hits.',
       'An ACK covers an input sequence; it does not establish that the server fired or hit.',
       'Server events have no guaranteed input sequence, so server hits cannot be assigned to a weapon, target, or distance.',
+      'Fire-gate rows are coalesced samples; gate counters cover every Rage sample when present.',
+      'Fire-gate original buttons are the game input before this hook; prepared gate buttons are after sample rewriting. Frame sampledButtons, when present, are before sendInput rewriting; frame buttons are on the wire.',
+      'This trace has no raw keyboard events, so absent Interact bits do not prove F/E was never pressed.',
+      'Button names use the captured client bit map: Fire 1, Aim 2, Interact 64 (F/E).',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
       'Retained buffers may cover different time windows; inspect dropped counts before comparing totals.'
     ]
@@ -163,11 +322,40 @@ export function formatReport(report) {
       `server shots: ${report.serverEvents.shots}; hits: ${report.serverEvents.hits}; kills: ${report.serverEvents.kills}`,
     `Outgoing Fire held: ${report.outgoingFire.held}; reasons: ${JSON.stringify(report.outgoingFire.heldReasons)}`,
     `Rage samples: ${report.rageSamples ?? 'unavailable'}; gate reasons: ${JSON.stringify(report.gateReasons)}`,
+    `Retained fire-gate rows: ${report.gateSamples.retained} (coalesced); reasons: ${JSON.stringify(report.gateSamples.retainedReasons)}`,
+    `Retained gate rows by player mode: ${JSON.stringify(report.gateSamples.byPlayerMode)}`,
+    `Retained selected targets: ${report.gateSamples.selectedTargets.retained}; distance ` +
+      `${report.gateSamples.selectedTargets.minDistanceMeters ?? '?'} to ` +
+      `${report.gateSamples.selectedTargets.maxDistanceMeters ?? '?'} m`,
+    `Recorded gate aim state: ${JSON.stringify(report.gateSamples.aimState)}`,
+    `Latest gate row per reason: ${JSON.stringify(report.gateSamples.latestByReason)}`,
     `Target rejection checks: ${JSON.stringify(report.targetRejects || {})}`,
     `Latest recorded settings: ${JSON.stringify(report.latestSettings || {})}`,
+    `Recorded setting changes (${report.settingsHistory.retained} rows): ${JSON.stringify(report.settingsHistory.transitions)}`,
+    `Fire path evidence (retained rows): original game samples ${report.firingEvidence.originalFireGateRows}, ` +
+      `prepared samples ${report.firingEvidence.preparedFireGateRows}, pre-send frames ` +
+      `${report.firingEvidence.sampledFireFrames ?? 'unavailable'}, outgoing frames ` +
+      `${report.firingEvidence.outgoingFireFrames}, sent decisions ${report.firingEvidence.sentDecisionRows}, ` +
+      `server shot events ${report.firingEvidence.serverShotEvents}`,
+    `Interact button bit 64 (retained rows): original game samples ` +
+      `${report.inputButtons.originalGateSamples.byButton.interact}, prepared samples ` +
+      `${report.inputButtons.preparedGateSamples.byButton.interact}, pre-send frames ` +
+      `${report.inputButtons.sampledFrames.observed ? report.inputButtons.sampledFrames.byButton.interact : 'unavailable'}, outgoing frames ` +
+      `${report.inputButtons.outgoingFrames.byButton.interact}`,
+    `F/E and pointer-lock evidence: ${JSON.stringify(report.interactionEvidence)}`,
+    `Game sample -> prepared button changes in ${report.inputButtons.gateSampleChanges.comparable} retained gate rows: ` +
+      `added ${JSON.stringify(report.inputButtons.gateSampleChanges.added)}, ` +
+      `removed ${JSON.stringify(report.inputButtons.gateSampleChanges.removed)}`,
+    `Pre-send -> wire button changes in ${report.inputButtons.frameSendChanges.comparable} retained frames: ` +
+      `added ${JSON.stringify(report.inputButtons.frameSendChanges.added)}, ` +
+      `removed ${JSON.stringify(report.inputButtons.frameSendChanges.removed)}`,
+    `Pre-send frame buttons observed ${report.inputButtons.sampledFrames.observed}, ` +
+      `missing ${report.inputButtons.sampledFrames.missing}`,
+    `Outgoing frame button masks: ${JSON.stringify(report.inputButtons.outgoingFrames.masks)}`,
     `Input ACK coverage: ${JSON.stringify(report.outgoingFire.ackCoverage)}; ` +
       `median ACK latency ${report.authoritative.medianAckLatencyMs ?? '?'} ms; ` +
       `median RTT ${report.authoritative.medianReportedRttMs ?? '?'} ms`,
+    `All retained outgoing frames ACK coverage: ${JSON.stringify(report.inputButtons.outgoingFrameAckCoverage)}`,
     `Before-reconcile disagreements: ADS ${report.authoritative.adsDisagreementSamples}, ` +
       `magazine ${report.authoritative.magazineDisagreementSamples}`,
     `Server snapshots observed ${report.authoritative.observed ?? 'unknown'}, retained ${report.authoritative.retained}`,

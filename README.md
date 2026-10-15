@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.8.** The portable local suite reports 61 passes and 3
+> **Current version: 1.5.9.** The portable local suite reports 67 passes and 3
 > skips without the optional captured client archive. Live traces include both server anti-cheat
 > removals and short matches without one. They do **not** prove a general bypass.
 
@@ -25,19 +25,21 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Tool | Behavior |
 | --- | --- |
 | Xray | Draws player boxes, names, and distances, including opponents behind cover when they are present in client snapshots. |
-| Loot vision | Marks nearby weapons and unopened crates by rarity. |
+| Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. |
-| Rage | Holds ADS input between targets, waits for the local scope ramp, selects a clear target across 360 degrees up to the range slider, fires, and requests normal reloads from reserve ammo. Server reach and hit validation still apply. |
+| Rage | Selects a clear target across 360 degrees up to the range slider, scopes when a target is available, waits for the weapon's ADS ramp, fires, and requests normal reloads from reserve ammo. Sprint remains available when no target is selected. Server reach and hit validation still apply. |
 | Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It still follows local aim alignment, weapon cooldown, and server ammunition. |
 | Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation or the average direction of multiple pellets. Server spread and visible camera recoil may remain. |
-| Trace export | Saves bounded per-shot target geometry, movement, weapon and ADS state, predicted ray deviation, aiming changes, settings, fire gates, server input acknowledgements, and combat events. |
+| Trace export | Saves bounded per-shot target geometry, movement, weapon and ADS state, predicted ray deviation, aiming changes, settings, fire gates, F/E and pointer-lock state, button changes before send, server input acknowledgements, and combat events. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
-between tabs. In 1.5.8, Xray, loot vision, Silent AIM, and Stealth start enabled;
+between tabs. In 1.5.9, Xray, loot vision, Silent AIM, and Stealth start enabled;
 Rage starts disabled unless saved settings override them. Fast fire is enabled
 for Rage when it is turned on. After an aim-related
 server removal, Aim and Rage are disabled and remain off across the next match.
+F/E interaction takes priority over automatic aim and fire. Use **Resume** in the
+panel after changing settings to restore the game's pointer lock.
 
 ## Install
 
@@ -84,7 +86,7 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable local suite passed **61 tests with 3 skips** on 2026-10-15. Three
+The portable local suite passed **67 tests with 3 skips** on 2026-10-15. Three
 tests use locally captured client bundles that are intentionally not mirrored
 here. Tests validate local behavior and
 fixtures, not a live server outcome.
@@ -108,6 +110,9 @@ distance from the selected aim point before and after correction. Retention
 limits and dropped counts reveal when older observations have rolled out of the
 buffer. Server snapshots also record input ACK sequence, observed ACK latency,
 server ADS and magazine state, and predictor state before reconciliation. The
+new interaction records show F/E key presses, pointer lock, and input-enabled
+state without storing unrelated keys. Frame records distinguish sampled buttons
+from the buttons finally sent to the server. The
 report groups **outgoing Fire** by weapon, selected range, and movement, with
 ACK coverage and server event totals shown separately. An ACK establishes that
 an input sequence was covered; it does not prove a shot fired or hit. Server
@@ -127,7 +132,8 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.5 | 1 shot, 1 hit | Short match, no recorded kick; [two exports](verification/live-trace-v1.5.5-2026-10-15.json) from the **same** match |
 | 1.5.6 | 88 shots, 27 hits, 6 kills | User-supplied trace from mixed weapons; no recorded kick. Its raw export is not mirrored here; see [findings](FINDINGS.md). |
 | 1.5.7 | No live trace yet | Local tests cover range selection, continuous ADS input, moving-shot correction, and diagnostic export. Server hit rate, physical weapon range, and camera recoil remain unverified. |
-| 1.5.8 | No live trace yet | Adds per-shot and fire-gate diagnostics plus a local trace analyzer; live server outcomes still need a new export. |
+| 1.5.8 | 0 shots, 0 hits | User-supplied trace recorded 202 alignment holds after ADS, with no outgoing Fire. No recorded kick; see [findings](FINDINGS.md). |
+| 1.5.9 | No live trace yet | Removes the moving-target fire deadlock, preserves F/E interaction, releases ADS between targets, and expands input diagnostics. Local tests pass; server outcome awaits a new trace. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

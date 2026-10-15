@@ -19,10 +19,11 @@ function documentHarness() {
   const downloads = [];
   const painter = { clearRect() {}, setTransform() {} };
   const controls = new Map();
+  const rootListeners = new Map();
   const root = {
     innerHTML: '',
     appendChild() {},
-    addEventListener() {},
+    addEventListener(name, listener) { rootListeners.set(name, listener); },
     querySelector(selector) {
       if (!controls.has(selector)) controls.set(selector, {
         events: new Map(),
@@ -48,7 +49,7 @@ function documentHarness() {
   };
   let nextTimer = 1;
   return {
-    document, canvases, listeners, timers, controls, downloads,
+    document, canvases, listeners, rootListeners, timers, controls, downloads,
     setInterval(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); },
     mount() {
@@ -532,7 +533,7 @@ test('disabling aim preserves inputs; destroy restores methods, loader, and list
 });
 
 function rageClient(patch = {}) {
-  const sampled = Object.freeze(frame({ buttons: 16 | 64 | 8 }));
+  const sampled = Object.freeze(frame({ buttons: 16 | 8 }));
   const input = {
     enabled: true,
     sample(...args) {
@@ -551,29 +552,72 @@ function rageClient(patch = {}) {
   return { ...fake, sampled, originalSample: input.sample };
 }
 
-test('stealth holds Rage and manual Fire before prediction when a target is present', () => {
+test('an F interact pulse survives Rage sampling and outgoing frames', () => {
+  // The captured client maps KeyF/KeyE to Buttons.Interact (64). A pickup
+  // needs that bit on the wire during the press and absent after release.
+  for (const targetPresent of [false, true]) {
+    const h = harness();
+    const fake = rageClient();
+    let buttons = 64, sequence = 1800;
+    fake.client.input.sample = () => Object.freeze(frame({ s: sequence++, buttons }));
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+    if (!targetPresent) fake.client.remoteFrames = [];
+
+    const pressed = fake.client.input.sample();
+    assert.equal(pressed.buttons & 64, 64, `sampled F with target=${targetPresent}`);
+    const sentInteract = send(fake, [pressed])[0];
+    assert.equal(sentInteract.buttons & 64, 64,
+      `outgoing F with target=${targetPresent}`);
+    close(sentInteract.yaw, pressed.yaw);
+    close(sentInteract.pitch, pressed.pitch);
+    close(sentInteract.mx, pressed.mx);
+    close(sentInteract.mz, pressed.mz);
+    buttons = 0;
+    const released = fake.client.input.sample();
+    assert.equal(released.buttons & 64, 0, `sampled F release with target=${targetPresent}`);
+    assert.equal(send(fake, [released])[0].buttons & 64, 0,
+      `outgoing F release with target=${targetPresent}`);
+    h.api.destroy();
+  }
+});
+
+test('manual Stealth preserves F interact while holding an unaligned Fire input', () => {
+  const h = harness();
+  const original = Object.freeze(frame({ s: 1810, buttons: 1 | 64 }));
+  const fake = attach(h, fakeClient({ input: { enabled: true, sample: () => original } }));
+  h.api.setOptions({ stealth: true });
+
+  const sampled = fake.client.input.sample();
+  assert.equal(sampled.buttons & 1, 0, 'Fire waits for the outgoing aim');
+  assert.equal(sampled.buttons & 64, 64, 'F remains available while Fire waits');
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 1, 0);
+  assert.equal(outgoing.buttons & 64, 64, 'F reaches the server input');
+  assert.equal(original.buttons, 1 | 64, 'the game-owned input is not mutated');
+  h.api.destroy();
+});
+
+test('Rage predicts before its final outgoing turn while manual Stealth still holds Fire', () => {
   const h = harness();
   const fake = attach(h, rageClient());
-  h.api.setOptions({ rage: true, stealth: true, rapidFire: false });
-  h.api.runtime.stealth.cooldown = 2000;
-  const held = fake.client.input.sample('sample-argument');
-  assert.equal(held.buttons & 1, 0);
-  assert.equal(held.buttons & 2, 2, 'aiming down sights remains active');
-  assert.equal(fake.sampled.buttons, 16 | 64 | 8, 'the game sample is not mutated');
-  assert.equal(send(fake, [held])[0].buttons & 1, 0);
-  assert.equal(h.api.runtime.stealth.heldShots, 1);
-  h.api.runtime.stealth.cooldown = 0;
-  let ready;
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  const farFromAim = fake.client.input.sample('sample-argument');
+  assert.equal(farFromAim.buttons & 1, 0, 'a target beyond one outgoing turn stays held');
+  assert.equal(farFromAim.buttons & 2, 2, 'aiming down sights remains active');
+  assert.equal(fake.sampled.buttons, 16 | 8, 'the game sample is not mutated');
+  assert.equal(send(fake, [farFromAim])[0].buttons & 1, 0,
+    'the outgoing frame stays held while the turn is incomplete');
+  let predicted = false, sent = false;
   for (let attempt = 0; attempt < 8; attempt++) {
-    ready = fake.client.input.sample('sample-argument');
-    const outgoing = send(fake, [frame({ ...ready, s: 200 + attempt })])[0];
-    if (ready.buttons & 1) {
-      assert.equal(outgoing.buttons & 1, 1);
-      assert.notEqual(outgoing.yaw, 0);
-      break;
-    }
+    const sampled = fake.client.input.sample('sample-argument');
+    const outgoing = send(fake, [frame({ ...sampled, s: 200 + attempt })])[0];
+    predicted ||= !!(sampled.buttons & 1);
+    sent ||= !!(outgoing.buttons & 1);
+    if (sent) break;
   }
-  assert.equal(ready.buttons & 1, 1, 'Rage fires after the outgoing turn aligns');
+  assert.equal(predicted, true, 'Rage enables prediction once aim is within one outgoing turn');
+  assert.equal(sent, true, 'Rage sends Fire once the outgoing turn aligns');
   h.api.destroy();
 
   const manual = Object.freeze(frame({ s: 94 }));
@@ -707,10 +751,12 @@ test('a moving target invalidates ready aim before prediction fires again', () =
   fake.client.remoteFrames = [{ snap: opponent(1, { p: [-10, 0, -2] }) }];
   const changed = fake.client.input.sample('sample-argument');
   assert.equal(changed.buttons & 1, 0, 'stale ready state cannot fire at the old position');
+  assert.equal(send(fake, [changed])[0].buttons & 1, 0,
+    'an outgoing turn larger than the per-frame limit still holds Fire');
   h.api.destroy();
 });
 
-test('fast fire holds a distant shot after a small target movement', () => {
+test('fast fire predicts and sends a distant shot after a small target movement', () => {
   const h = harness();
   const fake = attach(h, rageClient());
   h.api.setOptions({ rage: true, stealth: true, rapidFire: true, range: 600, point: 'auto' });
@@ -720,9 +766,11 @@ test('fast fire holds a distant shot after a small target movement', () => {
   assert.equal(h.api.runtime.outgoingAim.ready, true);
   fake.client.remoteFrames = [{ snap: opponent(1, { p: [2.35, 0, -550] }) }];
   const moved = fake.client.input.sample('sample-argument');
-  assert.equal(moved.buttons & 1, 0, 'a sub-degree shift matters at 550 m');
+  assert.equal(moved.buttons & 1, 1,
+    'small moving-target drift may be predicted before the final outgoing aim');
   const aligned = send(fake, [frame({ ...moved, s: 921 })])[0];
-  assert.equal(aligned.buttons & 1, 0);
+  assert.equal(aligned.buttons & 1, 1,
+    'the final outgoing rewrite rechecks the current target and sends the aligned shot');
   assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1);
   h.api.destroy();
 });
@@ -797,11 +845,11 @@ test('Rage scans behind the player and samples autofire with ADS', () => {
   ];
   const sampled = fake.client.input.sample('sample-argument');
   assert.notEqual(sampled, fake.sampled);
-  assert.equal(fake.sampled.buttons, 16 | 64 | 8);
+  assert.equal(fake.sampled.buttons, 16 | 8);
   assert.equal(sampled.buttons & 1, 1);
   assert.equal(sampled.buttons & 2, 2);
   assert.equal(sampled.buttons & 16, 0);
-  assert.equal(sampled.buttons & 64, 64);
+  assert.equal(sampled.buttons & 64, 0);
   assert.equal(sampled.buttons & 8, 8);
   send(fake, [sampled]);
   assert.equal(h.api.runtime.target.index, 2);
@@ -831,15 +879,15 @@ test('Rage prefers a nearer aim angle and honors the range slider beyond rangeEn
   fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -610] }) }];
   const outOfRange = fake.client.input.sample('sample-argument');
   assert.equal(outOfRange.buttons & 1, 0, 'the selected 600 m limit still applies');
-  assert.equal(outOfRange.buttons & 2, 2, 'Rage remains scoped before a target enters range');
-  assert.equal(outOfRange.buttons & 16, 0, 'sprint is released while Rage holds scope');
+  assert.equal(outOfRange.buttons & 2, 0, 'Rage releases scope without a target');
+  assert.equal(outOfRange.buttons & 16, 16, 'sprint remains available while travelling');
   const gate = h.api.trace().fireGates.at(-1);
   assert.equal(gate.reason, 'no-target');
   assert.equal(gate.scan.closest.reason, 'range');
   assert.ok(gate.scan.closest.distance > 600);
 });
 
-test('Rage holds ADS through the weapon scope ramp before firing', () => {
+test('Rage scopes when a target appears and holds ADS through the weapon ramp', () => {
   const h = harness();
   const fake = attach(h, rageClient());
   h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
@@ -847,7 +895,8 @@ test('Rage holds ADS through the weapon scope ramp before firing', () => {
   weapon.ws.ads = 0;
   fake.client.remoteFrames = [];
   const waiting = fake.client.input.sample('sample-argument');
-  assert.equal(waiting.buttons & 2, 2);
+  assert.equal(waiting.buttons & 2, 0);
+  assert.equal(waiting.buttons & 16, 16);
   assert.equal(waiting.buttons & 1, 0);
   fake.client.remoteFrames = [{ snap: opponent() }];
   weapon.ws.ads = 0.75;
@@ -1570,7 +1619,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.8');
+  assert.equal(exported.scriptVersion, '1.5.9');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -1602,7 +1651,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.8');
+  assert.equal(payload.scriptVersion, '1.5.9');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -1738,12 +1787,39 @@ test('Insert before mounting applies the initial hidden state and the next Inser
   keys(event);
   assert.equal(panel.hidden, false);
   assert.equal(showButton.hidden, true);
-  h.controls.get('button').events.get('click')();
+  h.controls.get('[data-hide-panel]').events.get('click')();
   assert.equal(panel.hidden, true);
   assert.equal(showButton.hidden, false);
   showButton.events.get('click')();
   assert.equal(panel.hidden, false);
   assert.equal(showButton.hidden, true);
+  h.api.destroy();
+});
+
+test('the panel leaves gameplay keys alone and Resume restores pointer lock', () => {
+  let lockRequests = 0;
+  const canvas = { requestPointerLock() { lockRequests++; } };
+  const h = harness();
+  attach(h, fakeClient({ canvas }));
+  h.mount();
+  assert.equal(h.rootListeners.has('keydown'), false);
+  assert.equal(h.rootListeners.has('keyup'), false);
+  const gameplayKey = { type: 'keydown', code: 'KeyF', repeat: false,
+    target: { tagName: 'CANVAS' }, composedPath: () => [canvas] };
+  h.windowListeners.get('keydown')(gameplayKey);
+  assert.equal(h.api.trace().interactions.at(-1).key, 'KeyF');
+  assert.equal(h.api.trace().interactions.at(-1).pointerLocked, false);
+  h.controls.get('[data-resume-game]').events.get('click')();
+  assert.equal(lockRequests, 1);
+  h.controls.get('[data-hide-panel]').events.get('click')();
+  assert.equal(lockRequests, 2);
+  h.document.pointerLockElement = canvas;
+  h.listeners.get('pointerlockchange')();
+  h.windowListeners.get('keyup')({ ...gameplayKey, type: 'keyup' });
+  assert.equal(h.api.trace().interactions.at(-2).phase, 'pointerlockchange');
+  assert.equal(h.api.trace().interactions.at(-1).pointerLocked, true);
+  h.controls.get('[data-resume-game]').events.get('click')();
+  assert.equal(lockRequests, 2, 'no new request is needed while locked');
   h.api.destroy();
 });
 
