@@ -1138,11 +1138,14 @@
       ? (1 / 30) / Math.max(0.05, weapon.adsSeconds) : 0;
     const nextAds = frame.buttons & 2 ? Math.min(1, ads + adsStep) :
       Math.max(0, ads - 1.4 * adsStep);
-    const moving = Math.hypot(frame.mx, frame.mz) > 0.1 ||
-      Math.hypot(player?.vel?.[0] || 0, player?.vel?.[2] || 0) > 0.5;
+    // The captured kernel divides horizontal speed by its 5 m/s walk speed.
+    // A fresh movement input can accelerate before this frame's weapon step.
+    const movementRatio = Math.max(
+      Math.min(1, Math.hypot(player?.vel?.[0] || 0, player?.vel?.[2] || 0) / 5),
+      Math.hypot(frame.mx, frame.mz) > 0.1 ? 1 : 0);
     const spreadAt = value => Math.max(0,
       weapon.hipSpread * (1 - value) + weapon.adsSpread * value +
-      Math.max(0, weapon.moveSpread) * (moving ? 1 : 0) * (1 - 0.6 * value) +
+      Math.max(0, weapon.moveSpread) * movementRatio * (1 - 0.6 * value) +
       Math.max(0, ws.bloom) * (1 - 0.7 * value) +
       (player?.grounded === false ? 2.5 * (1 - 0.5 * value) : 0));
     const sample = runtime.seedSync.status === 'diverged'
