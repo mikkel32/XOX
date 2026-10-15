@@ -256,7 +256,81 @@ multi-pellet projections continue to use the captured box geometry. New
 trace reports count `partial` and `fallback-partial` firing decisions. Local
 tests cover exposed upper and side head points, a fully covered head, and
 selection preference for a fully visible target.
-Server hit-rate improvement awaits a 1.5.15 match.
+The 1.5.15 match below tests this path but does not isolate its hit-rate effect.
+
+### Version 1.5.16 adaptive hip fire
+
+The user-supplied 1.5.15 export from 2026-10-15 20:14 UTC has SHA-256
+`de953f9a8eab1bb4c42d45b5dc0b543842c73a7209b281c09ea137bc8b261fac`.
+It covers one match with 241 server shot events, 68 hit events, 44 head hits,
+12 kills, and no recorded kick or error. The 503 retained outgoing Fire
+decisions all requested and selected Head; 13 used a partially visible
+interior point. All 246 retained locally predicted shots were scoped. The
+server events lack input sequences, so neither the 13 partial selections nor
+individual weapon shots have a confirmed per-shot outcome. The overall
+68/241 event ratio cannot be compared causally with the earlier 83/188 match
+because the engagements, weapons, and distances differed.
+
+The captured shared weapon step accepts Fire without Aim. It computes a
+larger spread from hip spread, movement, and bloom, and draws the next radial
+offset deterministically from the predictor's seed and shot count. Version
+1.5.16 uses that next random draw, when the matching client physics exports
+are available, to decide whether a single-projectile unscoped shot can fit
+inside the existing eight-degree outgoing turn after a one-degree margin.
+Without those exports, it uses the full spread bound. It keeps normal ADS for
+wider samples, multi-pellet weapons, airborne shots, and targets beyond the
+hip-fire distance limit. The default limit is 40 m because the supplied trace
+starts around 82 m and provides no live hip-fire hit evidence. The panel can
+raise the limit to 600 m for explicit experiments. Trace exports now identify
+unscoped Fire, seed-assisted planning, and planned deviation separately from
+server combat events.
+
+Hash-matched captured-kernel tests show Fire without Aim and correct local
+ray alignment for seeded unscoped Longbow samples while wider samples fall
+back to scope. They do not establish server acceptance, perfect hits, or
+zero server spread. A new live trace is needed to judge actual hit rate and
+whether the scope-free path helps in a match.
+
+### Version 1.5.17: live hip-fire evidence and combat agent
+
+The user-supplied 1.5.16 trace from 2026-10-15 20:30 UTC has SHA-256
+`0e49e5ff56e2b16c3b15a541fd7dc14e3fa4781454012a4d4747a5d39566adaf`.
+It retained 382 server shot events, 70 hits, 36 head hits, and 11 kills in
+the observed match, with no recorded kick. The user changed the hip-fire
+distance during the match from 80 m to 600 m and later to 40 m. The 207
+retained unscoped Fire decisions all used a seeded spread estimate; 106
+had a locally predicted and corrected shot. These are input observations,
+not proof of server zero spread.
+
+The new analyzer infers a nine-tick offset between local prediction and
+server shot events for this match and pairs 328 retained shots by match,
+tick and plausible arrival delay. Of those, 192 also retain a Fire decision.
+The provisional pairs show 0 hits in 47 hip shots at 100–149 m, 1 in 21
+moving hip shots under 40 m, and 2 in 3 stationary hip shots under 40 m.
+Scoped paired shots with decisions show 37 hits in 121 shots across their
+recorded distances. The modes used different weapons, ranges, target motion,
+and times, so these counts support a conservative hip-fire gate but are not
+a controlled experiment or guaranteed per-shot attribution.
+
+Version 1.5.17 caps adaptive hip fire at 40 m, requires ground movement below
+0.5 m/s, and falls back to ADS if an acknowledged server shot count differs
+from the local shot count. The trace now includes server bloom and shot count,
+the local pre-reconcile shot count, and ACK-aligned shot-count differences.
+This can test whether deterministic correction uses the same shot number as
+the server. The new opt-in combat agent uses the game's normal input frames:
+it approaches visible opponents, stops and settles before firing, steers
+toward the safe zone, seeks compatible ammo when empty, and yields movement
+to player keys. The captured client identifies bot players in its roster but
+does not expose a callable bot controller; this agent is new client code.
+Local tests verify its input behavior. No 1.5.17 live match has yet confirmed
+its navigation, pickup, hit rate, or server acceptance.
+
+The captured weapon simulation computes spread from ADS, movement, bloom and
+weapon stats on each shot. The client sends aim and button inputs, with no
+spread parameter. Rotating a locally predicted ray can cancel its estimated
+deviation, but client code alone cannot set authoritative server spread to
+zero. The 1.5.16 live misses demonstrate why local zero-miss geometry must
+not be described as guaranteed server hits.
 
 ## What changed and what was observed
 

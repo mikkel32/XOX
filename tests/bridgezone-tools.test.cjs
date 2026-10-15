@@ -649,6 +649,204 @@ test('fast fire skips local pacing but still waits for aim and real ammunition',
   h.api.destroy();
 });
 
+test('adaptive hip fire sends Fire without Aim when spread correction fits', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20] }) }];
+  fake.client.predictor.ps.grounded = true;
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats, {
+    hipSpread: 3.2, adsSpread: 0.12, moveSpread: 1.6
+  });
+  const spread = 2 * Math.PI / 180;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: !!(input.buttons & 1), dirs: [[
+      -Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+      Math.sin(input.pitch),
+      -Math.cos(input.yaw + spread) * Math.cos(input.pitch)
+    ]]
+  } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, hipFire: true, point: 'chest' });
+  send(fake, [frame({ s: 600, buttons: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 3, 1, 'the planned shot fires without requesting scope');
+  assert.equal(sampled.buttons & 16, 0, 'sprint is released for the firing frame');
+  fake.client.predictor.predict(sampled);
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 3, 1);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.adsRequested, false);
+  assert.equal(decision.sampled.hipFire, true);
+  assert.equal(decision.sampled.hipSeeded, false);
+  assert.equal(decision.correctionApplied, true);
+  assert.ok(decision.geometry.predictedOutgoing.minMeters < 0.01);
+  assert.equal(h.api.trace().fireGates.at(-1).hipFire, true);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -100] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2,
+    'the default range cap preserves ADS for distant shots');
+  h.api.setOptions({ hipRange: 120 });
+  assert.equal(h.api.options.hipRange, 40, 'the live trace caps unscoped range at 40 m');
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2,
+    'the distance control cannot force the inaccurate 100 m hip shot');
+  h.api.destroy();
+});
+
+test('a wide seeded hip spread falls back to ADS without advancing the shot', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  const predictor = fake.client.predictor;
+  predictor.ps.grounded = true;
+  predictor.seed = 123;
+  predictor.index = 0;
+  Object.assign(predictor.ws, { ads: 1, bloom: 0, switching: 0, shots: 4 });
+  Object.assign(predictor.activeStats, {
+    hipSpread: 8, adsSpread: 0.1, moveSpread: 4
+  });
+  let random = 0.01;
+  h.api.attachClient(fake.client, { shotSeed: () => 9, mulberry32: () => () => random });
+  h.api.setOptions({ rage: true, hipFire: true });
+  const narrow = fake.client.input.sample('sample-argument');
+  assert.equal(narrow.buttons & 2, 0);
+  assert.equal(h.api.runtime.sampleGate.hipSeeded, true);
+  assert.equal(h.api.runtime.sampleGate.hipFire, true);
+  random = 0.99;
+  const wide = fake.client.input.sample('sample-argument');
+  assert.equal(wide.buttons & 2, 2);
+  assert.equal(h.api.runtime.sampleGate.hipFire, false);
+  assert.equal(predictor.ws.shots, 4, 'planning does not consume the next shot');
+  h.api.setOptions({ hipFire: false });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2);
+  h.api.destroy();
+});
+
+test('combat agent approaches an enemy, stops to fire, and yields to manual movement', () => {
+  const h = harness();
+  const fake = rageClient();
+  let manual = false;
+  fake.client.input.sample = () => frame({ s: 810, buttons: 0,
+    mx: manual ? 1 : 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  Object.assign(fake.client.predictor.activeStats,
+    { class: 'rifle', rangeEnd: 90, hipSpread: 3, adsSpread: 0.1, moveSpread: 1 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  attach(h, fake);
+  h.api.setOptions({ agent: true, hipFire: false, stealth: true });
+  assert.equal(h.api.options.rage, true);
+  assert.equal(h.api.options.silent, true);
+  const travel = fake.client.input.sample();
+  assert.ok(Math.abs(travel.mx) < 1e-9 && travel.mz > 0.9);
+  assert.equal(travel.buttons & 16, 16);
+  assert.equal(travel.buttons & 3, 0, 'travel does not fire or scope');
+  assert.equal(h.api.inspect().agent.action, 'approach');
+  send(fake, [travel]);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  fake.client.predictor.ps.vel = [0, 0, -2];
+  const settling = fake.client.input.sample();
+  assert.equal(settling.buttons & 3, 2, 'the agent waits for movement to settle');
+  assert.equal(h.api.runtime.sampleGate.reason, 'agent-settle');
+  fake.client.predictor.ps.vel = [0, 0, 0];
+  const engage = fake.client.input.sample();
+  assert.equal(engage.mx, 0);
+  assert.equal(engage.mz, 0);
+  assert.equal(engage.buttons & 3, 3, 'the agent stops and requests scoped Fire');
+  assert.equal(h.api.inspect().agent.action, 'engage');
+  manual = true;
+  const overridden = fake.client.input.sample();
+  assert.equal(overridden.mx, 1);
+  assert.equal(overridden.mz, 0);
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  h.api.setOptions({ rage: false });
+  assert.equal(h.api.options.agent, false, 'turning off Rage also stops the agent');
+  h.api.destroy();
+});
+
+test('combat agent moves toward the observed safe zone and does not fire while travelling', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 811, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  fake.client.latest.storm = { state: 'waiting', center: [100, 0], radius: 10 };
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  const move = fake.client.input.sample();
+  assert.ok(move.mx > 0.9 && Math.abs(move.mz) < 1e-9);
+  assert.equal(move.buttons & 16, 16);
+  assert.equal(move.buttons & 3, 0);
+  assert.equal(h.api.inspect().agent.action, 'storm');
+  assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'storm');
+  h.api.destroy();
+});
+
+test('combat agent leaves a manual F/E interaction on the wire', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 815, buttons: 64, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  h.api.setOptions({ agent: true, stealth: true });
+  const input = fake.client.input.sample();
+  assert.equal(input.buttons & 64, 64);
+  assert.equal(input.buttons & 1, 0);
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  assert.equal(send(fake, [input])[0].buttons & 64, 64);
+  h.api.destroy();
+});
+
+test('combat agent aims at nearby matching ammo before issuing Interact', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 812, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  fake.client.predictor.slots[0].mag = 0;
+  fake.client.predictor.ammo.light = 0;
+  fake.client.remoteFrames = [];
+  fake.client.loot = { items: new Map([['ammo-1',
+    { id: 'ammo-1', kind: 'ammo', ammo: 'light', pos: [0, 0, -1] }]]) };
+  fake.client.target = { target: { kind: 'item', id: 'ammo-1' } };
+  attach(h, fake);
+  h.api.setOptions({ agent: true, ammo: true });
+  const first = fake.client.input.sample();
+  assert.equal(first.buttons & 64, 0, 'the first frame turns toward the item');
+  let pickup = null;
+  for (let i = 0; i < 16; i++) {
+    pickup = fake.client.input.sample();
+    if (pickup.buttons & 64) break;
+  }
+  assert.equal(pickup.buttons & 64, 64);
+  assert.equal(pickup.buttons & 1, 0, 'pickup suppresses Fire');
+  assert.equal(h.api.inspect().agent.action, 'loot-aim');
+  fake.client.loot.items.clear();
+  fake.client.target = { target: null };
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  const empty = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'no-ammo');
+  assert.equal(empty.mx, 0);
+  assert.equal(empty.mz, 0, 'without ammo the agent does not rush an opponent');
+  h.api.destroy();
+});
+
+test('authoritative shot-count divergence disables adaptive hip fire', () => {
+  const h = harness();
+  const fake = rageClient();
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats,
+    { hipSpread: 2, adsSpread: 0.1, moveSpread: 1 });
+  fake.client.ingestEvents = snapshot => snapshot;
+  attach(h, fake);
+  h.api.setOptions({ rage: true, hipFire: true });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 0);
+  h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
+    sequence: 23, weapon: { shots: 1 } });
+  fake.client.ingestEvents({ t: 100, me: { ack: 23, shots: 5 }, events: [] });
+  assert.equal(h.api.inspect().seedSync.status, 'diverged');
+  assert.equal(h.api.trace().serverSnapshots.at(-1).acknowledgedShot.delta, 4);
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2);
+  h.api.destroy();
+});
+
 test('fast fire takes a correctable close shot during ADS ramp but waits when spread is too wide', () => {
   const h = harness();
   const fake = rageClient();
@@ -667,7 +865,7 @@ test('fast fire takes a correctable close shot during ADS ramp but waits when sp
     ]]
   } });
   attach(h, fake);
-  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, point: 'chest' });
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, hipFire: false, point: 'chest' });
   send(fake, [frame({ s: 610, buttons: 0 })]);
   const sampled = fake.client.input.sample('sample-argument');
   assert.equal(sampled.buttons & 3, 3, 'Fire and ADS are both requested before full ADS');
@@ -1298,6 +1496,11 @@ test('captured weapon step accepts a shot before ADS completes', {
   assert.equal(result.fired, true);
   assert.ok(state.ads > 0 && state.ads < 1);
   assert.ok(state.cooldown > 0);
+  const hipState = { cooldown: 0, reload: 0, reloadTotal: 0, switching: 0,
+    ads: 0, bloom: 0, burst: 0, trigger: false, shots: 0 };
+  const hipResult = stepWeapon(hipState, weapon, { buttons: 1 }, player, 30, 90, 1, 0);
+  assert.equal(hipResult.fired, true, 'the captured kernel does not require Aim for Fire');
+  assert.equal(hipState.ads, 0);
 });
 
 test('captured pre-ADS spread is corrected through the bounded outgoing path', {
@@ -1330,7 +1533,7 @@ test('captured pre-ADS spread is corrected through the bounded outgoing path', {
   fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
     weapon: { fired: true, dirs: directions(weapon, input.yaw, input.pitch, 4.8, seed) } });
   attach(h, fake);
-  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, point: 'chest' });
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, hipFire: false, point: 'chest' });
   for (seed = 1; seed <= 64; seed++) {
     send(fake, [frame({ s: 7000 + seed * 2, buttons: 0 })]);
     const input = { ...fake.client.input.sample('sample-argument'), s: 7001 + seed * 2 };
@@ -1343,6 +1546,73 @@ test('captured pre-ADS spread is corrected through the bounded outgoing path', {
       1.62 + distance * ray[1] >= 0.9 && 1.62 + distance * ray[1] <= 1.52,
     `seed ${seed} should intersect the captured torso box`);
   }
+  h.api.destroy();
+});
+
+test('captured shot seed selects correctable unscoped Longbow shots and scopes wider ones', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const source = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = source.indexOf(`function ${name}(`);
+    const end = source.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return source.slice(start, end);
+  };
+  const kernel = vm.runInNewContext(
+    ['ti', 'tl', 'tn', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') +
+    ';({shotSeed:tn,mulberry32:tl,shotDirections:tU})',
+    { tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value)) }
+  );
+  const h = harness();
+  const fake = rageClient();
+  const predictor = fake.client.predictor;
+  predictor.ps.grounded = true;
+  predictor.index = 0;
+  predictor.slots[0].weapon = 'longbow';
+  Object.assign(predictor.ws, { ads: 0, bloom: 0, switching: 0, shots: 0 });
+  Object.assign(predictor.activeStats, {
+    hipSpread: 8, adsSpread: 0.1, moveSpread: 4
+  });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: !!(input.buttons & 1),
+    dirs: kernel.shotDirections({ pellets: 1 }, input.yaw, input.pitch, 12,
+      kernel.shotSeed(predictor.seed, predictor.index, predictor.ws.shots + 1))
+  } });
+  attach(h, fake);
+  h.api.attachClient(fake.client, kernel);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true,
+    hipFire: true, hipRange: 40, point: 'head', range: 600 });
+  let hip = 0, scoped = 0;
+  for (let seed = 1; seed <= 96; seed++) {
+    predictor.seed = seed;
+    send(fake, [frame({ s: 10000 + seed * 2, buttons: 0 })]);
+    const input = { ...fake.client.input.sample('sample-argument'), s: 10001 + seed * 2 };
+    if (!(input.buttons & 1)) {
+      assert.equal(input.buttons & 2, 2, 'wide samples use normal ADS');
+      scoped++;
+      continue;
+    }
+    assert.equal(input.buttons & 2, 0, 'safe samples do not request Aim');
+    fake.client.predictor.predict(input);
+    const output = send(fake, [input])[0];
+    const decision = h.api.trace().aimDecisions.at(-1);
+    const ray = kernel.shotDirections({ pellets: 1 }, output.yaw, output.pitch, 12,
+      kernel.shotSeed(seed, predictor.index, predictor.ws.shots + 1))[0];
+    const difference = decision.target.point.map((value, i) => value - decision.target.origin[i]);
+    const travel = difference.reduce((sum, value, i) => sum + value * ray[i], 0);
+    const miss = Math.hypot(...difference.map((value, i) => value - travel * ray[i]));
+    assert.ok(miss < 0.001, `seed ${seed} should land on the locally selected Head point`);
+    assert.equal(decision.sampled.hipSeeded, true);
+    assert.equal(decision.target.aimPart, 'head');
+    hip++;
+  }
+  assert.ok(hip > 10 && scoped > 10, `expected both modes, got hip ${hip}, ADS ${scoped}`);
   h.api.destroy();
 });
 
@@ -2068,7 +2338,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.15');
+  assert.equal(exported.scriptVersion, '1.5.17');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2100,7 +2370,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.15');
+  assert.equal(payload.scriptVersion, '1.5.17');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

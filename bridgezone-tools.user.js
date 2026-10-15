@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.15
-// @description  Xray, adaptive Rage aim, auto fire, and ammo pickup assistance.
+// @version      1.5.17
+// @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
 // @run-at       document-start
@@ -15,17 +15,19 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.15';
+  const VERSION = '1.5.17';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
+  const HIP_RANGE_LIMIT = 40;
   const OUTGOING_AIM_TOLERANCE = 0.008;
   const INTERACT_BUTTON = 64;
   const AMMO_TYPES = ['light', 'heavy', 'shells', 'sniper'];
   const AMMO_CAPS = { light: 240, heavy: 180, shells: 48, sniper: 40 };
   const TRACE_LIMITS = Object.freeze({ frames: 4096, localShots: 512, aimDecisions: 512,
     fireGates: 512, serverSnapshots: 1024, serverEvents: 1024,
-    settings: 64, interactions: 128, ammoPickups: 128, kicks: 64, connectionStates: 128, errors: 128 });
-  const defaults = { xray: true, loot: true, silent: true, rage: false, rapidFire: true, fov: 90, range: 600, point: 'auto', smartAim: true, visibleOnly: true, stealth: true, smooth: 1, ammo: true };
+    settings: 64, interactions: 128, ammoPickups: 128, agentDecisions: 256,
+    kicks: 64, connectionStates: 128, errors: 128 });
+  const defaults = { xray: true, loot: true, silent: true, rage: false, rapidFire: true, hipFire: true, hipRange: 40, agent: false, fov: 90, range: 600, point: 'auto', smartAim: true, visibleOnly: true, stealth: true, smooth: 1, ammo: true };
   const options = { ...defaults };
   const runtime = {
     client: null, physics: {}, hookReady: false, stopped: false, aimRejected: false,
@@ -35,7 +37,10 @@
   runtime.stealth = { deterministic: 0, misses: 0, cooldown: 0, backoffUntil: 0, lastShotAt: 0, heldShots: 0, phase: Math.random() * Math.PI * 2 };
   runtime.outgoingAim = { yaw: null, pitch: null, targetIndex: null, ready: false, pendingManualUntil: 0 };
   runtime.ammoPickup = { id: null, nextAt: 0 };
+  runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
+    lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0 };
   runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
+  runtime.seedSync = { status: 'unknown', aligned: 0, diverged: 0 };
   const seenServerEvents = new Set();
   const restores = [];
   const clientRestores = [];
@@ -60,6 +65,7 @@
     settings: [],
     interactions: [],
     ammoPickups: [],
+    agentDecisions: [],
     kicks: [],
     connectionStates: [],
     errors: [],
@@ -101,7 +107,7 @@
   }
 
   function recordSettings(reason) {
-    const values = Object.fromEntries(['silent', 'rage', 'rapidFire', 'fov', 'range',
+    const values = Object.fromEntries(['silent', 'rage', 'rapidFire', 'hipFire', 'hipRange', 'agent', 'fov', 'range',
       'point', 'smartAim', 'visibleOnly', 'stealth', 'smooth', 'ammo'].map(key => [key, options[key]]));
     const previous = runtime.trace.settings.at(-1);
     if (reason !== 'match-start' && previous && JSON.stringify(previous.values) === JSON.stringify(values)) return;
@@ -125,6 +131,9 @@
     runtime.pendingSampleContext = null;
     runtime.target = null;
     runtime.ammoPickup = { id: null, nextAt: 0 };
+    runtime.agent.action = 'off';
+    runtime.agent.goal = null;
+    runtime.agent.lastPosition = null;
     lootCacheClient = null;
     lootCache = [];
   }
@@ -132,14 +141,17 @@
   function setOptions(patch, persist = true) {
     if (!patch || typeof patch !== 'object') return;
     const wasStealth = options.stealth;
-    for (const name of ['xray', 'loot', 'silent', 'rage', 'rapidFire', 'smartAim', 'visibleOnly', 'stealth', 'ammo']) {
+    for (const name of ['xray', 'loot', 'silent', 'rage', 'rapidFire', 'hipFire', 'agent', 'smartAim', 'visibleOnly', 'stealth', 'ammo']) {
       if (typeof patch[name] === 'boolean') options[name] = patch[name];
     }
+    if (patch.agent === true) options.silent = options.rage = true;
+    if (patch.silent === false || patch.rage === false) options.agent = false;
     if (Number.isFinite(patch.fov)) options.fov = Math.max(1, Math.min(90, patch.fov));
     if (Number.isFinite(patch.range)) options.range = Math.max(10, Math.min(600, patch.range));
+    if (Number.isFinite(patch.hipRange)) options.hipRange = Math.max(10, Math.min(HIP_RANGE_LIMIT, patch.hipRange));
     if (['head', 'chest', 'auto'].includes(patch.point)) options.point = patch.point;
     if (Number.isFinite(patch.smooth)) options.smooth = Math.max(0, Math.min(1, patch.smooth));
-    if (runtime.aimRejected) options.silent = options.rage = false;
+    if (runtime.aimRejected) options.silent = options.rage = options.agent = false;
     recordSettings('change');
     if (persist) {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(options)); } catch { /* Storage is optional. */ }
@@ -468,12 +480,26 @@
     const predicted = client.predictor;
     const predictedSlot = predicted?.slots?.[predicted.active];
     const sentAt = ack === null ? null : client.sentAt?.get?.(ack);
+    const acknowledgedShot = ack === null ? null : [...runtime.trace.localShots].reverse().find(shot =>
+      shot.match === match && Number.isSafeInteger(shot.sequence) && shot.sequence <= ack &&
+      Number.isSafeInteger(shot.weapon?.shots));
+    const shotCountDelta = acknowledgedShot && Number.isSafeInteger(me.shots)
+      ? me.shots - acknowledgedShot.weapon.shots : null;
+    if (shotCountDelta === 0) {
+      runtime.seedSync.aligned++;
+      runtime.seedSync.status = 'aligned';
+    } else if (shotCountDelta !== null) {
+      runtime.seedSync.diverged++;
+      runtime.seedSync.status = 'diverged';
+    }
     recordTrace('serverSnapshots', {
       at: now, match, tick: Number.isFinite(snapshot.t) ? snapshot.t : null, ack,
       ackLatencyMs: Number.isFinite(sentAt) && now >= sentAt ? now - sentAt : null,
       reportedRttMs: Number.isFinite(client.rtt) ? client.rtt : null,
       weaponId: safeWeaponId(slot?.weapon),
       server: { ads: Number.isFinite(me.ads) ? me.ads : null,
+        bloom: Number.isFinite(me.bloom) ? me.bloom : null,
+        shots: Number.isSafeInteger(me.shots) ? me.shots : null,
         magazine: Number.isFinite(slot?.mag) ? slot.mag : null,
         ammo: ammoSnapshot(me.ammo),
         reload: Number.isFinite(me.reload) ? me.reload : null,
@@ -485,11 +511,14 @@
       predictorBeforeReconcile: predicted ? {
         ads: Number.isFinite(predicted.ws?.ads) ? predicted.ws.ads : null,
         bloom: Number.isFinite(predicted.ws?.bloom) ? predicted.ws.bloom : null,
+        shots: Number.isSafeInteger(predicted.ws?.shots) ? predicted.ws.shots : null,
         magazine: Number.isFinite(predictedSlot?.mag) ? predictedSlot.mag : null,
         ammo: ammoSnapshot(predicted.ammo),
         position: vector3(predicted.ps?.pos)
       } : null,
-      selfCombatEvents: combat
+      selfCombatEvents: combat,
+      acknowledgedShot: acknowledgedShot ? { sequence: acknowledgedShot.sequence,
+        shots: acknowledgedShot.weapon.shots, delta: shotCountDelta } : null
     });
   }
 
@@ -598,7 +627,8 @@
       outgoing: { yaw, pitch, buttons },
       weapon, player, target: targetNow,
       sampled: sampled ? { gate: sampled.reason, weaponAds: sampled.weaponAds,
-        earlyAds: sampled.earlyAds,
+        earlyAds: sampled.earlyAds, hipFire: sampled.hipFire,
+        hipSeeded: sampled.hipSeeded, hipDeviationDegrees: sampled.hipDeviationDegrees,
         target: sampled.target, delayMs: Math.max(0, performance.now() - sampled.at),
         selectionDriftMeters } : null,
       correction: correction ? { yaw: correction.yaw, pitch: correction.pitch } : null,
@@ -746,7 +776,7 @@
     let modified = false;
     const result = frames.map(frame => {
       if (!frame || ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) return frame;
-      if (frame.buttons & INTERACT_BUTTON) {
+      if ((frame.buttons & INTERACT_BUTTON) || options.agent && runtime.agent.action === 'loot-aim') {
         // Interaction and pickup use the player's real view. Match the next
         // turn to the angles that were actually sent during this frame.
         state.yaw = frame.yaw;
@@ -933,6 +963,221 @@
     return turn + (spread + 1) * Math.PI / 180 <= MAX_OUTGOING_TURN;
   }
 
+  function nextShotSpreadScale(client, ws) {
+    const predictor = client.predictor;
+    const { shotSeed, mulberry32 } = runtime.physics;
+    if (typeof shotSeed !== 'function' || typeof mulberry32 !== 'function' ||
+        !Number.isSafeInteger(predictor?.seed) || !Number.isSafeInteger(predictor?.index) ||
+        !Number.isSafeInteger(ws.shots) || ws.shots < 0) return { scale: 1, seeded: false };
+    try {
+      // The shared kernel consumes this first random number for the next
+      // projectile's radial spread. Never record the match seed in a trace.
+      const random = mulberry32(shotSeed(predictor.seed, predictor.index, ws.shots + 1))();
+      if (Number.isFinite(random) && random >= 0 && random < 1)
+        return { scale: Math.sqrt(random), seeded: true };
+    } catch { /* Use the full spread bound when the client kernel differs. */ }
+    return { scale: 1, seeded: false };
+  }
+
+  function hipShotPlan(client, frame, target, weapon, ws) {
+    const player = ownState(client);
+    if (weapon.pellets !== 1 || target.distance > Math.min(options.hipRange, HIP_RANGE_LIMIT) ||
+        player?.grounded !== true ||
+        Math.hypot(player.vel?.[0] || 0, player.vel?.[2] || 0) > 0.5 ||
+        runtime.seedSync.status === 'diverged' ||
+        (frame.buttons & (4 | 32 | 128)) ||
+        ![weapon.hipSpread, weapon.adsSpread, weapon.moveSpread,
+          ws.ads, ws.bloom, ws.switching].every(Number.isFinite) ||
+        ws.switching > 1 / 30) return null;
+    // Aim is released for this frame. ADS may take several frames to fall to
+    // zero, so bound the entire transition using both spread endpoints and
+    // the full movement term. The captured kernel uses sqrt(U) for radius.
+    const movement = Math.max(0, weapon.moveSpread);
+    const bloom = Math.max(0, ws.bloom);
+    const spreadDegrees = Math.max(
+      Math.max(0, weapon.hipSpread) + movement + bloom,
+      Math.max(0, weapon.adsSpread) + 0.4 * movement + 0.3 * bloom
+    );
+    const sample = nextShotSpreadScale(client, ws);
+    const deviationDegrees = spreadDegrees * sample.scale;
+    const radius = deviationDegrees * Math.PI / 180;
+    // Longitude changes faster near vertical aim. Keep a degree in reserve for
+    // sample-to-send target motion and local/server state disagreement.
+    const yawRadius = radius / Math.cos(Math.min(1.54, Math.abs(target.pitch) + radius));
+    const budget = MAX_OUTGOING_TURN - Math.PI / 180;
+    const currentYaw = runtime.outgoingAim.yaw ?? frame.yaw;
+    const currentPitch = runtime.outgoingAim.pitch ?? frame.pitch;
+    return {
+      eligible: Math.max(yawRadius, radius) <= budget,
+      ready: Math.abs(normalizedDelta(currentYaw, target.yaw)) + yawRadius <= budget &&
+        Math.abs(currentPitch - target.pitch) + radius <= budget,
+      seeded: sample.seeded,
+      deviationDegrees: Math.round(deviationDegrees * 100) / 100
+    };
+  }
+
+  function agentNote(action, goal = null, distance = null) {
+    const agent = runtime.agent;
+    agent.action = action;
+    agent.goal = goal;
+    const now = performance.now();
+    const key = [action, goal?.kind, goal?.index ?? '-', Math.round((distance || 0) / 10)].join(':');
+    if (agent.lastTraceKey === key && now - agent.lastTraceAt < 750) return;
+    agent.lastTraceKey = key;
+    agent.lastTraceAt = now;
+    recordTrace('agentDecisions', { at: now, match: runtime.trace.match, action,
+      goal: goal ? { kind: goal.kind, index: goal.index ?? null } : null,
+      distanceMeters: Number.isFinite(distance) ? Math.round(distance * 10) / 10 : null });
+  }
+
+  function stormCircle(storm, tick) {
+    if (!storm || storm.state === 'pending' || !Array.isArray(storm.center) ||
+        !storm.center.slice(0, 2).every(Number.isFinite) || !Number.isFinite(storm.radius)) return null;
+    if (storm.state !== 'shrinking' || storm.stage < 0 ||
+        !Array.isArray(storm.nextCenter) || !storm.nextCenter.slice(0, 2).every(Number.isFinite) ||
+        !Number.isFinite(storm.nextRadius) || !Number.isFinite(tick) ||
+        !Number.isFinite(storm.startsAt) || !Number.isFinite(storm.endsAt))
+      return { center: storm.center, radius: storm.radius };
+    const span = Math.max(1, storm.endsAt - storm.startsAt);
+    const t = Math.max(0, Math.min(1, 1 - (storm.endsAt - tick) / span));
+    return { center: [storm.center[0] + (storm.nextCenter[0] - storm.center[0]) * t,
+      storm.center[1] + (storm.nextCenter[1] - storm.center[1]) * t],
+      radius: storm.radius + (storm.nextRadius - storm.radius) * t };
+  }
+
+  function agentWaypoint(client, me, direction) {
+    const { getCollisionWorld, hasLineOfSight } = runtime.physics;
+    if (typeof getCollisionWorld !== 'function' || typeof hasLineOfSight !== 'function') return direction;
+    const origin = [me.pos[0], me.pos[1] + 1, me.pos[2]];
+    const world = getCollisionWorld();
+    if (!world) return direction;
+    const side = runtime.agent.sidestep;
+    for (const angle of [0, side * 0.6, -side * 0.6, side * 1.2, -side * 1.2]) {
+      const x = direction[0] * Math.cos(angle) - direction[1] * Math.sin(angle);
+      const z = direction[0] * Math.sin(angle) + direction[1] * Math.cos(angle);
+      if (hasLineOfSight(world, origin, [origin[0] + 4 * x, origin[1], origin[2] + 4 * z]))
+        return [x, z];
+    }
+    return null;
+  }
+
+  function agentInput(client, frame) {
+    const agent = runtime.agent;
+    agent.target = null;
+    agent.scan = null;
+    if (!options.agent || !playable(client) || ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) {
+      if (agent.action !== 'off') agentNote('off');
+      return frame;
+    }
+    if (Math.hypot(frame.mx, frame.mz) > 0.1 || frame.buttons & (1 | 2 | 4 | 8 | 16 | 64 | 128 | 256 | 512)) {
+      agentNote('manual-override');
+      return frame;
+    }
+    const me = ownState(client);
+    if (!vector3(me?.pos)) return frame;
+    const weapon = client.predictor?.activeStats;
+    const slot = client.predictor?.slots?.[client.predictor.active];
+    const tick = typeof client.renderTick === 'function' ? Math.round(client.renderTick()) : frame.vt;
+    const scan = { tick: Number.isFinite(tick) ? tick : null, range: options.range,
+      visibleOnly: options.visibleOnly, physicsAvailable: !!(runtime.physics.getCollisionWorld && runtime.physics.hasLineOfSight),
+      observed: 0, counts: {}, closest: null, selected: null };
+    const target = selectTarget(client, { ...frame, vt: tick }, null, scan);
+    agent.target = target;
+    agent.scan = scan;
+    const storm = stormCircle(client.latest?.storm, client.latest?.t);
+    const stormDistance = storm ? Math.hypot(me.pos[0] - storm.center[0], me.pos[2] - storm.center[1]) : 0;
+    let goal = null, action = 'engage', stopAt = 0, sprint = false;
+    if (storm && stormDistance > storm.radius - 8) {
+      goal = { kind: 'storm', position: [storm.center[0], storm.center[1]] };
+      action = 'storm'; sprint = true;
+    } else if (target && weapon && !(slot && slot.mag <= 0 &&
+        !(client.predictor?.ammo?.[weapon.ammo] > 0))) {
+      const classDistance = { sniper: 150, rifle: 70, smg: 30, pistol: 25, shotgun: 13 };
+      const ideal = classDistance[weapon.class] || 45;
+      const range = Number.isFinite(weapon.rangeEnd) ? weapon.rangeEnd * 0.8 : ideal;
+      stopAt = Math.max(10, Math.min(ideal, range));
+      if (target.distance > stopAt + 5) {
+        goal = { kind: 'opponent', index: target.index, position: [target.position[0], target.position[2]] };
+        action = 'approach'; sprint = true;
+      }
+    } else {
+      const ammoType = weapon?.ammo;
+      const reserve = client.predictor?.ammo?.[ammoType] || 0;
+      if (slot && slot.mag <= 0 && reserve <= 0) {
+        let nearest = null, nearestDistance = 40;
+        for (const item of client.loot?.items?.values?.() || []) {
+          if (item?.kind !== 'ammo' || item.ammo !== ammoType || !vector3(item.pos)) continue;
+          const distance = Math.hypot(item.pos[0] - me.pos[0], item.pos[2] - me.pos[2]);
+          if (distance < nearestDistance) { nearest = item; nearestDistance = distance; }
+        }
+        if (nearest) {
+          goal = { kind: 'ammo', id: nearest.id, position: [nearest.pos[0], nearest.pos[2]],
+            height: nearest.pos[1] };
+          action = nearestDistance < 2.1 ? 'loot-aim' : 'loot-travel';
+        }
+      }
+      if (!goal && slot && slot.mag <= 0 && reserve <= 0) {
+        agentNote('no-ammo');
+        return frame;
+      }
+      if (!goal) {
+        let nearest = null, nearestDistance = Math.min(options.range, 250);
+        for (const { snap } of client.remoteFrames || []) {
+          if (!enemy(client, snap, true)) continue;
+          const distance = Math.hypot(snap.p[0] - me.pos[0], snap.p[2] - me.pos[2]);
+          if (distance < nearestDistance) { nearest = snap; nearestDistance = distance; }
+        }
+        if (nearest) {
+          goal = { kind: 'opponent', index: nearest.i, position: [nearest.p[0], nearest.p[2]] };
+          action = 'search'; sprint = true; stopAt = 10;
+        }
+      }
+    }
+    if (!goal) {
+      agentNote(target ? 'engage' : 'idle', target ? { kind: 'opponent', index: target.index } : null,
+        target?.distance ?? null);
+      return frame;
+    }
+    const dx = goal.position[0] - me.pos[0], dz = goal.position[1] - me.pos[2];
+    const distance = Math.hypot(dx, dz);
+    agentNote(action, goal, distance);
+    if (distance < 0.001) return frame;
+    if (action === 'loot-aim') {
+      const eye = [me.pos[0], me.pos[1] + 1.62, me.pos[2]];
+      const pitch = Math.atan2(goal.height + 0.15 - eye[1], distance);
+      const yaw = Math.atan2(-dx, -dz);
+      const fromYaw = agent.lootYaw ?? frame.yaw, fromPitch = agent.lootPitch ?? frame.pitch;
+      const nextYaw = fromYaw + Math.max(-MAX_OUTGOING_TURN, Math.min(MAX_OUTGOING_TURN, normalizedDelta(fromYaw, yaw)));
+      const nextPitch = fromPitch + Math.max(-MAX_OUTGOING_TURN, Math.min(MAX_OUTGOING_TURN, pitch - fromPitch));
+      agent.lootYaw = nextYaw; agent.lootPitch = nextPitch;
+      const aligned = Math.abs(normalizedDelta(nextYaw, yaw)) < 0.03 && Math.abs(nextPitch - pitch) < 0.03;
+      const now = performance.now();
+      const interact = aligned && client.target?.target?.kind === 'item' &&
+        client.target.target.id === goal.id && now >= agent.nextInteractAt;
+      if (interact) agent.nextInteractAt = now + 850;
+      return { ...frame, yaw: nextYaw, pitch: nextPitch,
+        buttons: interact ? frame.buttons | INTERACT_BUTTON : frame.buttons };
+    }
+    agent.lootYaw = agent.lootPitch = null;
+    if (distance <= stopAt + 1) return frame;
+    const now = performance.now();
+    if (agent.lastPosition && now - agent.lastPositionAt > 650) {
+      if (Math.hypot(me.pos[0] - agent.lastPosition[0], me.pos[2] - agent.lastPosition[1]) < 0.25)
+        agent.sidestep *= -1;
+      agent.lastPosition = [me.pos[0], me.pos[2]];
+      agent.lastPositionAt = now;
+    } else if (!agent.lastPosition) {
+      agent.lastPosition = [me.pos[0], me.pos[2]];
+      agent.lastPositionAt = now;
+    }
+    const direction = agentWaypoint(client, me, [dx / distance, dz / distance]);
+    if (!direction) { agentNote('blocked', goal, distance); return frame; }
+    // The captured movement kernel maps camera-relative mx/mz into world x/z.
+    const mx = Math.cos(frame.yaw) * direction[0] - Math.sin(frame.yaw) * direction[1];
+    const mz = -Math.sin(frame.yaw) * direction[0] - Math.cos(frame.yaw) * direction[1];
+    return { ...frame, mx, mz, buttons: sprint ? frame.buttons | 16 : frame.buttons };
+  }
+
   function rageInput(client, frame) {
     if (!options.rage) return frame;
     if (frame.buttons & INTERACT_BUTTON) {
@@ -955,7 +1200,20 @@
     const scan = { tick: Number.isFinite(tick) ? tick : null, range: options.range,
       visibleOnly: options.visibleOnly, physicsAvailable: !!(runtime.physics.getCollisionWorld && runtime.physics.hasLineOfSight),
       observed: 0, counts: {}, closest: null, selected: null };
-    const target = selectTarget(client, { ...frame, vt: tick }, null, scan);
+    const target = options.agent && runtime.agent.scan
+      ? runtime.agent.target : selectTarget(client, { ...frame, vt: tick }, null, scan);
+    if (options.agent && runtime.agent.scan) Object.assign(scan, runtime.agent.scan);
+    if (options.agent && ['approach', 'search', 'storm', 'loot-travel', 'loot-aim', 'blocked'].includes(runtime.agent.action)) {
+      runtime.sampleGate = { reason: 'agent-' + runtime.agent.action, target, scan };
+      return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
+    }
+    if (options.agent && runtime.agent.action === 'engage') {
+      const velocity = vector3(ownState(client)?.vel) || [0, 0, 0];
+      if (Math.hypot(velocity[0], velocity[2]) > 0.5) {
+        runtime.sampleGate = { reason: 'agent-settle', target, scan };
+        return { ...frame, buttons: (frame.buttons & ~(1 | 16)) | 2 };
+      }
+    }
     const ws = predictor.ws;
     if (ws.reload > 0 || slot.mag <= 0) {
       const reserve = predictor.ammo?.[weapon.ammo] || 0;
@@ -971,14 +1229,19 @@
       runtime.sampleGate = { reason: 'no-target', target: null, scan };
       return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
-    let buttons = scopedButtons;
+    const hip = options.hipFire ? hipShotPlan(client, frame, target, weapon, ws) : null;
+    const hipFire = !!hip?.eligible;
+    let buttons = hipFire ? frame.buttons & ~(1 | 2 | 16) : scopedButtons;
     let reason = 'fire-request';
-    const earlyAds = Number.isFinite(ws.ads) && ws.ads < 0.995 &&
+    const earlyAds = !hipFire && Number.isFinite(ws.ads) && ws.ads < 0.995 &&
       canFireDuringAdsRamp(client, frame, target, weapon, ws);
-    if (Number.isFinite(ws.ads) && ws.ads < 0.995 && !earlyAds) reason = 'ads-ramp';
+    if (hipFire && !hip.ready) reason = 'hip-align';
+    else if (!hipFire && Number.isFinite(ws.ads) && ws.ads < 0.995 && !earlyAds) reason = 'ads-ramp';
     else if (weapon.fireMode !== 'auto' && (ws.trigger || ws.cooldown > 1 / 30 + 1e-9)) reason = 'cooldown';
     else buttons |= 1;
-    runtime.sampleGate = { reason, target, scan, earlyAds: earlyAds && !!(buttons & 1) };
+    runtime.sampleGate = { reason, target, scan, earlyAds: earlyAds && !!(buttons & 1),
+      hipFire, hipSeeded: !!hip?.seeded,
+      hipDeviationDegrees: hip?.deviationDegrees ?? null };
     return { ...frame, buttons };
   }
 
@@ -995,13 +1258,15 @@
     }
     const now = performance.now(), weapon = weaponSnapshot(client);
     const sampled = { at: now, reason, weaponAds: weapon.ads, earlyAds: !!gate.earlyAds,
+      hipFire: !!gate.hipFire, hipSeeded: !!gate.hipSeeded,
+      hipDeviationDegrees: gate.hipDeviationDegrees ?? null,
       target: targetSnapshot(gate.target), liveTarget: gate.target };
     runtime.pendingSampleContext = sampled;
     if (Number.isSafeInteger(original.s)) {
       runtime.sampleContexts.set(original.s, sampled);
       while (runtime.sampleContexts.size > 64) runtime.sampleContexts.delete(runtime.sampleContexts.keys().next().value);
     }
-    const key = [reason, gate.earlyAds ? 'early-ads' : 'full-ads',
+    const key = [reason, gate.hipFire ? 'hip' : gate.earlyAds ? 'early-ads' : 'full-ads',
       gate.target?.index ?? '-', weapon.id ?? '-',
       Math.round((gate.target?.distance || 0) / 25)].join(':');
     if (runtime.lastGateTrace?.key === key && now - runtime.lastGateTrace.at < 250) return;
@@ -1014,6 +1279,8 @@
       ? Math.abs(aim.pitch - target.pitch) : null;
     recordTrace('fireGates', { at: now, match: runtime.trace.match, sequence: original.s,
       tick: original.vt, reason, earlyAds: !!gate.earlyAds,
+      hipFire: !!gate.hipFire, hipSeeded: !!gate.hipSeeded,
+      hipDeviationDegrees: gate.hipDeviationDegrees ?? null,
       originalButtons: original.buttons, sampledButtons: prepared.buttons,
       inputMovement: [original.mx, original.mz], weapon, player: playerSnapshot(client),
       target: targetSnapshot(target), scan: gate.scan,
@@ -1037,7 +1304,8 @@
   }
 
   function autoPickupAmmoFrame(client, frame) {
-    if (!options.ammo || (frame.buttons & (1 | INTERACT_BUTTON)) ||
+    if (!options.ammo || options.agent && runtime.agent.action === 'loot-aim' ||
+        (frame.buttons & (1 | INTERACT_BUTTON)) ||
         client.you == null || client.latest?.phase === 'finished' ||
         client.input?.enabled === false || client.disposed || client.paused ||
         client.localDead?.() || client.localDowned?.()) return frame;
@@ -1087,8 +1355,11 @@
     runtime.pendingSampleContext = null;
     seenServerEvents.clear();
     runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
+    runtime.seedSync = { status: 'unknown', aligned: 0, diverged: 0 };
     runtime.target = null;
     runtime.ammoPickup = { id: null, nextAt: 0 };
+    runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
+      lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0 };
     runtime.sampleGate = null;
     runtime.lastGateTrace = null;
     runtime.lastServerSnapshot = null;
@@ -1169,6 +1440,9 @@
         runtime.sampleHoldReason = null;
         runtime.pendingSampleContext = null;
         runtime.autoPickupRequested = false;
+        try { prepared = agentInput(client, prepared); }
+        catch (error) { recordTrace('errors', { at: new Date().toISOString(),
+          where: 'combat-agent', type: error?.name || 'Error' }); }
         try { prepared = autoPickupAmmoFrame(client, prepared); }
         catch (error) { recordTrace('errors', { at: new Date().toISOString(),
           where: 'ammo-pickup', type: error?.name || 'Error' }); }
@@ -1239,7 +1513,8 @@
     const path = 'static/chunks/' + id + '.js';
     window.TURBOPACK.push([path, id, context => {
       const physics = context.i(54145);
-      for (const name of ['getCollisionWorld', 'hasLineOfSight']) runtime.physics[name] = physics[name];
+      for (const name of ['getCollisionWorld', 'hasLineOfSight', 'shotSeed', 'mulberry32'])
+        runtime.physics[name] = physics[name];
       physicsImportStarted = false;
       if (runtime.error.startsWith('Physics hook:')) runtime.error = '';
     }]);
@@ -1280,7 +1555,9 @@
             for (let i = 0; i < entries.length; i += 3) {
               if (entries[i + 1] !== 0) continue;
               const key = entries[i], value = entries[i + 2];
-              if (moduleId === 54145 && ['getCollisionWorld', 'hasLineOfSight'].includes(key)) runtime.physics[key] = value;
+              if (moduleId === 54145 &&
+                  ['getCollisionWorld', 'hasLineOfSight', 'shotSeed', 'mulberry32'].includes(key))
+                runtime.physics[key] = value;
               if (moduleId === 97294 && key === 'createZoneClient' && typeof value === 'function') {
                 runtime.hookReady = true;
                 entries[i + 2] = function (...params) {
@@ -1474,13 +1751,18 @@
 
   function syncControls() {
     if (!root) return;
-    for (const name of ['xray', 'loot', 'silent', 'rage', 'smartAim', 'visibleOnly', 'stealth', 'ammo']) root.querySelector('[name="' + name + '"]').checked = options[name];
-    for (const name of ['fov', 'range', 'point']) root.querySelector('[name="' + name + '"]').value = options[name];
+    for (const name of ['xray', 'loot', 'silent', 'rage', 'rapidFire', 'hipFire', 'agent',
+      'smartAim', 'visibleOnly', 'stealth', 'ammo'])
+      root.querySelector('[name="' + name + '"]').checked = options[name];
+    for (const name of ['fov', 'range', 'hipRange', 'point'])
+      root.querySelector('[name="' + name + '"]').value = options[name];
     root.querySelector('[name="smooth"]').value = options.smooth;
     root.querySelector('[data-value="fov"]').textContent = options.fov + ' deg';
     root.querySelector('[data-value="range"]').textContent = options.range + ' m';
+    root.querySelector('[data-value="hipRange"]').textContent = options.hipRange + ' m';
     root.querySelector('[data-value="smooth"]').textContent = options.smooth.toFixed(2);
     root.querySelector('[name="fov"]').disabled = options.rage;
+    root.querySelector('[name="hipRange"]').disabled = !options.hipFire;
     root.querySelector('[name="smartAim"]').disabled = options.point !== 'auto';
     for (const name of ['silent', 'rage']) root.querySelector('[name="' + name + '"]').disabled = runtime.aimRejected;
   }
@@ -1500,7 +1782,10 @@
     const targetRange = runtime.target && Number.isFinite(runtime.target.distance)
       ? ' @ ' + Math.round(runtime.target.distance) + ' m' : '';
     const targetPart = runtime.target?.aimPart ? ' / ' + runtime.target.aimPart.toUpperCase() : '';
-    const metrics = 'AIM ' + runtime.rewrites + ' redirected / ' + runtime.stealth.heldShots + ' fire frames held / SERVER ' + runtime.server.hits + ' hits, ' + runtime.server.shots + ' shots';
+    const metrics = 'AIM ' + runtime.rewrites + ' redirected / ' + runtime.stealth.heldShots +
+      ' fire frames held / SERVER ' + runtime.server.hits + ' hits, ' + runtime.server.shots +
+      ' shots / AGENT ' + (options.agent ? runtime.agent.action : 'off') +
+      ' / SEED ' + runtime.seedSync.status;
     root.querySelector('[data-live-metrics]').textContent = metrics;
     stats.textContent = 'TARGET ' + targetName + targetRange + targetPart +
       ' / ' + runtime.compensated + ' shot corrections / ' + metrics;
@@ -1548,15 +1833,18 @@
         <label class="feature">Silent AIM <span class="key">F9</span><input aria-label="Silent AIM" name="silent" type="checkbox"></label>
         <label class="feature">Rage / 360 + auto fire<input aria-label="Rage mode" name="rage" type="checkbox"></label>
         <label class="feature">Fast fire when ready<input aria-label="Fast fire" name="rapidFire" type="checkbox"></label>
+        <label class="feature">Adaptive hip fire<input aria-label="Adaptive hip fire" name="hipFire" type="checkbox"></label>
+        <label class="feature">Combat agent <span class="key">Auto move</span><input aria-label="Combat agent" name="agent" type="checkbox"></label>
         <div class="setting"><label for="fov">Normal aim cone (half-angle)<output data-value="fov"></output></label><input id="fov" name="fov" aria-label="Aim cone" type="range" min="1" max="90" step="1"></div>
         <div class="setting"><label for="range">Maximum range<output data-value="range"></output></label><input id="range" name="range" aria-label="Maximum range" type="range" min="10" max="600" step="10"></div>
+        <div class="setting"><label for="hipRange">Hip-fire max distance<output data-value="hipRange"></output></label><input id="hipRange" name="hipRange" aria-label="Hip-fire max distance" type="range" min="10" max="40" step="10"></div>
         <label>Target point<select name="point" aria-label="Target point"><option value="auto">Auto / clear point</option><option value="head">Head</option><option value="chest">Chest</option></select></label>
         <label>Adaptive Auto point<input name="smartAim" aria-label="Adaptive Auto point" type="checkbox"></label>
         <label>Skip targets behind cover<input name="visibleOnly" aria-label="Skip targets behind cover" type="checkbox"></label>
         <label class="feature">Anticheat stealth<input name="stealth" aria-label="Anticheat stealth" type="checkbox"></label>
         <label class="feature">Ammo assist / reload + pickup<input name="ammo" aria-label="Ammo assist" type="checkbox"></label>
         <div class="setting"><label for="smooth">Aim smoothing<output data-value="smooth"></output></label><input id="smooth" name="smooth" aria-label="Aim smoothing" type="range" min="0.1" max="0.95" step="0.05"></div>
-        <p class="note">Insert: show/hide. Press Resume after using this panel to restore game controls. F/E interaction takes priority over automatic aim and fire. Head and Chest stay exact selections. Auto adapts to distance and movement when Adaptive Auto point is on; with it off, Auto uses Head. Ammo assist picks up matching ammo within reach and requests normal reloads. Scoped movement stays slower while firing; Rage releases automatic scope during reload. Server spread and camera recoil may remain. Cover still blocks shots. Use server hits to judge results.</p>
+        <p class="note">Insert: show/hide. Resume restores game controls. F/E takes priority. Combat agent enables Rage and moves toward visible enemies, available ammo, or the safe zone; your movement or action keys override it. It stops to shoot inside effective weapon range. Head and Chest are exact choices; Auto may adapt. Hip fire is limited to stationary shots within 40 m because longer and moving hip shots had poor results in the last trace. Predicted spread correction is a local estimate; only server hits confirm accuracy. Server spread, recoil, cover and weapon limits remain.</p>
       </div><div class="status"><div role="status"></div><div class="stats"></div></div>
     </aside><button type="button" class="show-tools" data-show-panel hidden aria-label="Show tools panel">Show tools</button>`;
     document.documentElement.appendChild(host);
@@ -1655,7 +1943,8 @@
     version: VERSION, options, runtime, setOptions,
     attachClient(client, physics) {
       if (physics) {
-        for (const name of ['getCollisionWorld', 'hasLineOfSight']) runtime.physics[name] = physics[name];
+        for (const name of ['getCollisionWorld', 'hasLineOfSight', 'shotSeed', 'mulberry32'])
+          runtime.physics[name] = physics[name];
       }
       runtime.hookReady = true;
       return attachClient(client);
@@ -1663,7 +1952,8 @@
     inspect: () => ({ version: VERSION, hookReady: runtime.hookReady, captured: !!runtime.client, renderer: !!runtime.pipeline,
       aimRejected: runtime.aimRejected,
       opponents: runtime.client?.remoteFrames?.length || 0, rewrites: runtime.rewrites, compensated: runtime.compensated,
-      heldShots: runtime.stealth.heldShots,
+      heldShots: runtime.stealth.heldShots, agent: { action: runtime.agent.action,
+        goal: runtime.agent.goal?.kind ?? null }, seedSync: { ...runtime.seedSync },
       server: { ...runtime.server }, error: runtime.error, options: { ...options } }),
     trace: traceSnapshot,
     exportTrace: () => JSON.stringify({ formatVersion: 2, scriptVersion: VERSION,

@@ -134,6 +134,60 @@ test('early ADS shots are counted without treating corrected ramp fire as a fail
   assert.match(formatReport(report), /Early ADS Fire.*sent 2/);
 });
 
+test('adaptive hip-fire evidence is separate from ADS ramp evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.16', trace: {
+    aimDecisions: [
+      { match: 1, sequence: 1, fireSent: true, weaponId: 'longbow',
+        adsRequested: false, localAds: 0, sampled: { hipFire: true, hipSeeded: true },
+        localShotPredicted: true, correctionApplied: true,
+        geometry: { predictedOutgoing: { meanMeters: 0.01 } } },
+      { match: 1, sequence: 2, fireSent: true, weaponId: 'hornet',
+        adsRequested: false, localAds: 0.2, sampled: { hipFire: true, hipSeeded: false },
+        localShotPredicted: false, correctionApplied: false,
+        weapon: { cooldown: 0.05 } }
+    ]
+  } });
+  assert.deepEqual(report.hipFireEvidence, { sent: 2, locallyPredicted: 1,
+    corrected: 1, seeded: 1, byWeapon: { longbow: 1, hornet: 1 } });
+  assert.equal(report.firingEvidence.earlyAdsSent, 0);
+  assert.equal(report.investigate.some(item => item.reasons.includes('ADS below ready threshold')), false);
+  assert.match(formatReport(report), /Adaptive hip Fire.*sent 2/);
+});
+
+test('tick-aligned server shots expose provisional hip and ADS hit counts', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const localShots = Array.from({ length: 12 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, sequence: index + 1,
+    tick: 100 + index * 30, player: { velocity: [0, 0, 0] }
+  }));
+  const serverEvents = localShots.flatMap((shot, index) => {
+    const tick = shot.tick + 9;
+    const events = [{ at: shot.at + 210, match: 1, tick, type: 'shot' }];
+    if (index === 0 || index === 6) events.push({ at: shot.at + 210,
+      match: 1, tick, type: 'hit', damage: 20 });
+    return events;
+  });
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, localShots, serverEvents,
+    serverSnapshots: [{ acknowledgedShot: { delta: 0 } },
+      { acknowledgedShot: { delta: 2 } }],
+    aimDecisions: localShots.map((shot, index) => ({ match: 1,
+      sequence: shot.sequence, fireSent: true, weaponId: 'rifle',
+      adsRequested: index >= 6, sampled: { hipFire: index < 6 },
+      targetDistance: index < 6 ? 20 : 80, localSpeed: 0 }))
+  } });
+  assert.equal(report.correlatedShots.paired, 12);
+  assert.equal(report.correlatedShots.pairedWithDecision, 12);
+  assert.equal(report.correlatedShots.pairedHits, 2);
+  assert.deepEqual(report.correlatedShots.byModeDistanceMovement, [
+    { mode: 'ads', distance: '40-99 m', movement: 'still', shots: 6, hits: 1 },
+    { mode: 'hip', distance: '0-39 m', movement: 'still', shots: 6, hits: 1 }
+  ]);
+  assert.deepEqual(report.authoritative.acknowledgedShotCount, { aligned: 1, diverged: 1 });
+  assert.match(formatReport(report), /Provisional server-shot pairs: 12 paired/);
+});
+
 test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.10', trace: {

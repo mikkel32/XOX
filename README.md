@@ -5,9 +5,9 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.15.** The portable local suite reports 84 passes and 6
-> skips without the optional captured client archive. Live traces include both server anti-cheat
-> removals and short matches without one. They do **not** prove a general bypass.
+> **Current version: 1.5.17.** All 100 captured-client tests pass. Local checks cover the captured client kernel, combat-agent input, and
+> provisional shot matching. The new agent has not yet been tested in a live match. Server-side zero
+> spread is not established by client-side correction.
 
 ## Explore
 
@@ -27,18 +27,21 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Xray | Draws player boxes, names, and distances, including opponents behind cover when they are present in client snapshots. |
 | Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. When a hitbox center is covered, it checks a few interior points for a clear shot at the requested part. |
-| Rage | Selects a clear target across 360 degrees up to the range slider, scopes when a target is available, and fires after aim alignment. It normally waits for full ADS; Fast fire can take a correctable close shot sooner. Explicit Head and Chest choices are respected for every weapon. Auto can adapt between head and chest for distant or moving targets. Target choice weighs turn, target speed, and distance against the active weapon's damage-falloff range without imposing a hard cutoff. Once a shot is predicted, the send path keeps Fire and reuses its sampled target if the current target disappears or changes substantially, to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
+| Rage | Selects a clear target across 360 degrees up to the range slider and fires after aim alignment. Hip fire is limited to stationary single-projectile shots within 40 m; moving, wider, and distant shots use ADS. Explicit Head and Chest choices remain exact. Auto can adapt between head and chest. A predicted shot keeps Fire on the wire to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
+| Combat agent | Off by default. Enabling it turns on Silent AIM and Rage. It uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the safe zone, and seek compatible ammo when empty. Your movement or action keys override its movement. Its simple obstacle steering is not a full navigation system; it does not start matches or guarantee a win. |
 | Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It can request a close single-projectile shot during ADS ramp when a conservative spread bound fits inside the existing 8-degree outgoing turn. It still follows local aim alignment, weapon cooldown, and server ammunition. |
+| Adaptive hip fire | Enabled for Rage by default up to 40 m. It requires a grounded, nearly stationary player and a bounded single-projectile correction. If the server's acknowledged shot count differs from the predicted count, it falls back to ADS. The 40 m limit follows the new live trace: longer unscoped shots missed in the paired sample. This does not zero server spread. |
 | Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation. For multi-pellet weapons, it tests the average and each pellet offset against the selected hitbox, then uses the angle predicted to intersect it with the most pellets. Server spread and visible camera recoil may remain. |
 | Ammo assist | Requests a normal reload and pulses Interact when the game's own pickup target is compatible ammo below the observed reserve cap. It never changes the local or server ammo count directly. |
-| Trace export | Saves bounded per-shot target geometry, movement, weapon and ADS state, predicted ray deviation and pellet intersections, selected-point visibility, early-ADS shot status, aiming changes, settings, fire gates, F/E and pointer-lock state, button changes before send, server input acknowledgements, and combat events. |
+| Trace export | Saves bounded per-shot target geometry, movement, weapon and ADS state, predicted ray deviation and pellet intersections, selected-point visibility, early-ADS and hip-fire status, agent actions, server shot-count comparison, settings, fire gates, F/E and pointer-lock state, button changes before send, input acknowledgements, and combat events. The analyzer pairs some local and server shots by tick and arrival time, marking those group counts provisional. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
 between tabs. In 1.5.13, Xray, loot vision, Silent AIM, Adaptive Auto point, and Stealth start enabled;
-Rage starts disabled unless saved settings override them. Fast fire is enabled
-for Rage when it is turned on. After an aim-related
-server removal, Aim and Rage are disabled and remain off across the next match.
+Rage starts disabled unless saved settings override it. Fast fire and adaptive
+hip fire are enabled when Rage is turned on. Combat agent starts off. After an aim-related
+server removal, Silent AIM, Rage, and the combat agent are disabled and remain
+off across the next match.
 F/E interaction takes priority over automatic aim and fire. Use **Resume** in the
 panel after changing settings to restore the game's pointer lock.
 
@@ -87,14 +90,13 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable local suite passed **84 tests with 6 skips** on 2026-10-15. Six
-tests use locally captured client bundles that are intentionally not mirrored
-here. Tests validate local behavior and
-fixtures, not a live server outcome.
+The portable suite passes 93 tests and skips 7 that need locally captured
+client bundles. Tests validate local behavior and fixtures, not a live server
+outcome.
 Set `XOX_CLIENT_PHYSICS` to a local copy of the captured
 `3ep-katvfqbjo.js` bundle to run the optional firing and spread checks, and
 `XOX_CLIENT_RUNTIME` to the captured `turbopack-37jd2rjmtu1y9.js` bundle to
-run the optional loader checks. With both local bundles, all 90 tests pass.
+run the optional loader checks. With both bundles, all 100 tests pass.
 The physics tests require the bundle's SHA-256 to match the recorded
 [source manifest](research/manifest.json).
 
@@ -150,7 +152,9 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.12 | No live trace yet | Explicit Head and Chest now stay exact for all weapons; only Auto adapts to movement and range. The analyzer reports requested versus selected aim points. Local tests pass; server headshots and hit rate await a new trace. |
 | 1.5.13 | No live trace yet | Optimizes predicted multi-pellet aim for hitbox intersections while preserving single-projectile correction and the existing fire cadence. Replay of three retained Breacher predictions changed each from zero to one locally projected pellet intersection; server effect awaits a new trace. |
 | 1.5.14 | 188 shots, 83 hits, 53 head hits, 24 kills | User-supplied mixed-weapon match; no recorded kick. All retained outgoing Fire decisions selected Head. The guarded early-ADS path was not used in retained decisions, and moving shots show a provisional hit gap. Raw export is not mirrored; see [findings](FINDINGS.md). |
-| 1.5.15 | No live trace yet | Checks interior head or chest points when the center is behind cover, preserves explicit Head and Chest choices, and records partial visibility separately. Local tests pass; server hit-rate effect awaits a new trace. |
+| 1.5.15 | 241 shots, 68 hits, 44 head hits, 12 kills | User-supplied mixed-weapon match; no recorded kick. 13 of 503 retained Fire decisions selected a partially visible point. All retained shots used ADS, so this trace cannot measure hip fire. Raw export is not mirrored; see [findings](FINDINGS.md). |
+| 1.5.16 | 382 shots, 70 hits, 36 head hits, 11 kills | User-supplied mixed-weapon trace. Tick-aligned provisional pairs with retained decisions show 0/47 long-range hip hits at 100–149 m, 1/21 moving hip hits under 40 m, 2/3 still hip hits under 40 m, and 37/121 ADS hits. Pairing uses an inferred nine-tick offset and cannot prove individual causation. Raw export is not mirrored. |
+| 1.5.17 | No live trace yet | Caps hip fire to stationary shots within 40 m, adds acknowledged shot-count diagnostics and an opt-in combat agent. Local tests pass; server hit rate and live agent behavior need a new trace. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.
@@ -167,8 +171,9 @@ capture used to develop these hooks.
 Ammo and ADS movement speed are decided by the server. The client exposes
 pickup and reload inputs, but no supported request for unlimited reserve or
 full-speed ADS movement. Ammo assist gathers available ammunition, and Rage
-releases its automatic ADS request while reloading; continuous scoped movement
-still follows the game's speed rule. Neither perfect hits nor zero spread are
+releases its automatic ADS request while reloading. Adaptive hip fire removes
+the Aim input on selected shots, so movement uses the unscoped rule for those
+frames; other scoped frames still follow the game's speed rule. Neither perfect hits nor zero spread are
 established by local geometry or tests.
 
 The [source manifest](research/manifest.json) records the 39 public client files

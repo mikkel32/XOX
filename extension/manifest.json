@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "BridgeZone Tools",
-  "version": "1.5.15",
-  "description": "Xray, hitbox-aware aim, guarded early ADS fire, and combat diagnostics for BridgeZone.",
+  "version": "1.5.17",
+  "description": "Xray, corrected aim, combat agent, and diagnostics for BridgeZone.",
   "action": {
     "default_title": "BridgeZone Tools",
     "default_popup": "popup.html"

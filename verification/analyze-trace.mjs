@@ -140,6 +140,79 @@ function distanceBand(value) {
   return 'over 600 m';
 }
 
+function correlateServerShots(localShots, events, decisions, ackLatencyMs) {
+  const serverShots = events.filter(event => event?.type === 'shot' &&
+    Number.isSafeInteger(event.match) && Number.isSafeInteger(event.tick) && finite(event.at));
+  const local = localShots.filter(shot => Number.isSafeInteger(shot?.match) &&
+    Number.isSafeInteger(shot?.tick) && Number.isSafeInteger(shot?.sequence) && finite(shot?.at));
+  const sent = new Map(decisions.filter(item => item?.fireSent === true &&
+    Number.isSafeInteger(item?.match) && Number.isSafeInteger(item?.sequence))
+    .map(item => [`${item.match}:${item.sequence}`, item]));
+  const hitTicks = new Set(events.filter(event => event?.type === 'hit' &&
+    Number.isSafeInteger(event.match) && Number.isSafeInteger(event.tick))
+    .map(event => `${event.match}:${event.tick}`));
+  const byMatch = {};
+  const byModeDistanceMovement = {};
+  let paired = 0, pairedWithDecision = 0, pairedHits = 0;
+  const expectedDelay = finite(ackLatencyMs) ? ackLatencyMs + 50 : 200;
+  for (const match of new Set(local.map(shot => shot.match))) {
+    const shots = local.filter(shot => shot.match === match);
+    const server = serverShots.filter(event => event.match === match);
+    const offsets = new Map();
+    for (const shot of shots) {
+      const candidates = server.filter(event => event.at - shot.at >= 80 &&
+        event.at - shot.at <= 450 && event.tick - shot.tick >= 0 && event.tick - shot.tick <= 20);
+      candidates.sort((a, b) => Math.abs(a.at - shot.at - expectedDelay) -
+        Math.abs(b.at - shot.at - expectedDelay));
+      if (candidates.length) {
+        const offset = candidates[0].tick - shot.tick;
+        offsets.set(offset, (offsets.get(offset) || 0) + 1);
+      }
+    }
+    const ranked = [...offsets].sort((a, b) => b[1] - a[1]);
+    const [offset, votes] = ranked[0] || [];
+    const supported = Number.isSafeInteger(offset) && votes >= 10 &&
+      votes >= 0.4 * Math.min(shots.length, server.length) &&
+      votes >= 2 * (ranked[1]?.[1] || 0);
+    const used = new Set();
+    let matchPairs = 0;
+    if (supported) for (const shot of shots) {
+      const candidates = server.filter(event => event.tick - shot.tick === offset &&
+        event.at - shot.at >= 80 && event.at - shot.at <= 450 && !used.has(event));
+      if (candidates.length !== 1) continue;
+      const event = candidates[0];
+      used.add(event);
+      matchPairs++; paired++;
+      const hit = hitTicks.has(`${match}:${event.tick}`);
+      if (hit) pairedHits++;
+      const decision = sent.get(`${match}:${shot.sequence}`);
+      if (!decision) continue;
+      pairedWithDecision++;
+      const mode = decision.sampled?.hipFire === true && decision.adsRequested === false
+        ? 'hip' : decision.adsRequested === true ? 'ads' : 'other';
+      const distance = finite(decision.target?.distance) ? decision.target.distance :
+        decision.targetDistance;
+      const band = !finite(distance) ? 'unknown' : distance < 40 ? '0-39 m' :
+        distance < 100 ? '40-99 m' : distance < 150 ? '100-149 m' : '150+ m';
+      const speed = finite(decision.localSpeed) ? decision.localSpeed :
+        Math.hypot(shot.player?.velocity?.[0] || 0, shot.player?.velocity?.[2] || 0);
+      const movement = speed > 0.5 ? 'moving' : 'still';
+      const key = [mode, band, movement].join('|');
+      byModeDistanceMovement[key] ||= { mode, distance: band, movement, shots: 0, hits: 0 };
+      byModeDistanceMovement[key].shots++;
+      if (hit) byModeDistanceMovement[key].hits++;
+    }
+    byMatch[match] = { retainedLocalShots: shots.length, retainedServerShots: server.length,
+      inferredTickOffset: supported ? offset : null, offsetVotes: supported ? votes : 0,
+      paired: matchPairs };
+  }
+  return { method: 'provisional same-match tick and arrival-time alignment',
+    paired, pairedWithDecision, pairedHits, byMatch,
+    byModeDistanceMovement: Object.values(byModeDistanceMovement).sort((a, b) =>
+      a.mode.localeCompare(b.mode) || a.distance.localeCompare(b.distance) ||
+      a.movement.localeCompare(b.movement)) };
+}
+
 export function analyzeTrace(document) {
   if (!document || ![1, 2].includes(document.formatVersion) ||
       !document.trace || typeof document.trace !== 'object') {
@@ -219,7 +292,7 @@ export function analyzeTrace(document) {
     const reasons = [];
     if (!item.localShotPredicted && !(finite(item.weapon?.cooldown) && item.weapon.cooldown > 0))
       reasons.push('no local prediction without recorded cooldown');
-    if (finite(item.localAds) && item.localAds < 0.995 &&
+    if (finite(item.localAds) && item.localAds < 0.995 && item.sampled?.hipFire !== true &&
         !(item.sampled?.earlyAds === true && item.correctionApplied))
       reasons.push('ADS below ready threshold');
     if (finite(after) && after > 0.3) reasons.push('predicted ray over 0.3 m from selected point');
@@ -282,6 +355,9 @@ export function analyzeTrace(document) {
     adsDisagreementSamples: snapshots.filter(item => finite(item.server?.ads) &&
       finite(item.predictorBeforeReconcile?.ads) &&
       Math.abs(item.server.ads - item.predictorBeforeReconcile.ads) > 0.05).length,
+    acknowledgedShotCount: { aligned: snapshots.filter(item => item.acknowledgedShot?.delta === 0).length,
+      diverged: snapshots.filter(item => Number.isSafeInteger(item.acknowledgedShot?.delta) &&
+        item.acknowledgedShot.delta !== 0).length },
     magazineDisagreementSamples: snapshots.filter(item => finite(item.server?.magazine) &&
       finite(item.predictorBeforeReconcile?.magazine) &&
       item.server.magazine !== item.predictorBeforeReconcile.magazine).length };
@@ -309,7 +385,8 @@ export function analyzeTrace(document) {
   const ammoAssist = { pickupRequests: ammoPickups.length, requestsByType, serverReserveIncreases };
 
   const retained = Object.fromEntries(['frames', 'localShots', 'aimDecisions', 'fireGates',
-    'serverSnapshots', 'serverEvents', 'settings', 'interactions', 'ammoPickups', 'kicks', 'connectionStates', 'errors']
+    'serverSnapshots', 'serverEvents', 'settings', 'interactions', 'ammoPickups',
+    'agentDecisions', 'kicks', 'connectionStates', 'errors']
     .map(key => [key, list(trace[key]).length]));
   const interactionEvidence = { retained: interactions.length, keyDowns: 0, keyUps: 0,
     keyDownsWithoutPointerLock: 0, keyDownsWithInputDisabled: 0,
@@ -381,6 +458,25 @@ export function analyzeTrace(document) {
     preparedGateSamples: sampledGateButtons, gateSampleChanges: gateButtonChanges,
     outgoingFrameAckCoverage: frameAckCoverage };
   const earlyAdsSent = sent.filter(item => item.sampled?.earlyAds === true);
+  const hipFireSent = sent.filter(item => item.sampled?.hipFire === true &&
+    item.adsRequested === false);
+  const hipByWeapon = {};
+  for (const item of hipFireSent) {
+    const weapon = typeof item.weaponId === 'string' ? item.weaponId : 'unknown';
+    hipByWeapon[weapon] = (hipByWeapon[weapon] || 0) + 1;
+  }
+  const hipFireEvidence = { sent: hipFireSent.length,
+    locallyPredicted: hipFireSent.filter(item => item.localShotPredicted).length,
+    corrected: hipFireSent.filter(item => item.correctionApplied).length,
+    seeded: hipFireSent.filter(item => item.sampled?.hipSeeded === true).length,
+    byWeapon: hipByWeapon };
+  const correlatedShots = correlateServerShots(localShots, events, decisions,
+    authoritative.medianAckLatencyMs);
+  const agentActions = {};
+  for (const item of list(trace.agentDecisions)) {
+    const action = typeof item?.action === 'string' ? item.action : 'unknown';
+    agentActions[action] = (agentActions[action] || 0) + 1;
+  }
   const firingEvidence = { originalFireGateRows: originalGateButtons.byButton.fire,
     preparedFireGateRows: sampledGateButtons.byButton.fire,
     sampledFireFrames: sampledFrameButtons.observed ? sampledFrameButtons.byButton.fire : null,
@@ -399,7 +495,8 @@ export function analyzeTrace(document) {
     retention: { retained, dropped: trace.retention?.dropped || null },
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
-    inputButtons, firingEvidence, interactionEvidence, ammoAssist, predictionConsistency,
+    inputButtons, firingEvidence, hipFireEvidence, correlatedShots,
+    agentActions, interactionEvidence, ammoAssist, predictionConsistency,
     pelletProjection,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
       ackCoverage, missingWeapon, missingDistance,
@@ -411,6 +508,7 @@ export function analyzeTrace(document) {
       'Distances and geometric miss estimates describe local client predictions, not authoritative hits.',
       'An ACK covers an input sequence; it does not establish that the server fired or hit.',
       'Server events have no guaranteed input sequence, so server hits cannot be assigned to a weapon, target, or distance.',
+      'Tick-aligned shot pairs are provisional. A shared tick and plausible arrival delay do not prove which input caused a server hit.',
       'Fire-gate rows are coalesced samples; gate counters cover every Rage sample when present.',
       'Fire-gate original buttons are the game input before this hook; prepared gate buttons are after sample rewriting. Frame sampledButtons, when present, are before sendInput rewriting; frame buttons are on the wire.',
       'Older traces may lack F/E keyboard events; absent Interact bits do not prove F/E was never pressed.',
@@ -418,6 +516,7 @@ export function analyzeTrace(document) {
       'A Fire input held during recorded weapon cooldown may have no local shot prediction; this is normal for automatic fire.',
       'A locally predicted shot whose Fire bit is removed before send can desynchronize shot seed, bloom, and cooldown until reconciliation.',
       'Projected pellet hits use the captured client hitboxes and locally predicted spread; they are not server-confirmed hits.',
+      'Adaptive hip-fire decisions use local shot-seed and spread estimates; only server events can establish actual hits.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
       'Retained buffers may cover different time windows; inspect dropped counts before comparing totals.'
@@ -453,6 +552,17 @@ export function formatReport(report) {
     `Early ADS Fire (retained decisions): sent ${report.firingEvidence.earlyAdsSent}, ` +
       `locally predicted ${report.firingEvidence.earlyAdsPredicted}, ` +
       `corrected ${report.firingEvidence.earlyAdsCorrected}`,
+    `Adaptive hip Fire (retained decisions): sent ${report.hipFireEvidence.sent}, ` +
+      `locally predicted ${report.hipFireEvidence.locallyPredicted}, ` +
+      `corrected ${report.hipFireEvidence.corrected}, seeded ${report.hipFireEvidence.seeded}; ` +
+      `by weapon ${JSON.stringify(report.hipFireEvidence.byWeapon)}`,
+    `Provisional server-shot pairs: ${report.correlatedShots.paired} paired, ` +
+      `${report.correlatedShots.pairedWithDecision} with retained decisions, ` +
+      `${report.correlatedShots.pairedHits} at a server hit tick; ` +
+      `by match ${JSON.stringify(report.correlatedShots.byMatch)}`,
+    `Paired shot modes by distance and movement (provisional): ` +
+      `${JSON.stringify(report.correlatedShots.byModeDistanceMovement)}`,
+    `Combat agent decisions (retained): ${JSON.stringify(report.agentActions)}`,
     `Prediction/send overlap: ${report.predictionConsistency.overlappingFrames} retained frames with local shots; ` +
       `${report.predictionConsistency.predictedFireRemovedOnWire} had Fire removed before send`,
     `Local multi-pellet projection: ${JSON.stringify(report.pelletProjection)}`,
@@ -479,7 +589,8 @@ export function formatReport(report) {
       `median RTT ${report.authoritative.medianReportedRttMs ?? '?'} ms`,
     `All retained outgoing frames ACK coverage: ${JSON.stringify(report.inputButtons.outgoingFrameAckCoverage)}`,
     `Before-reconcile disagreements: ADS ${report.authoritative.adsDisagreementSamples}, ` +
-      `magazine ${report.authoritative.magazineDisagreementSamples}`,
+      `magazine ${report.authoritative.magazineDisagreementSamples}; ` +
+      `ACK-aligned shot counts ${JSON.stringify(report.authoritative.acknowledgedShotCount)}`,
     `Server snapshots observed ${report.authoritative.observed ?? 'unknown'}, retained ${report.authoritative.retained}`,
     `Retained: ${JSON.stringify(report.retention.retained)}`,
     `Dropped: ${JSON.stringify(report.retention.dropped || {})}`,
