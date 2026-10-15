@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.11
+// @version      1.5.12
 // @description  Xray, adaptive Rage aim, auto fire, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.11';
+  const VERSION = '1.5.12';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
@@ -243,11 +243,11 @@
       }
       const speed = Math.hypot(...(snap.v || [0, 0, 0]));
       const distanceToFeet = Math.hypot(...snap.p.map((value, i) => value - origin[i]));
-      const adaptive = options.point === 'auto' ||
-        (options.rage && options.smartAim && options.point === 'head');
+      // Head and Chest are explicit choices. Only Auto may change aim points.
+      const adaptive = options.point === 'auto' && options.smartAim;
       const preferred = adaptive
         ? (distanceToFeet > 50 || speed > 4 || ownSpeed > 3 ? 'chest' : 'head')
-        : options.point;
+        : options.point === 'chest' ? 'chest' : 'head';
       let point = aimPoint(snap, preferred);
       const delta = point.map((value, i) => value - origin[i]);
       const distance = Math.hypot(...delta);
@@ -503,6 +503,7 @@
       at: performance.now(), match: runtime.trace.match, sequence: frame.s, tick: frame.vt,
       targetDistance: target ? Math.round(target.distance * 10) / 10 : null,
       weaponId: weapon.id, weaponRangeEnd: weapon.stats.rangeEnd ?? null,
+      requestedPoint: options.point,
       localAds: weapon.ads === null ? null : Math.round(weapon.ads * 1000) / 1000,
       localSpeed: player.velocity ? Math.hypot(player.velocity[0], player.velocity[2]) : null,
       movingInput: Math.hypot(frame.mx, frame.mz) > 0.1,
@@ -1366,6 +1367,7 @@
     root.querySelector('[data-value="range"]').textContent = options.range + ' m';
     root.querySelector('[data-value="smooth"]').textContent = options.smooth.toFixed(2);
     root.querySelector('[name="fov"]').disabled = options.rage;
+    root.querySelector('[name="smartAim"]').disabled = options.point !== 'auto';
     for (const name of ['silent', 'rage']) root.querySelector('[name="' + name + '"]').disabled = runtime.aimRejected;
   }
 
@@ -1383,9 +1385,11 @@
     const targetName = runtime.target ? (client?.names?.get(runtime.target.index) || 'Player ' + (runtime.target.index + 1)) : '--';
     const targetRange = runtime.target && Number.isFinite(runtime.target.distance)
       ? ' @ ' + Math.round(runtime.target.distance) + ' m' : '';
+    const targetPart = runtime.target?.aimPart ? ' / ' + runtime.target.aimPart.toUpperCase() : '';
     const metrics = 'AIM ' + runtime.rewrites + ' redirected / ' + runtime.stealth.heldShots + ' fire frames held / SERVER ' + runtime.server.hits + ' hits, ' + runtime.server.shots + ' shots';
     root.querySelector('[data-live-metrics]').textContent = metrics;
-    stats.textContent = 'TARGET ' + targetName + targetRange + ' / ' + runtime.compensated + ' shot corrections / ' + metrics;
+    stats.textContent = 'TARGET ' + targetName + targetRange + targetPart +
+      ' / ' + runtime.compensated + ' shot corrections / ' + metrics;
   }
 
   function resumeGame() {
@@ -1433,12 +1437,12 @@
         <div class="setting"><label for="fov">Normal aim cone (half-angle)<output data-value="fov"></output></label><input id="fov" name="fov" aria-label="Aim cone" type="range" min="1" max="90" step="1"></div>
         <div class="setting"><label for="range">Maximum range<output data-value="range"></output></label><input id="range" name="range" aria-label="Maximum range" type="range" min="10" max="600" step="10"></div>
         <label>Target point<select name="point" aria-label="Target point"><option value="auto">Auto / clear point</option><option value="head">Head</option><option value="chest">Chest</option></select></label>
-        <label>Smart Rage aim<input name="smartAim" aria-label="Smart Rage aim" type="checkbox"></label>
+        <label>Adaptive Auto point<input name="smartAim" aria-label="Adaptive Auto point" type="checkbox"></label>
         <label>Skip targets behind cover<input name="visibleOnly" aria-label="Skip targets behind cover" type="checkbox"></label>
         <label class="feature">Anticheat stealth<input name="stealth" aria-label="Anticheat stealth" type="checkbox"></label>
         <label class="feature">Ammo assist / reload + pickup<input name="ammo" aria-label="Ammo assist" type="checkbox"></label>
         <div class="setting"><label for="smooth">Aim smoothing<output data-value="smooth"></output></label><input id="smooth" name="smooth" aria-label="Aim smoothing" type="range" min="0.1" max="0.95" step="0.05"></div>
-        <p class="note">Insert: show/hide. Press Resume after using this panel to restore game controls. F/E interaction takes priority over automatic aim and fire. Smart Rage aim uses chest for distant or moving shots even when Head is selected. Ammo assist picks up matching ammo within reach and requests normal reloads. Scoped movement stays slower while firing; Rage releases automatic scope during reload. Server spread and camera recoil may remain. Cover still blocks shots. Use server hits to judge results.</p>
+        <p class="note">Insert: show/hide. Press Resume after using this panel to restore game controls. F/E interaction takes priority over automatic aim and fire. Head and Chest stay exact selections. Auto adapts to distance and movement when Adaptive Auto point is on; with it off, Auto uses Head. Ammo assist picks up matching ammo within reach and requests normal reloads. Scoped movement stays slower while firing; Rage releases automatic scope during reload. Server spread and camera recoil may remain. Cover still blocks shots. Use server hits to judge results.</p>
       </div><div class="status"><div role="status"></div><div class="stats"></div></div>
     </aside><button type="button" class="show-tools" data-show-panel hidden aria-label="Show tools panel">Show tools</button>`;
     document.documentElement.appendChild(host);

@@ -58,6 +58,28 @@ test('older trace format remains readable without inventing weapon or range deta
   assert.throws(() => analyzeTrace({ formatVersion: 7, trace: {} }), /formatVersion 1 or 2/);
 });
 
+test('aim report exposes explicit point overrides in old and new trace rows', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.11', trace: {
+    settings: [{ at: 1, values: { point: 'head' } }],
+    aimDecisions: [
+      { at: 10, fireSent: true, weaponId: 'longbow', target: { aimPart: 'chest' } },
+      { at: 11, fireSent: true, weaponId: 'longbow', target: { aimPart: 'head' } },
+      { at: 12, fireSent: true, weaponId: 'hornet', requestedPoint: 'chest',
+        target: { aimPart: 'chest' } }
+    ]
+  } });
+  assert.deepEqual(report.aimPointChoices.byRequested.head,
+    { head: 1, chest: 1, none: 0 });
+  assert.deepEqual(report.aimPointChoices.byRequested.chest,
+    { head: 0, chest: 1, none: 0 });
+  assert.deepEqual(report.aimPointChoices.byWeapon, [
+    { weapon: 'hornet', requested: 'chest', head: 0, chest: 1, none: 0 },
+    { weapon: 'longbow', requested: 'head', head: 1, chest: 1, none: 0 }
+  ]);
+  assert.match(formatReport(report), /Requested vs selected aim points/);
+});
+
 test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.10', trace: {

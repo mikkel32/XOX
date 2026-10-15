@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "BridgeZone Tools",
-  "version": "1.5.11",
-  "description": "Xray, range-aware Rage aim, consistent firing, and combat diagnostics for BridgeZone.",
+  "version": "1.5.12",
+  "description": "Xray, exact target-point aim, consistent firing, and combat diagnostics for BridgeZone.",
   "action": {
     "default_title": "BridgeZone Tools",
     "default_popup": "popup.html"

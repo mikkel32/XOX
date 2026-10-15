@@ -63,6 +63,38 @@ function summarizeSettings(entries) {
     latest: entries.at(-1)?.values || null, transitions };
 }
 
+function summarizeAimPointChoices(sent, settings) {
+  const points = ['head', 'chest', 'auto'];
+  const byRequested = Object.fromEntries([...points, 'unknown'].map(point =>
+    [point, { head: 0, chest: 0, none: 0 }]));
+  const byWeapon = new Map();
+  for (const item of sent) {
+    let requested = points.includes(item?.requestedPoint) ? item.requestedPoint : null;
+    if (!requested && finite(item?.at)) {
+      for (let index = settings.length - 1; index >= 0; index--) {
+        const setting = settings[index];
+        if (finite(setting?.at) && setting.at <= item.at &&
+            points.includes(setting?.values?.point)) {
+          requested = setting.values.point;
+          break;
+        }
+      }
+    }
+    requested ||= 'unknown';
+    const selected = ['head', 'chest'].includes(item?.target?.aimPart)
+      ? item.target.aimPart : 'none';
+    const weapon = typeof item?.weaponId === 'string' ? item.weaponId : 'unknown';
+    byRequested[requested][selected]++;
+    const key = `${weapon}:${requested}`;
+    if (!byWeapon.has(key)) byWeapon.set(key,
+      { weapon, requested, head: 0, chest: 0, none: 0 });
+    byWeapon.get(key)[selected]++;
+  }
+  return { byRequested,
+    byWeapon: [...byWeapon.values()].sort((a, b) =>
+      a.weapon.localeCompare(b.weapon) || a.requested.localeCompare(b.requested)) };
+}
+
 function summarizeGateAim(gates) {
   const yawGaps = [], pitchGaps = [];
   const byReason = {};
@@ -128,7 +160,9 @@ export function analyzeTrace(document) {
   const localShots = list(trace.localShots);
   const gates = list(trace.fireGates);
   const interactions = list(trace.interactions);
-  const settingsHistory = summarizeSettings(list(trace.settings));
+  const settings = list(trace.settings);
+  const settingsHistory = summarizeSettings(settings);
+  const aimPointChoices = summarizeAimPointChoices(sent, settings);
   const gateAimState = summarizeGateAim(gates);
   const highestAckByMatch = { ...(trace.counters?.highestAckByMatch || {}) };
   for (const snapshot of snapshots) {
@@ -332,7 +366,7 @@ export function analyzeTrace(document) {
   return {
     formatVersion: document.formatVersion, scriptVersion: document.scriptVersion || 'unknown',
     capturedAt: document.capturedAt || null, matchesObserved: trace.match || 0,
-    latestSettings: settingsHistory.latest, settingsHistory,
+    latestSettings: settingsHistory.latest, settingsHistory, aimPointChoices,
     retention: { retained, dropped: trace.retention?.dropped || null },
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
@@ -377,6 +411,8 @@ export function formatReport(report) {
     `Target rejection checks: ${JSON.stringify(report.targetRejects || {})}`,
     `Latest recorded settings: ${JSON.stringify(report.latestSettings || {})}`,
     `Recorded setting changes (${report.settingsHistory.retained} rows): ${JSON.stringify(report.settingsHistory.transitions)}`,
+    `Requested vs selected aim points (retained Fire): ${JSON.stringify(report.aimPointChoices.byRequested)}`,
+    `Aim points by weapon: ${JSON.stringify(report.aimPointChoices.byWeapon)}`,
     `Fire path evidence (retained rows): original game samples ${report.firingEvidence.originalFireGateRows}, ` +
       `prepared samples ${report.firingEvidence.preparedFireGateRows}, pre-send frames ` +
       `${report.firingEvidence.sampledFireFrames ?? 'unavailable'}, outgoing frames ` +

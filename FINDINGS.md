@@ -43,6 +43,7 @@ trace ended, not that the server would never kick.
 | User-supplied export, not mirrored | 1.5.8 | 0 shots, 0 hits | No outgoing Fire; 202 Rage samples held at alignment after ADS, no recorded kick |
 | User-supplied export, not mirrored | 1.5.9 | 351 shots, 82 hits, 13 kills, 2295.8 damage | Mixed weapons in one match; no recorded kick |
 | User-supplied export, not mirrored | 1.5.10 | 520 shots, 117 hits, 12 kills, 2536.2 damage | One match; no recorded kick |
+| User-supplied export, not mirrored | 1.5.11 | 378 shots, 138 hits, 15 kills, 14 headshots | One match; no recorded kick |
 
 The two 1.5.5 files share `trace.startedAt =
 2026-10-15T14:33:31.561Z`, the same match counter, and the same two server
@@ -70,6 +71,9 @@ has SHA-256 `dda31783653b3f8898b6cb56fcfb22d2491428b4c1cc60f3a7426611f46c1084`.
 It also remains in the user's Downloads folder.
 The user-supplied 1.5.10 export `bridgezone-trace-2026-10-15T18-30-20-852Z.json`
 has SHA-256 `000b9edde85c856b7f715ab47b7c2adf5cedfb0a3070cc123dc4a99609b45e15`.
+It remains in the user's Downloads folder.
+The user-supplied 1.5.11 export `bridgezone-trace-2026-10-15T19-19-19-684Z.json`
+has SHA-256 `ca13f73e6307b0471959c6a710abc13ba0c4a3d8f9cd4154071bf9aeb7019de6`.
 It remains in the user's Downloads folder.
 
 ### Version 1.5.9 mixed-weapon trace
@@ -135,6 +139,31 @@ and weapon state, so they are diagnostic rather than controlled hit-rate
 comparisons. Version 1.5.11 weights target distance by the active weapon's
 damage range while keeping the selected 600 m maximum available when no
 closer target exists. A new server trace is needed to measure its effect.
+
+### Version 1.5.11 explicit point trace
+
+The server recorded 378 shots, 138 hits, 14 headshots, and 15 kills in one match
+with no recorded kick. The saved Target point was Head throughout, with Adaptive
+Smart Rage aim enabled. Of 512 retained outgoing Fire decisions, only 31 aimed
+at head and 481 aimed at chest. The Longbow sniper aimed at chest in 15 of 17
+decisions. The other weapons showed the same override. This was caused by the
+1.5.10 rule that silently converted explicit Head to chest beyond 50 m or when
+either player moved quickly. Two Longbow head decisions were cover fallbacks
+from chest, not proof that the explicit Head preference was honored.
+
+The 1.5.11 prediction/send fix held within the retained overlapping window:
+36 locally predicted shots had corresponding retained frames, and none had Fire
+removed before send. The trace buffers cover different periods, so this does
+not prove every shot in the match used that path. The 1.5.11 server hit fraction
+is higher than in the earlier export, but the matches and target conditions
+differ; it is not a controlled estimate of the fix's effect.
+
+Version 1.5.12 makes explicit Head and Chest strict choices for all weapons.
+The movement and distance rule now applies only to Auto. If a chosen body part
+is behind cover, the manual choice will skip that target rather than silently
+switch body parts. The analyzer now reports requested and selected aim points
+by weapon, using saved settings for older traces and a direct per-decision
+field in new traces. Server headshot and hit outcomes for 1.5.12 remain untested.
 
 ## What changed and what was observed
 
