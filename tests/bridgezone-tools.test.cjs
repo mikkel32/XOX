@@ -960,6 +960,21 @@ test('combat agent can engage at the center of a small storm circle', () => {
   h.api.destroy();
 });
 
+test('combat agent keeps moving into a final tiny storm circle', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 821, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps,
+    { pos: [0.8, 0, 0], vel: [0, 0, 0], grounded: true });
+  fake.client.latest.storm = { state: 'waiting', center: [0, 0], radius: 0.5 };
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  const move = fake.client.input.sample();
+  assert.ok(move.mx < -0.9, 'the agent moves toward the tiny safe area');
+  assert.equal(h.api.inspect().agent.action, 'storm');
+  h.api.destroy();
+});
+
 test('combat agent drops over observed land and steers after exiting the plane', () => {
   let now = 1000;
   let manual = false;
@@ -1110,6 +1125,33 @@ test('combat agent picks a nearby weapon with outgoing aim and equips the second
   h.api.destroy();
 });
 
+test('combat agent swaps to a loaded backup when the active weapon has no ammo', () => {
+  for (const backupMag of [6, 0]) {
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => frame({ s: 820, buttons: 0, mx: 0, mz: 0 });
+    Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+    fake.client.predictor.activeStats.class = 'rifle';
+    fake.client.predictor.slots = [
+      { weapon: 'vanguard', mag: 0 }, { weapon: 'hornet', mag: backupMag }
+    ];
+    fake.client.predictor.ammo.light = 0;
+    attach(h, fake);
+    h.api.setOptions({ agent: true });
+    const input = fake.client.input.sample();
+    if (backupMag > 0) {
+      assert.equal(input.buttons & 128, 128, 'a loaded backup gets equipped before looting');
+      assert.equal(send(fake, [input])[0].buttons & 128, 128, 'Swap reaches the server');
+      assert.equal(h.api.inspect().agent.action, 'equip');
+      assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'loaded-backup');
+    } else {
+      assert.equal(input.buttons & 128, 0, 'an empty backup is not equipped');
+      assert.equal(h.api.inspect().agent.action, 'no-ammo');
+    }
+    h.api.destroy();
+  }
+});
+
 test('authoritative shot-count divergence disables adaptive hip fire', () => {
   const h = harness();
   const fake = rageClient();
@@ -1128,6 +1170,56 @@ test('authoritative shot-count divergence disables adaptive hip fire', () => {
   assert.equal(h.api.trace().serverSnapshots.at(-1).acknowledgedShot.delta, 4);
   assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2);
   h.api.destroy();
+});
+
+test('shot-count divergence skips seeded spread correction until ACK alignment returns', () => {
+  for (const stealth of [true, false]) {
+    let now = 1000;
+    const h = harness([], undefined, { now: () => now });
+    const fake = rageClient();
+    const spread = 1.5 * Math.PI / 180;
+    fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -550] }) }];
+    fake.client.predictor.slots[0].weapon = 'longbow';
+    fake.client.predictor.activeStats.rangeEnd = 600;
+    fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+      fired: true, dirs: [[-Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+        Math.sin(input.pitch), -Math.cos(input.yaw + spread) * Math.cos(input.pitch)]]
+    } });
+    fake.client.ingestEvents = snapshot => snapshot;
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth, agent: false, range: 600, point: 'head' });
+    h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
+      sequence: 23, weapon: { shots: 1 } });
+    fake.client.ingestEvents({ t: 100, me: { ack: 23, shots: 5 }, events: [] });
+    assert.equal(h.api.inspect().seedSync.status, 'diverged');
+    const first = frame({ s: 30, buttons: 1, mx: 0, mz: 0 });
+    fake.client.predictor.predict(first);
+    const unseeded = send(fake, [first])[0];
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(unseeded.buttons & 1, 1, 'a predicted Fire remains on the wire');
+    assert.equal(decision.correctionApplied, false);
+    assert.equal(decision.correctionSkipReason, 'ack-shot-count-mismatch');
+    assert.equal(decision.seedSyncStatus, 'diverged');
+    const [x, y, z] = decision.target.point;
+    const [ox, oy, oz] = decision.target.origin;
+    close(unseeded.yaw, Math.atan2(-(x - ox), -(z - oz)));
+    close(unseeded.pitch, Math.atan2(y - oy, Math.hypot(x - ox, z - oz)));
+
+    now += 200;
+    h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
+      sequence: 31, weapon: { shots: 6 } });
+    fake.client.ingestEvents({ t: 101, me: { ack: 31, shots: 6 }, events: [] });
+    assert.equal(h.api.inspect().seedSync.status, 'aligned');
+    const second = frame({ s: 32, buttons: 1, mx: 0, mz: 0 });
+    fake.client.predictor.predict(second);
+    const corrected = send(fake, [second])[0];
+    const resumed = h.api.trace().aimDecisions.at(-1);
+    assert.equal(corrected.buttons & 1, 1);
+    assert.equal(resumed.correctionApplied, true,
+      `${stealth ? 'bounded' : 'direct'} path resumes correction after ACK alignment`);
+    assert.equal(resumed.correctionSkipReason, null);
+    h.api.destroy();
+  }
 });
 
 test('fast fire takes a correctable close shot during ADS ramp but waits when spread is too wide', () => {
@@ -2849,7 +2941,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.24');
+  assert.equal(exported.scriptVersion, '1.5.25');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2881,7 +2973,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.24');
+  assert.equal(payload.scriptVersion, '1.5.25');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

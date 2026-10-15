@@ -507,6 +507,39 @@ intersection does not establish a server hit or an unobstructed path. The
 latest user trace predates reported-ray capture, so this measurement still
 needs a new live XOX export.
 
+### Version 1.5.25: loaded backup and tiny storm circles
+
+The combat agent could report `no-ammo` with an empty active magazine and no
+reserve even while a second slot held a loaded weapon. It now requests a normal
+Swap before seeking ground loot in that case. The same loaded-backup check also
+prevents a sidearm upgrade from selecting an empty second weapon. Agent traces
+record `loaded-backup` or `sidearm-upgrade` as the equip route source.
+
+Storm routing now scales its arrival tolerance with the circle radius. A
+sub-metre circle no longer makes the agent stop up to one metre from the goal,
+which could leave it outside the safe area. Local tests verify the input
+decisions; no live XOX 1.5.25 match or authoritative inventory transition has
+been observed.
+
+An acknowledged shot-count mismatch also warns that the server may use a
+different spread seed than the local predictor. Version 1.5.25 keeps a
+predicted Fire on the wire but skips local spread cancellation while that
+mismatch persists; it aims exactly at the selected target point instead. The
+decision trace records the skip reason and seed-sync status. A local test
+checks both bounded and direct outgoing paths, then confirms correction
+resumes after an aligned acknowledgment. A count mismatch does not prove the
+server seed differs, and aiming at the point cannot eliminate unknown server
+spread. Reported rays and hit events from a new match are still required.
+
+The trace analyzer now reports which local and server shots are eligible for
+pairing, the inferred tick offset and delay range, and why candidates are left
+unmatched. It excludes a pair when several local or server shots could explain
+the same event. A server hit on a tick with multiple own-player shots is kept
+separate from the provisional paired-hit groups. Reported rays are compared
+only for retained, uniquely compatible pairs, and missing directions or angles
+are counted. Tests use synthetic ambiguity and missing-data cases; the latest
+user trace predates server-reported ray capture.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

@@ -221,17 +221,37 @@ function sampledHitboxRayEntry(origin, ray, target) {
   return far >= 0 ? near : null;
 }
 
+const PAIR_DELAY_MIN_MS = 80;
+const PAIR_DELAY_MAX_MS = 450;
+const PAIR_TICK_OFFSET_MAX = 20;
+
+function shotPairMismatch(shot, event) {
+  if (event.shot?.weaponId && shot.weapon?.id &&
+      event.shot.weaponId !== shot.weapon.id) return 'weapon';
+  if (Array.isArray(event.shot?.directions) && Array.isArray(shot.directions) &&
+      event.shot.directions.length !== shot.directions.length) return 'pelletCount';
+  return null;
+}
+
 function correlateServerShots(localShots, events, decisions, frames, ackLatencyMs) {
-  const serverShots = events.filter(event => event?.type === 'shot' &&
+  const serverShotRows = events.filter(event => event?.type === 'shot');
+  const serverShots = serverShotRows.filter(event =>
     Number.isSafeInteger(event.match) && Number.isSafeInteger(event.tick) && finite(event.at));
   const local = localShots.filter(shot => Number.isSafeInteger(shot?.match) &&
     Number.isSafeInteger(shot?.tick) && Number.isSafeInteger(shot?.sequence) && finite(shot?.at));
   const sent = new Map(decisions.filter(item => item?.fireSent === true &&
     Number.isSafeInteger(item?.match) && Number.isSafeInteger(item?.sequence))
     .map(item => [`${item.match}:${item.sequence}`, item]));
-  const hitTicks = new Set(events.filter(event => event?.type === 'hit' &&
+  const hitRows = events.filter(event => event?.type === 'hit');
+  const hitTicks = new Set(hitRows.filter(event =>
     Number.isSafeInteger(event.match) && Number.isSafeInteger(event.tick))
     .map(event => `${event.match}:${event.tick}`));
+  const shotsAtTick = new Map();
+  for (const event of serverShotRows) {
+    if (!Number.isSafeInteger(event.match) || !Number.isSafeInteger(event.tick)) continue;
+    const key = `${event.match}:${event.tick}`;
+    shotsAtTick.set(key, (shotsAtTick.get(key) || 0) + 1);
+  }
   const byMatch = {};
   const byModeDistanceMovement = {};
   const byVisibility = {};
@@ -246,47 +266,126 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     Array.isArray(event.shot?.directions) && event.shot.directions.length > 0).length,
     serverShotEventsWithImpacts: serverShots.filter(event => list(event.shot?.impacts).length).length,
     pairedShotsWithDirections: 0, comparedRays: 0, pelletCountDisagreements: 0,
-    incompatibleUniqueCandidates: 0,
+    incompatibleUniqueCandidates: 0, incompatibleByReason: { weapon: 0, pelletCount: 0 },
+    missingLocalDirections: 0, missingServerDirections: 0,
+    missingSampledAim: 0, missingOutgoingAim: 0, invalidRayVectors: 0,
     weaponAgreement: { same: 0, different: 0, unknown: 0 },
     differencesOverHalfDegree: 0, targetPointSamples: 0,
     pairedShotsWithImpacts: 0, impactsCloserThanSelectedPoint: 0, examples: [] };
+  const pairing = { localRows: localShots.length, eligibleLocalShots: local.length,
+    ineligibleLocalShots: localShots.length - local.length,
+    serverShotRows: serverShotRows.length, eligibleServerShots: serverShots.length,
+    ineligibleServerShots: serverShotRows.length - serverShots.length,
+    expectedDelayMs: finite(ackLatencyMs) ? rounded(ackLatencyMs + 50) : 200,
+    allowedDelayMs: [PAIR_DELAY_MIN_MS, PAIR_DELAY_MAX_MS],
+    allowedTickOffset: [0, PAIR_TICK_OFFSET_MAX],
+    unmatchedByReason: { unsupportedTickOffset: 0, noPlausibleCandidate: 0,
+      sameOffsetOutsideDelayWindow: 0, differentTickOffset: 0, incompatible: 0,
+      multipleCompatibleServerShots: 0, sharedServerShot: 0 },
+    ambiguousExamples: [] };
+  const hitEvidence = { hitEvents: hitRows.length, hitEventsWithMatchAndTick:
+    hitRows.length - hitRows.filter(event => !Number.isSafeInteger(event.match) ||
+      !Number.isSafeInteger(event.tick)).length,
+    pairedAtHitTick: 0, pairedAtUniqueShotHitTick: 0, pairedAtMultiShotHitTick: 0 };
   let paired = 0, pairedWithDecision = 0, pairedHits = 0;
   const expectedDelay = finite(ackLatencyMs) ? ackLatencyMs + 50 : 200;
+  const pairedDelays = [];
+  const delaysByMatch = new Map();
   for (const match of new Set(local.map(shot => shot.match))) {
     const shots = local.filter(shot => shot.match === match);
     const server = serverShots.filter(event => event.match === match);
+    const withinWindow = (shot, event) => {
+      const delay = event.at - shot.at, tickOffset = event.tick - shot.tick;
+      return delay >= PAIR_DELAY_MIN_MS && delay <= PAIR_DELAY_MAX_MS &&
+        tickOffset >= 0 && tickOffset <= PAIR_TICK_OFFSET_MAX;
+    };
     const offsets = new Map();
     for (const shot of shots) {
-      const candidates = server.filter(event => event.at - shot.at >= 80 &&
-        event.at - shot.at <= 450 && event.tick - shot.tick >= 0 && event.tick - shot.tick <= 20);
-      candidates.sort((a, b) => Math.abs(a.at - shot.at - expectedDelay) -
-        Math.abs(b.at - shot.at - expectedDelay));
-      if (candidates.length) {
-        const offset = candidates[0].tick - shot.tick;
-        offsets.set(offset, (offsets.get(offset) || 0) + 1);
+      const candidates = server.filter(event => withinWindow(shot, event) &&
+        !shotPairMismatch(shot, event));
+      if (!candidates.length) continue;
+      const closest = Math.min(...candidates.map(event =>
+        Math.abs(event.at - shot.at - expectedDelay)));
+      const nearestOffsets = new Set(candidates.filter(event =>
+        Math.abs(Math.abs(event.at - shot.at - expectedDelay) - closest) < 1e-6)
+        .map(event => event.tick - shot.tick));
+      if (nearestOffsets.size !== 1) continue;
+      const offset = [...nearestOffsets][0];
+      offsets.set(offset, (offsets.get(offset) || 0) + 1);
+    }
+    const ranked = [...offsets].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+    const [offset, votes = 0] = ranked[0] || [];
+    const runnerUpVotes = ranked[1]?.[1] || 0;
+    const offsetStatus = !server.length ? 'noEligibleServerShots' :
+      votes < 10 ? 'tooFewVotes' :
+      votes < 0.4 * Math.min(shots.length, server.length) ? 'weakCoverage' :
+      votes < 2 * runnerUpVotes ? 'competingOffsets' : 'supported';
+    const supported = offsetStatus === 'supported';
+    const compatibleByShot = new Map();
+    const contendersByServer = new Map();
+    if (supported) for (const shot of shots) {
+      const compatible = server.filter(event => event.tick - shot.tick === offset &&
+        withinWindow(shot, event) && !shotPairMismatch(shot, event));
+      compatibleByShot.set(shot, compatible);
+      for (const event of compatible) {
+        if (!contendersByServer.has(event)) contendersByServer.set(event, []);
+        contendersByServer.get(event).push(shot);
       }
     }
-    const ranked = [...offsets].sort((a, b) => b[1] - a[1]);
-    const [offset, votes] = ranked[0] || [];
-    const supported = Number.isSafeInteger(offset) && votes >= 10 &&
-      votes >= 0.4 * Math.min(shots.length, server.length) &&
-      votes >= 2 * (ranked[1]?.[1] || 0);
-    const used = new Set();
+    const matchReasons = {};
+    const matchDelays = [];
+    const unmatched = (reason, shot, candidateCount = 0) => {
+      pairing.unmatchedByReason[reason]++;
+      matchReasons[reason] = (matchReasons[reason] || 0) + 1;
+      if (['multipleCompatibleServerShots', 'sharedServerShot'].includes(reason) &&
+          pairing.ambiguousExamples.length < 10)
+        pairing.ambiguousExamples.push({ match, sequence: shot.sequence, tick: shot.tick,
+          reason, compatibleServerShots: candidateCount });
+    };
     let matchPairs = 0;
-    if (supported) for (const shot of shots) {
+    for (const shot of shots) {
+      if (!supported) {
+        unmatched('unsupportedTickOffset', shot);
+        continue;
+      }
       const candidates = server.filter(event => event.tick - shot.tick === offset &&
-        event.at - shot.at >= 80 && event.at - shot.at <= 450 && !used.has(event));
-      const compatible = candidates.filter(event =>
-        (!event.shot?.weaponId || !shot.weapon?.id || event.shot.weaponId === shot.weapon.id) &&
-        (!Array.isArray(event.shot?.directions) || !Array.isArray(shot.directions) ||
-          event.shot.directions.length === shot.directions.length));
-      if (candidates.length === 1 && compatible.length === 0)
+        withinWindow(shot, event));
+      const compatible = compatibleByShot.get(shot);
+      if (candidates.length === 1 && compatible.length === 0) {
         rayEvidence.incompatibleUniqueCandidates++;
-      if (compatible.length !== 1) continue;
+        const reason = shotPairMismatch(shot, candidates[0]);
+        rayEvidence.incompatibleByReason[reason]++;
+        if (reason === 'pelletCount') rayEvidence.pelletCountDisagreements++;
+      }
+      if (!compatible.length) {
+        const reason = candidates.length ? 'incompatible' :
+          server.some(event => event.tick - shot.tick === offset) ?
+            'sameOffsetOutsideDelayWindow' :
+          server.some(event => withinWindow(shot, event)) ? 'differentTickOffset' :
+          'noPlausibleCandidate';
+        unmatched(reason, shot);
+        continue;
+      }
+      if (compatible.length > 1) {
+        unmatched('multipleCompatibleServerShots', shot, compatible.length);
+        continue;
+      }
       const event = compatible[0];
-      used.add(event);
+      if (contendersByServer.get(event).length > 1) {
+        unmatched('sharedServerShot', shot, contendersByServer.get(event).length);
+        continue;
+      }
       matchPairs++; paired++;
-      const hit = hitTicks.has(`${match}:${event.tick}`);
+      const delay = event.at - shot.at;
+      pairedDelays.push(delay);
+      matchDelays.push(delay);
+      const tickKey = `${match}:${event.tick}`;
+      const atHitTick = hitTicks.has(tickKey);
+      if (atHitTick) hitEvidence.pairedAtHitTick++;
+      if (atHitTick && shotsAtTick.get(tickKey) > 1)
+        hitEvidence.pairedAtMultiShotHitTick++;
+      const hit = atHitTick && shotsAtTick.get(tickKey) === 1;
+      if (hit) hitEvidence.pairedAtUniqueShotHitTick++;
       if (hit) pairedHits++;
       const decision = sent.get(`${match}:${shot.sequence}`);
       const reported = event.shot;
@@ -297,6 +396,9 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
         rayEvidence.weaponAgreement[weaponMismatch ? 'different' : 'same']++;
       else rayEvidence.weaponAgreement.unknown++;
       const directions = list(reported?.directions);
+      const predicted = list(shot.directions);
+      if (!directions.length) rayEvidence.missingServerDirections++;
+      if (!predicted.length) rayEvidence.missingLocalDirections++;
       if (directions.length) {
         rayEvidence.pairedShotsWithDirections++;
         if (validVector(reported?.origin) && validVector(decision?.target?.position) &&
@@ -320,11 +422,11 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
             if (intersections) group.pairsWithIntersection++;
           }
         }
-        const predicted = list(shot.directions);
-        if (predicted.length !== directions.length) rayEvidence.pelletCountDisagreements++;
         const frame = outgoing.get(`${match}:${shot.sequence}`);
         const source = directionBasis(shot.yaw, shot.pitch);
         const destination = directionBasis(frame?.after?.[0], frame?.after?.[1]);
+        if (!source) rayEvidence.missingSampledAim++;
+        if (!destination) rayEvidence.missingOutgoingAim++;
         const weapon = [reported?.weaponId, shot.weapon?.id]
           .find(value => typeof value === 'string' && value) || 'unknown';
         const selectedDistance = finite(decision?.target?.distance)
@@ -340,7 +442,10 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
           const actual = unitVector(directions[index]);
           const expected = rotatedShotRay(predicted[index], source, destination);
           const difference = angleDegrees(actual, expected);
-          if (!finite(difference)) continue;
+          if (!finite(difference)) {
+            if (source && destination) rayEvidence.invalidRayVectors++;
+            continue;
+          }
           rayDifferences.push(difference);
           rayEvidence.comparedRays++;
           if (difference > 0.5) rayEvidence.differencesOverHalfDegree++;
@@ -348,7 +453,9 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
             { weapon, distance, localFireMode, angles: [] });
           comparableRayGroups.get(groupKey).angles.push(difference);
           pairDifference = Math.max(pairDifference ?? 0, difference);
-          const spread = angleDegrees(actual, destination?.forward);
+        }
+        for (const direction of directions) {
+          const spread = angleDegrees(direction, destination?.forward);
           if (finite(spread)) reportedSpread.push(spread);
         }
         if (finite(pairDifference)) rayExamples.push({ match, sequence: shot.sequence,
@@ -397,9 +504,12 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
       byModeDistanceMovement[key].shots++;
       if (hit) byModeDistanceMovement[key].hits++;
     }
+    delaysByMatch.set(match, matchDelays);
     byMatch[match] = { retainedLocalShots: shots.length, retainedServerShots: server.length,
-      inferredTickOffset: supported ? offset : null, offsetVotes: supported ? votes : 0,
-      paired: matchPairs };
+      inferredTickOffset: supported ? offset : null, offsetVotes: votes,
+      runnerUpOffsetVotes: runnerUpVotes, offsetStatus,
+      offsetCandidates: ranked.slice(0, 3).map(([tickOffset, count]) => ({ tickOffset, votes: count })),
+      paired: matchPairs, unmatchedByReason: matchReasons };
   }
   const median = values => {
     const ordered = values.filter(finite).sort((a, b) => a - b);
@@ -408,6 +518,13 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     return rounded(ordered.length % 2 ? ordered[middle] :
       (ordered[middle - 1] + ordered[middle]) / 2);
   };
+  const timing = values => ({ samples: values.length,
+    minMs: values.length ? rounded(Math.min(...values)) : null,
+    medianMs: median(values),
+    maxMs: values.length ? rounded(Math.max(...values)) : null });
+  pairing.pairedDelayMs = timing(pairedDelays);
+  pairing.unpairedEligibleServerShots = serverShots.length - paired;
+  for (const [match, values] of delaysByMatch) byMatch[match].pairedDelayMs = timing(values);
   rayEvidence.medianLocalToServerDegrees = median(rayDifferences);
   rayEvidence.maxLocalToServerDegrees = rayDifferences.length ? rounded(Math.max(...rayDifferences)) : null;
   rayEvidence.medianServerRayFromOutgoingAimDegrees = median(reportedSpread);
@@ -425,7 +542,8 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     }).sort((a, b) => a.weapon.localeCompare(b.weapon) ||
       a.distance.localeCompare(b.distance) || a.localFireMode.localeCompare(b.localFireMode));
   return { method: 'provisional same-match tick and arrival-time alignment',
-    paired, pairedWithDecision, pairedHits, byMatch, byVisibility,
+    paired, pairedWithDecision, pairedHits, pairing, hitEvidence,
+    byMatch, byVisibility,
     reportedHitboxByVisibility, rayEvidence,
     comparableRaysByWeaponDistanceMode,
     byModeDistanceMovement: Object.values(byModeDistanceMovement).sort((a, b) =>
@@ -742,6 +860,33 @@ export function analyzeTrace(document) {
     corrected: hipFireSent.filter(item => item.correctionApplied).length,
     seeded: hipFireSent.filter(item => item.sampled?.hipSeeded === true).length,
     byWeapon: hipByWeapon };
+  const predictedFire = sent.filter(item => item.localShotPredicted === true);
+  const correctionSkipReasons = new Map();
+  const seedSyncStatuses = new Map();
+  const seedSyncOnAckMismatch = new Map();
+  let ackShotCountMismatchSkips = 0;
+  for (const item of predictedFire) {
+    const reason = typeof item.correctionSkipReason === 'string' &&
+      item.correctionSkipReason ? item.correctionSkipReason : null;
+    const status = typeof item.seedSyncStatus === 'string' &&
+      item.seedSyncStatus ? item.seedSyncStatus : null;
+    if (reason) correctionSkipReasons.set(reason, (correctionSkipReasons.get(reason) || 0) + 1);
+    if (status) seedSyncStatuses.set(status, (seedSyncStatuses.get(status) || 0) + 1);
+    if (reason === 'ack-shot-count-mismatch') {
+      ackShotCountMismatchSkips++;
+      if (status) seedSyncOnAckMismatch.set(status,
+        (seedSyncOnAckMismatch.get(status) || 0) + 1);
+    }
+  }
+  const predictedFireSync = { retainedPredictedFire: predictedFire.length,
+    correctionSkipReasonRecorded: [...correctionSkipReasons.values()].reduce((a, b) => a + b, 0),
+    ackShotCountMismatchSkips,
+    byCorrectionSkipReason: Object.fromEntries(correctionSkipReasons),
+    seedSyncStatusRecorded: [...seedSyncStatuses.values()].reduce((a, b) => a + b, 0),
+    bySeedSyncStatus: Object.fromEntries(seedSyncStatuses),
+    seedSyncStatusRecordedOnAckMismatch: [...seedSyncOnAckMismatch.values()]
+      .reduce((a, b) => a + b, 0),
+    bySeedSyncStatusOnAckMismatch: Object.fromEntries(seedSyncOnAckMismatch) };
   const correlatedShots = correlateServerShots(localShots, events, decisions, frames,
     authoritative.medianAckLatencyMs);
   const agentActions = {};
@@ -784,7 +929,7 @@ export function analyzeTrace(document) {
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, coverEvidence,
     targetRejects: trace.counters?.targetRejects || null,
-    inputButtons, firingEvidence, hipFireEvidence, correlatedShots,
+    inputButtons, firingEvidence, hipFireEvidence, predictedFireSync, correlatedShots,
     agentActions, agentRoutes, interactionEvidence, ammoAssist, inventoryEvidence,
     predictionConsistency,
     pelletProjection,
@@ -799,6 +944,8 @@ export function analyzeTrace(document) {
       'An ACK covers an input sequence; it does not establish that the server fired or hit.',
       'Server events have no guaranteed input sequence, so server hits cannot be assigned to a weapon, target, or distance.',
       'Tick-aligned shot pairs are provisional. A shared tick and plausible arrival delay do not prove which input caused a server hit.',
+      'Pairing requires one compatible local shot and one compatible server shot within the selected tick offset and delay window. Unsupported offsets, missing fields, and ambiguous candidates remain unmatched.',
+      'A paired shot at a unique server-shot hit tick is only a same-tick observation. Multiple own-player server shots at one hit tick are excluded from paired-hit groups; neither case proves which ray hit.',
       'Server-reported shot directions are visual event data from the game. Their difference from a rotated local prediction can diagnose spread-seed or aim-state drift only when provisional pairing is correct.',
       'Reported-ray intersections use the locally sampled target hitbox; they do not prove the target occupied that box on the server or that cover allowed the shot.',
       'Comparable-ray groups use locally selected distance and recorded local fire-mode flags. ADS requested or hip selected does not establish the server scope state.',
@@ -812,6 +959,7 @@ export function analyzeTrace(document) {
       'A locally predicted shot whose Fire bit is removed before send can desynchronize shot seed, bloom, and cooldown until reconciliation.',
       'Projected pellet hits use the captured client hitboxes and locally predicted spread; they are not server-confirmed hits.',
       'Adaptive hip-fire decisions use local shot-seed and spread estimates; only server events can establish actual hits.',
+      'Correction skip reasons and seed-sync statuses are recorded client decision state. An ACK shot-count mismatch does not identify a server hit or prove which ray missed.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Agent Interact and Swap requests and later server inventory changes are separate observations; they cannot be attributed to a particular request without a server receipt.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
@@ -855,13 +1003,17 @@ export function formatReport(report) {
       `locally predicted ${report.hipFireEvidence.locallyPredicted}, ` +
       `corrected ${report.hipFireEvidence.corrected}, seeded ${report.hipFireEvidence.seeded}; ` +
       `by weapon ${JSON.stringify(report.hipFireEvidence.byWeapon)}`,
+    `Predicted Fire correction and seed sync (recorded decision fields): ` +
+      `${JSON.stringify(report.predictedFireSync)}`,
+    `Shot-pair eligibility and timing (provisional): ${JSON.stringify(report.correlatedShots.pairing)}`,
     `Provisional server-shot pairs: ${report.correlatedShots.paired} paired, ` +
       `${report.correlatedShots.pairedWithDecision} with retained decisions, ` +
-      `${report.correlatedShots.pairedHits} at a server hit tick; ` +
+      `${report.correlatedShots.pairedHits} at a unique-server-shot hit tick; ` +
       `by match ${JSON.stringify(report.correlatedShots.byMatch)}`,
+    `Server hit-tick observations (not ray attribution): ${JSON.stringify(report.correlatedShots.hitEvidence)}`,
     `Paired shot modes by distance and movement (provisional): ` +
       `${JSON.stringify(report.correlatedShots.byModeDistanceMovement)}`,
-    `Paired hits by selected-point visibility (provisional): ` +
+    `Pairs at unique-shot server hit ticks by selected-point visibility (provisional): ` +
       `${JSON.stringify(report.correlatedShots.byVisibility)}`,
     `Server-reported rays through sampled hitboxes by visibility (provisional): ` +
       `${JSON.stringify(report.correlatedShots.reportedHitboxByVisibility)}`,

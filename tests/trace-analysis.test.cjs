@@ -234,13 +234,15 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   } });
   assert.equal(report.correlatedShots.paired, 12);
   assert.equal(report.correlatedShots.pairedWithDecision, 12);
-  assert.equal(report.correlatedShots.pairedHits, 2);
+  assert.equal(report.correlatedShots.pairedHits, 1);
+  assert.equal(report.correlatedShots.hitEvidence.pairedAtHitTick, 2);
+  assert.equal(report.correlatedShots.hitEvidence.pairedAtMultiShotHitTick, 1);
   assert.deepEqual(report.correlatedShots.byModeDistanceMovement, [
     { mode: 'ads', distance: '40-99 m', movement: 'still', shots: 6, hits: 1 },
-    { mode: 'hip', distance: '0-39 m', movement: 'still', shots: 6, hits: 1 }
+    { mode: 'hip', distance: '0-39 m', movement: 'still', shots: 6, hits: 0 }
   ]);
   assert.deepEqual(report.correlatedShots.byVisibility,
-    { 'front-partial': { shots: 3, hits: 1 }, clear: { shots: 8, hits: 1 },
+    { 'front-partial': { shots: 3, hits: 0 }, clear: { shots: 8, hits: 1 },
       unknown: { shots: 1, hits: 0 } });
   assert.deepEqual(report.correlatedShots.reportedHitboxByVisibility, {
     'front-partial': { pairs: 3, rays: 3, raysIntersecting: 3, pairsWithIntersection: 3 },
@@ -259,7 +261,7 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithImpacts, 1);
   assert.equal(report.correlatedShots.rayEvidence.impactsCloserThanSelectedPoint, 1);
   assert.match(formatReport(report), /Provisional server-shot pairs: 12 paired/);
-  assert.match(formatReport(report), /Paired hits by selected-point visibility.*"front-partial":\{"shots":3,"hits":1\}/);
+  assert.match(formatReport(report), /Pairs at unique-shot server hit ticks by selected-point visibility.*"front-partial":\{"shots":3,"hits":0\}/);
   assert.match(formatReport(report), /Server-reported rays through sampled hitboxes by visibility/);
   assert.match(formatReport(report), /Server-reported ray comparison/);
 });
@@ -301,7 +303,8 @@ test('comparable ray angles break down by weapon, selected distance, and recorde
   } });
   assert.equal(report.correlatedShots.paired, 15);
   assert.equal(report.correlatedShots.rayEvidence.incompatibleUniqueCandidates, 1);
-  assert.equal(report.correlatedShots.rayEvidence.pelletCountDisagreements, 1);
+  assert.equal(report.correlatedShots.rayEvidence.pelletCountDisagreements, 0);
+  assert.equal(report.correlatedShots.rayEvidence.missingLocalDirections, 1);
   assert.equal(report.correlatedShots.rayEvidence.comparedRays, 14);
   assert.equal(report.correlatedShots.rayEvidence.differencesOverHalfDegree, 6);
   assert.deepEqual(report.correlatedShots.comparableRaysByWeaponDistanceMode, [

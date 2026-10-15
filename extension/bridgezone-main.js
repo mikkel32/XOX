@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.24
+// @version      1.5.25
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.24';
+  const VERSION = '1.5.25';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -772,7 +772,8 @@
     return hits;
   }
 
-  function recordAimDecision(client, frame, target, shot, correction, buttons, yaw, pitch, reason) {
+  function recordAimDecision(client, frame, target, shot, correction, buttons, yaw, pitch, reason,
+    correctionSkipReason = null) {
     const weapon = weaponSnapshot(client);
     const player = playerSnapshot(client);
     const sampled = runtime.sampleContexts.get(frame.s);
@@ -790,7 +791,8 @@
       localSpeed: player.velocity ? Math.hypot(player.velocity[0], player.velocity[2]) : null,
       movingInput: Math.hypot(frame.mx, frame.mz) > 0.1,
       adsRequested: !!(buttons & 2), localShotPredicted: !!shot,
-      correctionApplied: !!correction, fireSent: !!(buttons & 1), reason,
+      correctionApplied: !!correction, correctionSkipReason,
+      seedSyncStatus: runtime.seedSync.status, fireSent: !!(buttons & 1), reason,
       input: { yaw: frame.yaw, pitch: frame.pitch, mx: frame.mx, mz: frame.mz, buttons: frame.buttons },
       outgoing: { yaw, pitch, buttons },
       weapon, player, target: targetNow,
@@ -971,10 +973,13 @@
           sampledTargetPreferred(target, sampledTarget)) target = sampledTarget;
       let desired = target || { yaw: frame.yaw, pitch: frame.pitch };
       let correction = null;
+      const correctionSkipReason = target && (frame.buttons & 1) && shot &&
+        runtime.seedSync.status === 'diverged' ? 'ack-shot-count-mismatch' : null;
       if (target && (frame.buttons & 1)) {
         // Do not defer a predicted shot to chase an unreachable correction.
-        correction = compensateSpread(shot, target, state);
-        desired = applyStealth(frame, correction || target, !!correction);
+        correction = correctionSkipReason ? null : compensateSpread(shot, target, state);
+        desired = applyStealth(frame, correction || target,
+          !!correction || !!correctionSkipReason);
       }
       const yawStep = Math.max(-MAX_OUTGOING_TURN, Math.min(MAX_OUTGOING_TURN,
         normalizedDelta(state.yaw, desired.yaw)));
@@ -1011,7 +1016,7 @@
         } else reason = 'manual-unassisted';
       }
       if (frame.buttons & 1) recordAimDecision(client, frame, target, shot, correction,
-        buttons, nextYaw, nextPitch, reason);
+        buttons, nextYaw, nextPitch, reason, correctionSkipReason);
 
       const delta = normalizedDelta(frame.yaw, nextYaw);
       if (buttons === frame.buttons && Math.abs(delta) < 1e-9 && Math.abs(nextPitch - frame.pitch) < 1e-9) return frame;
@@ -1058,7 +1063,9 @@
           frame.yaw, frame.pitch, 'stealth-delay');
         return { ...frame, buttons: frame.buttons & ~1 };
       }
-      const correction = compensateSpread(shot, target);
+      const correctionSkipReason = shot && runtime.seedSync.status === 'diverged'
+        ? 'ack-shot-count-mismatch' : null;
+      const correction = correctionSkipReason ? null : compensateSpread(shot, target);
       if (correction) runtime.compensated++;
       const rawAngles = correction || target;
       const angles = options.stealth ? applyStealth(frame, rawAngles) : { ...rawAngles, original: { yaw: frame.yaw, pitch: frame.pitch } };
@@ -1070,7 +1077,7 @@
       runtime.rewrites++;
       recordStealthShot(angles.original, angles);
       recordAimDecision(client, frame, target, shot, correction, frame.buttons,
-        angles.yaw, angles.pitch, 'sent');
+        angles.yaw, angles.pitch, 'sent', correctionSkipReason);
       // Prediction retains frame references. Clone only the outgoing frame and preserve world movement.
       return {
         ...frame, yaw: angles.yaw, pitch: angles.pitch,
@@ -1491,20 +1498,23 @@
     const stormDistance = storm ? Math.hypot(me.pos[0] - storm.center[0], me.pos[2] - storm.center[1]) : 0;
     const stormMargin = storm ? Math.min(8, Math.max(0, storm.radius) * 0.25) : 0;
     const stormUrgent = storm && stormDistance > Math.max(0, storm.radius - stormMargin);
+    const reserve = client.predictor?.ammo?.[weapon?.ammo] || 0;
+    const outOfAmmo = !!slot && slot.mag <= 0 && reserve <= 0;
     const otherSlot = client.predictor?.slots?.[1 - (client.predictor?.active ?? 0)];
-    const alternateSlotReady = weapon?.class === 'pistol' && otherSlot?.weapon &&
-      otherSlot.weapon !== slot?.weapon;
-    if (!stormUrgent && alternateSlotReady && (!target || target.distance > 25) &&
+    const alternateSlotReady = !!otherSlot?.weapon && otherSlot.mag > 0;
+    const sidearmUpgrade = weapon?.class === 'pistol' &&
+      otherSlot?.weapon !== slot?.weapon && (!target || target.distance > 25);
+    const shouldSwap = alternateSlotReady && (outOfAmmo || sidearmUpgrade);
+    if (!stormUrgent && shouldSwap &&
         !(client.predictor?.ws?.switching > 0) && performance.now() >= agent.nextSwapAt) {
       agent.nextSwapAt = performance.now() + 900;
       agent.lootYaw = agent.lootPitch = null;
-      agentNote('equip', { kind: 'weapon' });
+      agentNote('equip', { kind: 'weapon' }, null,
+        { source: outOfAmmo ? 'loaded-backup' : 'sidearm-upgrade' });
       return { ...frame, buttons: frame.buttons | SWAP_BUTTON };
     }
-    const reserve = client.predictor?.ammo?.[weapon?.ammo] || 0;
-    const outOfAmmo = !!slot && slot.mag <= 0 && reserve <= 0;
     const weakWeapon = !weapon || weapon.class === 'pistol' || outOfAmmo;
-    const weaponItem = !stormUrgent && !alternateSlotReady && weakWeapon &&
+    const weaponItem = !stormUrgent && !shouldSwap && weakWeapon &&
       (!target || target.distance > 30 || !weapon || outOfAmmo)
       ? agentWeaponLoot(client, me, slot) : null;
     let goal = null, action = 'engage', stopAt = 0, sprint = false;
@@ -1636,7 +1646,9 @@
     }
     agent.lootYaw = agent.lootPitch = null;
     if (distance < 0.001) { agentNote(action, goal, distance); return frame; }
-    if (distance <= stopAt + 1) { agentNote(action, goal, distance); return frame; }
+    const arrivalTolerance = action === 'storm'
+      ? Math.min(1, Math.max(0.05, storm.radius * 0.25)) : stopAt + 1;
+    if (distance <= arrivalTolerance) { agentNote(action, goal, distance); return frame; }
     const now = performance.now();
     if (agent.lastPosition && now - agent.lastPositionAt > 650) {
       const progress = Math.hypot(me.pos[0] - agent.lastPosition[0], me.pos[2] - agent.lastPosition[1]);

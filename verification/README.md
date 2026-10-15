@@ -12,7 +12,8 @@ attachment helper used during an already-loaded game test.
 
 Run `node verification/analyze-trace.mjs "C:\path\to\bridgezone-trace.json"`
 from the repository root to inspect Fire gates, button changes, F/E and pointer
-lock evidence, and server events. The user-supplied 1.5.8 no-fire trace is
+lock evidence, ambiguous shot pairs, recorded seed-sync fallbacks, and server
+events. The user-supplied 1.5.8 no-fire trace is
 summarized in [FINDINGS.md](../FINDINGS.md); it is not copied into this folder.
 
 Raw screenshots are intentionally kept out of this public repository. Some
