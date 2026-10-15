@@ -186,23 +186,35 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   const { analyzeTrace, formatReport } = await analyzer;
   const localShots = Array.from({ length: 12 }, (_, index) => ({
     at: 1000 + index * 1000, match: 1, sequence: index + 1,
-    tick: 100 + index * 30, player: { velocity: [0, 0, 0] }
+    tick: 100 + index * 30, player: { velocity: [0, 0, 0] },
+    yaw: 0, pitch: 0, eye: [0, 0, 0], directions: [[0, 0, -1]],
+    weapon: { id: 'rifle' }
   }));
   const serverEvents = localShots.flatMap((shot, index) => {
     const tick = shot.tick + 9;
-    const events = [{ at: shot.at + 210, match: 1, tick, type: 'shot' }];
+    const yaw = 0.1 + (index === 11 ? 0.02 : 0);
+    const events = [{ at: shot.at + 210, match: 1, tick, type: 'shot',
+      shot: { weaponId: 'rifle', origin: [0, 0, 0],
+        directions: [[-Math.sin(yaw), 0, -Math.cos(yaw)]],
+        impacts: index === 0 ? [{ point: [0, 0, -5], material: 'concrete' }] : [] } }];
     if (index === 0 || index === 6) events.push({ at: shot.at + 210,
       match: 1, tick, type: 'hit', damage: 20 });
     return events;
   });
+  serverEvents.push({ at: 1210, match: 1, tick: 109, type: 'shot',
+    shot: { weaponId: 'other' } });
   const report = analyzeTrace({ formatVersion: 2, trace: {
     match: 1, localShots, serverEvents,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0.1, 0, 0, 0] })),
     serverSnapshots: [{ acknowledgedShot: { delta: 0 } },
       { acknowledgedShot: { delta: 2 } }],
     aimDecisions: localShots.map((shot, index) => ({ match: 1,
       sequence: shot.sequence, fireSent: true, weaponId: 'rifle',
       adsRequested: index >= 6, sampled: { hipFire: index < 6 },
-      targetDistance: index < 6 ? 20 : 80, localSpeed: 0 }))
+      targetDistance: index < 6 ? 20 : 80, localSpeed: 0,
+      target: { point: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 0,
+        -Math.cos(0.1) * (index < 6 ? 20 : 80)] } }))
   } });
   assert.equal(report.correlatedShots.paired, 12);
   assert.equal(report.correlatedShots.pairedWithDecision, 12);
@@ -212,7 +224,17 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
     { mode: 'hip', distance: '0-39 m', movement: 'still', shots: 6, hits: 1 }
   ]);
   assert.deepEqual(report.authoritative.acknowledgedShotCount, { aligned: 1, diverged: 1 });
+  assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithDirections, 12);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 12);
+  assert.equal(report.correlatedShots.rayEvidence.weaponAgreement.same, 12);
+  assert.equal(report.correlatedShots.rayEvidence.differencesOverHalfDegree, 1);
+  assert.equal(report.correlatedShots.rayEvidence.medianLocalToServerDegrees, 0);
+  assert.ok(report.correlatedShots.rayEvidence.maxLocalToServerDegrees > 1);
+  assert.equal(report.correlatedShots.rayEvidence.medianOriginOffsetMeters, 0);
+  assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithImpacts, 1);
+  assert.equal(report.correlatedShots.rayEvidence.impactsCloserThanSelectedPoint, 1);
   assert.match(formatReport(report), /Provisional server-shot pairs: 12 paired/);
+  assert.match(formatReport(report), /Server-reported ray comparison/);
 });
 
 test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {

@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.18.** All 105 local tests pass with the captured client bundles. Checks cover combat-agent input, trace archiving, and provisional shot matching. The agent has not yet been tested in a live match. Server-side zero spread is not established by client-side correction.
+> **Current version: 1.5.19.** All 105 local tests pass with the captured client bundles. Checks cover combat-agent input, trace archiving, and server-reported ray comparison on provisional shot pairs. The agent has not yet been tested in a live match. Server-side zero spread is not established by client-side correction.
 
 ## Explore
 
@@ -31,7 +31,7 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Adaptive hip fire | Enabled for Rage by default up to 40 m. It requires a grounded, nearly stationary player and a bounded single-projectile correction. If the server's acknowledged shot count differs from the predicted count, it falls back to ADS. The 40 m limit follows the new live trace: longer unscoped shots missed in the paired sample. This does not zero server spread. |
 | Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation. For multi-pellet weapons, it tests the average and each pellet offset against the selected hitbox, then uses the angle predicted to intersect it with the most pellets. Server spread and visible camera recoil may remain. |
 | Ammo assist | Requests a normal reload and pulses Interact when the game's own pickup target is compatible ammo below the observed reserve cap. It never changes the local or server ammo count directly. |
-| Trace archive and export | Automatically saves bounded trace snapshots to browser IndexedDB every 15 seconds during a match, at match end, and on detach. Keeps the latest three local sessions; **Saved** downloads the latest archive even after a page reload. Traces include per-shot geometry, movement, weapon and ADS state, selected-point visibility, agent actions, server shot-count and acknowledged-angle comparisons, first blocking world surfaces for cover rejections, settings, fire gates, F/E state, button changes, acknowledgements, and combat events. The analyzer marks shot pairs provisional. |
+| Trace archive and export | Automatically saves bounded trace snapshots to browser IndexedDB every 15 seconds during a match, at match end, and on detach. Keeps the latest three local sessions; **Saved** downloads the latest archive even after a page reload. Traces include per-shot geometry, movement, weapon and ADS state, selected-point visibility, agent actions, server shot-count and acknowledged-angle comparisons, server-reported shot directions and impacts, first blocking world surfaces for cover rejections, settings, fire gates, F/E state, button changes, acknowledgements, and combat events. The analyzer marks shot pairs provisional. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
@@ -127,6 +127,13 @@ retained locally predicted shots whose Fire bit was removed before send, and
 shows requested versus selected aim points for each weapon. For multi-pellet
 weapons, it summarizes local projected hitbox intersections before and after
 correction; these are predictions rather than server-confirmed hits.
+For own-player shots, 1.5.19 also captures server-reported ray directions,
+origins, and subsequent impact positions. The analyzer rotates locally
+predicted rays into the final outgoing aim and compares directions only for
+unambiguously paired shots with compatible weapon and pellet count. It reports
+angular differences and whether an impact was closer than the locally selected
+point. These are diagnostic observations from server events, not proof of an
+authoritative zero-spread setting or an individual hit.
 Only allowlisted game-state fields are exported; match IDs and raw connection
 errors are omitted. Older format v1 exports remain readable by the analyzer.
 
@@ -152,6 +159,7 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.16 | 382 shots, 70 hits, 36 head hits, 11 kills | User-supplied mixed-weapon trace. Tick-aligned provisional pairs with retained decisions show 0/47 long-range hip hits at 100–149 m, 1/21 moving hip hits under 40 m, 2/3 still hip hits under 40 m, and 37/121 ADS hits. Pairing uses an inferred nine-tick offset and cannot prove individual causation. Raw export is not mirrored. |
 | 1.5.17 | No live trace yet | Caps hip fire to stationary shots within 40 m, adds acknowledged shot-count diagnostics and an opt-in combat agent. Local tests pass; server hit rate and live agent behavior need a new trace. |
 | 1.5.18 | No live trace yet | Enables the combat agent by default, tests extra hitbox interior points near cover, archives traces locally during play, and records acknowledged aim and cover blockers. Local tests pass; live hit rate and navigation remain unverified. |
+| 1.5.19 | No live trace yet | Adds server-reported shot directions and ordered impacts to trace exports, plus provisional server/local ray comparison. Requires a new live trace to test actual ray agreement. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

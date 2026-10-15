@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.18
+// @version      1.5.19
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.18';
+  const VERSION = '1.5.19';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -1527,7 +1527,19 @@
           catch (error) { recordTrace('errors', { at: new Date().toISOString(),
             where: 'server-snapshot', type: error?.name || 'Error' }); }
           const occurrences = new Map();
+          let currentOwnShot = null;
           for (const event of snapshot.events || []) {
+            if (event?.type === 'shot') currentOwnShot = null;
+            if (event?.type === 'impact') {
+              if (currentOwnShot && currentOwnShot.shot.impacts.length < 32) {
+                const point = vector3(event.pos);
+                if (point) currentOwnShot.shot.impacts.push({ point,
+                  normal: vector3(event.normal),
+                  material: safeWeaponId(event.material) || 'other' });
+              }
+              continue;
+            }
+            if (!['shot', 'hit'].includes(event?.type)) currentOwnShot = null;
             if (event?.by !== client.you) continue;
             const signature = JSON.stringify([event.t ?? snapshot.t, event]);
             const ordinal = (occurrences.get(signature) || 0) + 1;
@@ -1541,11 +1553,21 @@
               for (const field of ['target', 'victim', 'to', 'sequence', 's']) {
                 if (Number.isSafeInteger(event[field])) numericFields[field] = event[field];
               }
-              recordTrace('serverEvents', { at: performance.now(), match: runtime.trace.match,
+              const directions = Array.isArray(event.dirs) && event.dirs.length <= 32 &&
+                event.dirs.every(direction => vector3(direction))
+                ? event.dirs.map(direction => [...direction]) : null;
+              const row = { at: performance.now(), match: runtime.trace.match,
                 tick: event.t ?? snapshot.t, snapshotTick: Number.isFinite(snapshot.t) ? snapshot.t : null,
                 type: event.type, fields: numericFields,
                 damage: Number.isFinite(event.damage) ? event.damage : null,
-                head: event.head === true });
+                head: event.head === true,
+                shot: event.type === 'shot' ? {
+                  weaponId: safeWeaponId(event.weapon),
+                  rarity: safeWeaponId(event.rarity),
+                  origin: vector3(event.from), directions, impacts: []
+                } : null };
+              recordTrace('serverEvents', row);
+              if (event.type === 'shot') currentOwnShot = row;
             }
             if (event.type === 'shot') runtime.server.shots++;
             if (event.type === 'hit') {

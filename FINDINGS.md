@@ -356,12 +356,33 @@ server's reported angles. The analyzer deduplicates by match and ACK sequence
 and reports angular differences separately from hits. These differences can
 suggest turn clamping or state drift, but cannot identify the server rule on
 their own. Traces are automatically archived every 15 seconds during play and
-at match end and detach; it also attempts to save on page hide. Browser IndexedDB retains the latest
-three local sessions; the panel can download the latest saved trace after a
+at match end and detach; the code also attempts to save on page hide. Browser
+IndexedDB retains the latest three local sessions; the panel can download the latest saved trace after a
 reload. Local tests cover archiving, export, settings migration, cover probes,
 acknowledged-angle math, and the diagonal point selection. There is no 1.5.18
 live match trace yet, so neither zero spread nor a higher server hit rate is
 verified.
+
+### Version 1.5.19: server-reported ray evidence
+
+The captured client consumes `shot` events from server snapshots and uses
+their `from` and `dirs` fields for remote shot effects. Separate `impact`
+events are grouped with the preceding shot by event order; the renderer uses
+their positions and materials to place impacts. A replay-only `ends` array is
+assembled locally and is not treated as a live server endpoint. These events
+are server-reported visual data; the captured client does not prove the exact
+vectors used for server hit adjudication.
+
+Version 1.5.19 saves only allowlisted own-player shot origins, direction
+vectors, weapon IDs, and ordered impact positions. For a provisionally paired
+server shot, the analyzer rotates local predicted rays from sampled aim to the
+final outgoing aim, then compares them with the reported directions. It
+requires a compatible weapon and projectile count, and leaves ambiguous pairs
+unmatched. The report also measures reported rays against outgoing aim and the
+locally selected target point, and counts impacts closer than that point.
+This makes seed divergence, rejected aim angles, and cover more observable.
+No 1.5.19 live trace exists yet, so ray agreement and true server-side zero
+spread remain unverified.
 
 ## What changed and what was observed
 
