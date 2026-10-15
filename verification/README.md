@@ -16,6 +16,10 @@ lock evidence, ambiguous shot pairs, recorded seed-sync fallbacks, and server
 events. The user-supplied 1.5.8 no-fire trace is
 summarized in [FINDINGS.md](../FINDINGS.md); it is not copied into this folder.
 
+From version 1.5.26, a trace also downloads when the match finishes, the local
+player is eliminated, or the connection is kicked. If the browser blocks an
+automatic download, use **Saved** in the panel to export the local archive.
+
 Raw screenshots are intentionally kept out of this public repository. Some
 show browser context and a private lobby invite URL. The receipts contain no
 session token or match ID, and the [findings document](../FINDINGS.md) provides

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.25
+// @version      1.5.26
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.25';
+  const VERSION = '1.5.26';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -119,7 +119,20 @@
       trace: traceSnapshot() }, null, pretty ? 2 : undefined);
   }
 
-  const archiveState = { lastAttemptAt: -Infinity, savedAt: null, saving: null, error: null };
+  function downloadTrace(payload) {
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'bridgezone-trace-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+    (root || document.documentElement).appendChild(link);
+    link.click();
+    archiveState.downloadRequestedAt = new Date().toISOString();
+    setTimeout(() => { link.remove(); URL.revokeObjectURL(url); }, 1000);
+  }
+
+  const archiveState = { lastAttemptAt: -Infinity, savedAt: null, downloadRequestedAt: null,
+    saving: null, error: null };
   const archiveId = runtime.trace.startedAt + ':' + Math.random().toString(36).slice(2, 10);
   let traceArchiveDb = null;
   function openTraceArchive() {
@@ -170,6 +183,25 @@
     return saving;
   }
 
+  function finalizeTerminalTrace(client) {
+    if (!client || runtime.client !== client || !runtime.trace.match ||
+        archiveState.finalizedMatch === runtime.trace.match) return false;
+    let eliminated = false;
+    try { eliminated = client.localDead?.() === true; }
+    catch { /* A missing local state must not block detach or archiving. */ }
+    if (client.latest?.phase !== 'finished' && !eliminated &&
+        client.connection?.state !== 'kicked') return false;
+    archiveState.finalizedMatch = runtime.trace.match;
+    void archiveTrace(true);
+    try { downloadTrace(exportTrace()); }
+    catch (error) {
+      runtime.error = 'Automatic trace export: ' + (error?.message || error);
+      recordTrace('errors', { at: new Date().toISOString(),
+        where: 'auto-trace-export', type: error?.name || 'Error' });
+    }
+    return true;
+  }
+
   async function latestArchivedTrace() {
     const db = await openTraceArchive();
     return new Promise((resolve, reject) => {
@@ -196,7 +228,7 @@
   }
 
   function detachClient() {
-    if (runtime.client) void archiveTrace(true);
+    if (runtime.client && !finalizeTerminalTrace(runtime.client)) void archiveTrace(true);
     restoreHooks(clientRestores);
     runtime.client = null;
     runtime.pipeline = null;
@@ -1894,7 +1926,7 @@
       runtime.predictions.clear();
       setOptions({ silent: false, rage: false });
       runtime.error = 'Server rejected aim assistance / aim disabled';
-      void archiveTrace(true);
+      finalizeTerminalTrace(client);
     };
     if (typeof client.connection?.onState === 'function') {
       const unsubscribe = client.connection.onState(checkRejection);
@@ -2325,7 +2357,9 @@
     root.querySelector('[data-live-metrics]').textContent = metrics;
     stats.textContent = 'TARGET ' + targetName + targetRange + targetPart +
       ' / ' + runtime.compensated + ' shot corrections / ' + metrics +
-      (archiveState.savedAt ? ' / trace saved ' + new Date(archiveState.savedAt).toLocaleTimeString() : '');
+      (archiveState.savedAt ? ' / trace saved ' + new Date(archiveState.savedAt).toLocaleTimeString() : '') +
+      (archiveState.downloadRequestedAt ? ' / download requested ' +
+        new Date(archiveState.downloadRequestedAt).toLocaleTimeString() : '');
   }
 
   function resumeGame() {
@@ -2381,7 +2415,7 @@
         <label class="feature">Anticheat stealth<input name="stealth" aria-label="Anticheat stealth" type="checkbox"></label>
         <label class="feature">Ammo assist / reload + pickup<input name="ammo" aria-label="Ammo assist" type="checkbox"></label>
         <div class="setting"><label for="smooth">Aim smoothing<output data-value="smooth"></output></label><input id="smooth" name="smooth" aria-label="Aim smoothing" type="range" min="0.1" max="0.95" step="0.05"></div>
-        <p class="note">Insert: show/hide. Resume restores game controls. F/E takes priority. Combat agent starts on and moves toward visible enemies, available ammo, or the safe zone; your movement or action keys override it. It stops to shoot inside effective weapon range. Head and Chest are exact choices; Auto may adapt. Hip fire is limited to stationary shots within 40 m because longer and moving hip shots had poor results in the last trace. Predicted spread correction is a local estimate; only server hits confirm accuracy. Server spread, recoil, cover and weapon limits remain. Traces save locally during play; use Saved to export the latest archive.</p>
+        <p class="note">Insert: show/hide. Resume restores game controls. F/E takes priority. Combat agent starts on and moves toward visible enemies, available ammo, or the safe zone; your movement or action keys override it. It stops to shoot inside effective weapon range. Head and Chest are exact choices; Auto may adapt. Hip fire is limited to stationary shots within 40 m because longer and moving hip shots had poor results in the last trace. Predicted spread correction is a local estimate; only server hits confirm accuracy. Server spread, recoil, cover and weapon limits remain. A trace downloads when the match finishes or you are eliminated. Traces also save locally during play; use Saved if the browser blocks a download.</p>
       </div><div class="status"><div role="status"></div><div class="stats"></div></div>
     </aside><button type="button" class="show-tools" data-show-panel hidden aria-label="Show tools panel">Show tools</button>`;
     document.documentElement.appendChild(host);
@@ -2398,16 +2432,6 @@
     showButton.addEventListener('click', () => {
       panelVisible = true; panel.hidden = false; showButton.hidden = true;
     });
-    function downloadTrace(payload) {
-      const blob = new Blob([payload], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'bridgezone-trace-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
-      root.appendChild(link);
-      link.click();
-      setTimeout(() => { link.remove(); URL.revokeObjectURL(url); }, 1000);
-    }
     root.querySelector('[data-download-trace]').addEventListener('click', () => {
       try {
         downloadTrace(exportTrace());
@@ -2491,7 +2515,9 @@
   }
   window.addEventListener('storage', onStorage);
   restores.push(() => window.removeEventListener('storage', onStorage));
-  const onPageHide = () => { void archiveTrace(true); };
+  const onPageHide = () => {
+    if (!finalizeTerminalTrace(runtime.client)) void archiveTrace(true);
+  };
   window.addEventListener('pagehide', onPageHide);
   restores.push(() => window.removeEventListener('pagehide', onPageHide));
   window.__bridgeZoneTools = {
@@ -2510,7 +2536,8 @@
       heldShots: runtime.stealth.heldShots, agent: { action: runtime.agent.action,
         goal: runtime.agent.goal?.kind ?? null }, seedSync: { ...runtime.seedSync },
       server: { ...runtime.server }, archive: { supported: !!window.indexedDB,
-        savedAt: archiveState.savedAt, error: archiveState.error },
+        savedAt: archiveState.savedAt, downloadRequestedAt: archiveState.downloadRequestedAt,
+        error: archiveState.error },
       error: runtime.error, options: { ...options } }),
     trace: traceSnapshot,
     exportTrace,
@@ -2545,12 +2572,7 @@
     } catch (error) { runtime.error = 'Late client hook: ' + error.message; }
     const client = runtime.client;
     if (client && !client.disposed) { attachPredictor(client); attachRenderer(client); }
-    if (client && !client.disposed) {
-      if (client.latest?.phase === 'finished' && archiveState.finalizedMatch !== runtime.trace.match) {
-        archiveState.finalizedMatch = runtime.trace.match;
-        void archiveTrace(true);
-      } else void archiveTrace(false);
-    }
+    if (client && !client.disposed && !finalizeTerminalTrace(client)) void archiveTrace(false);
     if (!client || client.disposed || performance.now() - runtime.renderedAt > 2500) painter?.clearRect(0, 0, width, height);
     updateStatus();
   }, 500);

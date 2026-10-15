@@ -540,6 +540,17 @@ only for retained, uniquely compatible pairs, and missing directions or angles
 are counted. Tests use synthetic ambiguity and missing-data cases; the latest
 user trace predates server-reported ray capture.
 
+### Version 1.5.26: automatic trace export
+
+The script now downloads a bounded JSON trace once when it observes a finished
+match, local elimination, or a kicked connection. It also attempts export when
+a terminal client detaches before the next periodic tick. The panel reports the
+last download request time. IndexedDB continues to save the latest session in the
+background; the **Saved** button remains available if the browser blocks an
+automatic download. Local tests verify the trigger, duplicate suppression,
+payload version and retained input frames, including when IndexedDB is absent.
+No live browser download or new server-reported rays have been observed yet.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

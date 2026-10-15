@@ -2941,7 +2941,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.25');
+  assert.equal(exported.scriptVersion, '1.5.26');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2970,10 +2970,11 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.downloads.length, 1);
   assert.match(h.downloads[0].download, /^bridgezone-trace-.*\.json$/);
   assert.equal(h.downloads[0].href, 'blob:trace');
+  assert.ok(h.api.inspect().archive.downloadRequestedAt);
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.25');
+  assert.equal(payload.scriptVersion, '1.5.26');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -3001,6 +3002,46 @@ test('active matches save bounded trace snapshots locally and Saved exports the 
   assert.equal(JSON.parse(await h.createdBlobs[0].text()).trace.frames.at(-1).sequence, 99);
   assert.equal(h.api.inspect().archive.error, null);
   h.api.destroy();
+});
+
+test('a terminal match downloads one trace even when IndexedDB is unavailable', async () => {
+  for (const ending of ['finished', 'eliminated', 'kicked']) {
+    const archive = ending === 'finished' ? archiveDbHarness() : null;
+    const h = harness([], undefined, { indexedDB: archive?.indexedDB });
+    const fake = attach(h);
+    h.mount();
+    send(fake, [frame({ s: 199, buttons: 0 })]);
+    h.tick();
+    assert.equal(h.downloads.length, 0, 'an active match does not export early');
+    if (ending === 'finished') fake.client.latest.phase = 'finished';
+    if (ending === 'eliminated') fake.client.localDead = () => true;
+    if (ending === 'kicked') fake.client.connection.state = 'kicked';
+    h.tick();
+    assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
+    assert.ok(h.api.inspect().archive.downloadRequestedAt);
+    const payload = JSON.parse(await h.createdBlobs[0].text());
+    assert.equal(payload.scriptVersion, '1.5.26');
+    assert.equal(payload.trace.frames.at(-1).sequence, 199);
+    h.tick();
+    assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
+    if (archive) {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(archive.records.size, 1);
+    }
+    h.api.destroy();
+  }
+});
+
+test('detaching an eliminated client exports the trace before the next timer tick', async () => {
+  const h = harness();
+  const fake = attach(h);
+  send(fake, [frame({ s: 200, buttons: 0 })]);
+  fake.client.localDead = () => true;
+  h.api.destroy();
+  assert.equal(h.downloads.length, 1);
+  const payload = JSON.parse(await h.createdBlobs[0].text());
+  assert.equal(payload.trace.frames.at(-1).sequence, 200);
+  assert.equal(payload.scriptVersion, '1.5.26');
 });
 
 test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {
