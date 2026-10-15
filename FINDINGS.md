@@ -133,6 +133,39 @@ correction and Fire were sent. These are local code and test results; no 1.5.7
 server trace verifies distant hits. The server still owns shot reach, spread,
 fire cadence, and hit validation. Visible camera recoil is unchanged.
 
+Version 1.5.8 expands the bounded export to distinguish selection, sample-time
+fire gating, local prediction, outgoing Fire, and server events. Each recorded
+Fire decision includes the selected aim point and target velocity, local player
+and weapon state, sample-to-send target movement when the sequence matches,
+input and outgoing angles, and a local geometric estimate of projectile distance
+from the selected point before and after correction. Rage gate counters cover
+all observed samples, while detailed gate records are retained on changes and
+at short intervals. Settings transitions are retained alongside match starts.
+The export reports per-buffer dropped counts. Connection
+errors are classified instead of exporting raw error strings. The local
+`verification/analyze-trace.mjs` command groups outgoing Fire by weapon, range,
+and movement and identifies missing predictions or large geometric deviations.
+It keeps server events separate because the observed protocol does not provide
+a guaranteed shot-to-input sequence link. These diagnostics have local test
+coverage but no 1.5.8 live match result yet.
+
+Server snapshots additionally record the authoritative input ACK, ADS, weapon,
+magazine, position, and observed acknowledgement latency. The analyzer shows
+which retained outgoing Fire sequences the highest observed ACK covers. An ACK
+only shows that the server advanced past an input sequence; it does not prove
+the server accepted Fire, produced a shot, or registered a hit. Predictor state
+is captured before reconciliation and can temporarily disagree with the server
+because of network delay.
+
+The hash-matched captured client chunk `0ozbivb7uobj6.js` (SHA-256
+`96f29cd0a2b7229b750d4d9220150cddd595a333e0601566e290efa73b166d5a`)
+derives active weapon stats from `slots[active].weapon` and its rarity. The new
+weapon ID field therefore reads the active slot first and reports its source;
+it falls back to a stats ID if the slot is unavailable. The same captured
+snapshot path uses `me.ack` and `sentAt` to update its RTT estimate, supporting
+the input acknowledgement and latency fields above. This is static evidence
+for the captured client and still needs a live 1.5.8 trace to confirm coverage.
+
 ### Local display and movement limits
 
 The client predicts a shot locally before an outgoing input frame may be
@@ -158,13 +191,13 @@ node --check extension/bridgezone-main.js
 node --test tests/*.test.cjs
 ```
 
-The 2026-10-15 local run passed 50 tests with the captured public client archive
-available. Three tests use that optional archive; in a fresh clone without it,
-those three skip. The JSON trace files are exports of observed input frames,
-local shot predictions, server events, and connection state. The trace is
-bounded, contains no session token or match ID, and cannot reveal an unshipped
-server detector. The panel's **Save trace** button exports the current in-memory
-buffer; save it before leaving a match.
+The 2026-10-15 portable 1.5.8 run passed 61 tests with three optional tests
+skipped. One optional test can use the hash-matched captured physics bundle;
+two need the captured runtime. The JSON traces contain allowlisted game-state
+diagnostics, no session token or match ID, and cannot reveal an unshipped server
+detector. The panel's **Save trace** button exports the current in-memory
+buffers; save them before leaving a match. The analyzer reads both format v1
+and v2 exports without treating local geometric estimates as server hits.
 
 ## Publication choices
 

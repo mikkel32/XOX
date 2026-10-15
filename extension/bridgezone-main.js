@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.7
+// @version      1.5.8
 // @description  Xray, 360-degree Rage, auto fire, and server-consistent reloads.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,15 +15,19 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.7';
+  const VERSION = '1.5.8';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
+  const TRACE_LIMITS = Object.freeze({ frames: 4096, localShots: 512, aimDecisions: 512,
+    fireGates: 512, serverSnapshots: 1024, serverEvents: 1024,
+    settings: 64, kicks: 64, connectionStates: 128, errors: 128 });
   const defaults = { xray: true, loot: true, silent: true, rage: false, rapidFire: true, fov: 90, range: 600, point: 'auto', visibleOnly: true, stealth: true, smooth: 1, ammo: true };
   const options = { ...defaults };
   const runtime = {
     client: null, physics: {}, hookReady: false, stopped: false, aimRejected: false,
-    rewrites: 0, compensated: 0, predictions: new Map(), target: null, error: '', pipeline: null, renderedAt: 0
+    rewrites: 0, compensated: 0, predictions: new Map(), sampleContexts: new Map(),
+    target: null, error: '', pipeline: null, renderedAt: 0
   };
   runtime.stealth = { deterministic: 0, misses: 0, cooldown: 0, backoffUntil: 0, lastShotAt: 0, heldShots: 0, phase: Math.random() * Math.PI * 2 };
   runtime.outgoingAim = { yaw: null, pitch: null, targetIndex: null, ready: false, pendingManualUntil: 0 };
@@ -46,16 +50,27 @@
     frames: [],
     localShots: [],
     aimDecisions: [],
+    fireGates: [],
+    serverSnapshots: [],
     serverEvents: [],
+    settings: [],
     kicks: [],
     connectionStates: [],
-    errors: []
+    errors: [],
+    retention: { limits: { ...TRACE_LIMITS }, dropped: Object.fromEntries(Object.keys(TRACE_LIMITS).map(key => [key, 0])) },
+    counters: { rageSamples: 0, serverSnapshotsSeen: 0, gateReasons: {},
+      targetRejects: {}, highestAckByMatch: {} }
   };
 
-  function recordTrace(kind, entry, limit = 128) {
+  function recordTrace(kind, entry) {
     const items = runtime.trace[kind];
+    const limit = TRACE_LIMITS[kind];
+    if (!items || !limit) return;
     items.push(entry);
-    if (items.length > limit) items.splice(0, items.length - limit);
+    if (items.length > limit) {
+      runtime.trace.retention.dropped[kind] += items.length - limit;
+      items.splice(0, items.length - limit);
+    }
   }
 
   function recordFrames(incoming, outgoing) {
@@ -69,20 +84,21 @@
         sequence: after.s, tick: after.vt, buttons: after.buttons,
         before: [before.yaw, before.pitch, before.mx, before.mz],
         after: [after.yaw, after.pitch, after.mx, after.mz]
-      }, 4096);
+      });
     }
   }
 
   function traceSnapshot() {
-    return { ...runtime.trace, frames: runtime.trace.frames.map(frame => ({ ...frame,
-      before: [...frame.before], after: [...frame.after] })),
-      localShots: runtime.trace.localShots.map(shot => ({ ...shot,
-        eye: [...shot.eye], directions: shot.directions.map(direction => [...direction]) })),
-      aimDecisions: runtime.trace.aimDecisions.map(decision => ({ ...decision })),
-      serverEvents: runtime.trace.serverEvents.map(event => ({ ...event })),
-      connectionStates: runtime.trace.connectionStates.map(state => ({ ...state })),
-      kicks: runtime.trace.kicks.map(kick => ({ ...kick })),
-      errors: runtime.trace.errors.map(error => ({ ...error })) };
+    // All retained fields are plain, allowlisted JSON. Clone nested geometry as well.
+    return JSON.parse(JSON.stringify(runtime.trace));
+  }
+
+  function recordSettings(reason) {
+    const values = Object.fromEntries(['silent', 'rage', 'rapidFire', 'fov', 'range',
+      'point', 'visibleOnly', 'stealth', 'smooth', 'ammo'].map(key => [key, options[key]]));
+    const previous = runtime.trace.settings.at(-1);
+    if (reason !== 'match-start' && previous && JSON.stringify(previous.values) === JSON.stringify(values)) return;
+    recordTrace('settings', { at: performance.now(), match: runtime.trace.match, reason, values });
   }
 
   function restoreHooks(hooks) {
@@ -98,6 +114,7 @@
     runtime.pipeline = null;
     runtime.renderedAt = 0;
     runtime.predictions.clear();
+    runtime.sampleContexts.clear();
     runtime.target = null;
     lootCacheClient = null;
     lootCache = [];
@@ -114,6 +131,7 @@
     if (['head', 'chest', 'auto'].includes(patch.point)) options.point = patch.point;
     if (Number.isFinite(patch.smooth)) options.smooth = Math.max(0, Math.min(1, patch.smooth));
     if (runtime.aimRejected) options.silent = options.rage = false;
+    recordSettings('change');
     if (persist) {
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(options)); } catch { /* Storage is optional. */ }
     }
@@ -153,9 +171,25 @@
     return [snap.p[0], snap.p[1] + (point === 'head' || point === 'auto' ? h - 0.14 : h * 0.75 - 0.14), snap.p[2]];
   }
 
-  function selectTarget(client, frame, shotOrigin) {
+  function vector3(value) {
+    return Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) ? [...value] : null;
+  }
+
+  function noteScan(scan, snap, distance, reason) {
+    if (!scan) return;
+    scan.counts[reason] = (scan.counts[reason] || 0) + 1;
+    if (Number.isFinite(distance) && (!scan.closest || distance < scan.closest.distance)) {
+      scan.closest = { index: snap.i, distance: Math.round(distance * 10) / 10,
+        speed: Math.round(Math.hypot(...(vector3(snap.v) || [0, 0, 0])) * 10) / 10, reason };
+    }
+  }
+
+  function selectTarget(client, frame, shotOrigin, scan) {
     const me = ownState(client);
-    if (!me?.pos?.every(Number.isFinite)) return null;
+    if (!vector3(me?.pos)) {
+      if (scan) scan.unavailable = 'local-position';
+      return null;
+    }
     const origin = shotOrigin || [me.pos[0], me.pos[1] + 1.62 - 0.62 * Math.max(0, Math.min(1, me.crouch || 0)), me.pos[2]];
     const cp = Math.cos(frame.pitch);
     const forward = [-Math.sin(frame.yaw) * cp, Math.sin(frame.pitch), -Math.cos(frame.yaw) * cp];
@@ -166,39 +200,72 @@
     let best = null;
     let bestScore = Infinity;
     for (const { snap: current } of client.remoteFrames || []) {
-      if (!enemy(client, current, true)) continue;
+      if (scan) scan.observed++;
+      if (!enemy(client, current, true)) {
+        noteScan(scan, current || {}, null, 'invalid');
+        continue;
+      }
       let snap = current;
+      let sampled = false;
       if (client.interpolator?.sample && Number.isFinite(frame.vt)) {
         const sample = { ...current, p: [...current.p], v: [...(current.v || [0, 0, 0])] };
         // Match the server's rewind tick without changing the client's render snapshots.
-        if (!client.interpolator.sample(current.i, frame.vt, sample)) continue;
+        if (!client.interpolator.sample(current.i, frame.vt, sample)) {
+          noteScan(scan, current, Math.hypot(...current.p.map((value, i) => value - origin[i])), 'interpolation');
+          continue;
+        }
         snap = sample;
+        sampled = true;
       }
-      if (!enemy(client, snap, true)) continue;
+      if (!enemy(client, snap, true)) {
+        noteScan(scan, current, Math.hypot(...current.p.map((value, i) => value - origin[i])), 'invalid');
+        continue;
+      }
       const speed = Math.hypot(...(snap.v || [0, 0, 0]));
       const distanceToFeet = Math.hypot(...snap.p.map((value, i) => value - origin[i]));
       const preferred = options.point === 'auto' && (distanceToFeet > 50 || speed > 4) ? 'chest' : options.point;
       let point = aimPoint(snap, preferred);
       const delta = point.map((value, i) => value - origin[i]);
       const distance = Math.hypot(...delta);
-      if (distance < 0.01 || distance > maxRange) continue;
+      if (distance < 0.01 || distance > maxRange) {
+        noteScan(scan, snap, distance, 'range');
+        continue;
+      }
       const dot = delta.reduce((sum, value, i) => sum + value * forward[i], 0) / distance;
-      if (dot < minDot) continue;
+      if (dot < minDot) {
+        noteScan(scan, snap, distance, 'fov');
+        continue;
+      }
+      let visibility = options.visibleOnly ? 'clear' : 'unchecked';
       if (options.visibleOnly) {
         const { getCollisionWorld, hasLineOfSight } = runtime.physics;
         // If collision hooks are unavailable, don't select a target through unknown cover.
-        if (!getCollisionWorld || !hasLineOfSight) continue;
+        if (!getCollisionWorld || !hasLineOfSight) {
+          noteScan(scan, snap, distance, 'physics-unavailable');
+          continue;
+        }
         const world = getCollisionWorld();
         if (!hasLineOfSight(world, origin, point)) {
-          if (options.point !== 'auto') continue;
+          if (options.point !== 'auto') {
+            noteScan(scan, snap, distance, 'cover');
+            continue;
+          }
           point = aimPoint(snap, preferred === 'chest' ? 'head' : 'chest');
-          if (!hasLineOfSight(world, origin, point)) continue;
+          if (!hasLineOfSight(world, origin, point)) {
+            noteScan(scan, snap, distance, 'cover');
+            continue;
+          }
+          visibility = 'fallback';
         }
       }
       const aimDelta = point.map((value, i) => value - origin[i]);
       const pitch = Math.atan2(aimDelta[1], Math.hypot(aimDelta[0], aimDelta[2]));
-      if (Math.abs(pitch) > 1.54) continue;
+      if (Math.abs(pitch) > 1.54) {
+        noteScan(scan, snap, distance, 'pitch');
+        continue;
+      }
       const yaw = Math.atan2(-aimDelta[0], -aimDelta[2]);
+      noteScan(scan, snap, distance, 'eligible');
       // Favor targets that need little turning, then keep the current target stable.
       const score = options.rage
         ? Math.abs(normalizedDelta(approachYaw, yaw)) + 0.25 * distance / maxRange -
@@ -208,10 +275,14 @@
       bestScore = score;
       best = {
         index: snap.i, distance, direction: aimDelta.map(value => value / Math.hypot(...aimDelta)),
-        yaw,
-        pitch
+        yaw, pitch, origin: [...origin], point: [...point], position: [...snap.p],
+        velocity: vector3(snap.v), aimPart: visibility === 'fallback'
+          ? (preferred === 'chest' ? 'head' : 'chest') : (preferred === 'chest' ? 'chest' : 'head'),
+        visibility, sampled
       };
     }
+    if (scan && best) scan.selected = { index: best.index, distance: Math.round(best.distance * 10) / 10,
+      aimPart: best.aimPart, visibility: best.visibility };
     return best;
   }
 
@@ -250,23 +321,177 @@
     return { yaw, pitch };
   }
 
-  function recordAimDecision(client, frame, target, shot, correction, buttons) {
-    const weapon = client.predictor?.activeStats;
-    const rangeEnd = weapon?.rangeEnd;
-    const weaponId = weapon?.id;
-    const localAds = client.predictor?.ws?.ads;
+  function safeWeaponId(value) {
+    return typeof value === 'string' && /^[a-z0-9_-]{1,32}$/i.test(value) ? value : null;
+  }
+
+  function weaponSnapshot(client) {
+    const predictor = client.predictor;
+    const weapon = predictor?.activeStats;
+    const ws = predictor?.ws;
+    const active = Number.isInteger(predictor?.active) ? predictor.active : client.latest?.me?.active;
+    const slot = predictor?.slots?.[active] || client.latest?.me?.slots?.[active];
+    const slotId = safeWeaponId(slot?.weapon);
+    const statsId = safeWeaponId(weapon?.id);
+    const stats = {};
+    for (const key of ['rangeStart', 'rangeEnd', 'minDamage', 'damage', 'hipSpread', 'adsSpread',
+      'moveSpread', 'pelletSpread', 'adsSeconds', 'moveSpeed', 'pellets', 'rpm', 'magSize',
+      'headMult', 'limbMult', 'recoilV', 'recoilH', 'zoom', 'weight', 'reloadSeconds', 'equipSeconds']) {
+      if (Number.isFinite(weapon?.[key])) stats[key] = weapon[key];
+    }
+    return {
+      id: slotId || statsId, idSource: slotId ? 'slot' : statsId ? 'stats' : null,
+      rarity: typeof slot?.rarity === 'string' && /^[a-z0-9_-]{1,32}$/i.test(slot.rarity)
+        ? slot.rarity : Number.isSafeInteger(slot?.rarity) ? slot.rarity : null,
+      class: typeof weapon?.class === 'string' && /^[a-z0-9_-]{1,32}$/i.test(weapon.class)
+        ? weapon.class : null,
+      fireMode: ['auto', 'semi', 'pump', 'bolt'].includes(weapon?.fireMode) ? weapon.fireMode : null,
+      stats,
+      ads: Number.isFinite(ws?.ads) ? ws.ads : null,
+      bloom: Number.isFinite(ws?.bloom) ? ws.bloom : null,
+      cooldown: Number.isFinite(ws?.cooldown) ? ws.cooldown : null,
+      reload: Number.isFinite(ws?.reload) ? ws.reload : null,
+      shots: Number.isFinite(ws?.shots) ? ws.shots : null,
+      burst: Number.isFinite(ws?.burst) ? ws.burst : null,
+      trigger: typeof ws?.trigger === 'boolean' ? ws.trigger : null,
+      magazine: Number.isFinite(slot?.mag) ? slot.mag : null,
+      reserve: Number.isFinite(predictor?.ammo?.[weapon?.ammo]) ? predictor.ammo[weapon.ammo] : null
+    };
+  }
+
+  function playerSnapshot(client) {
+    const me = ownState(client);
+    return { position: vector3(me?.pos), velocity: vector3(me?.vel) || vector3(me?.v),
+      mode: ['ground', 'air', 'parachute', 'dead'].includes(me?.mode) ? me.mode : null,
+      crouch: Number.isFinite(me?.crouch) ? me.crouch : null,
+      grounded: typeof me?.grounded === 'boolean' ? me.grounded : null,
+      sprinting: typeof me?.sprinting === 'boolean' ? me.sprinting : null };
+  }
+
+  function recordServerSnapshot(client, snapshot) {
+    const me = snapshot?.me;
+    if (!me || typeof me !== 'object') return;
+    runtime.trace.counters.serverSnapshotsSeen++;
+    const ack = Number.isSafeInteger(me.ack) ? me.ack : null;
+    const match = runtime.trace.match;
+    if (ack !== null) {
+      const highest = runtime.trace.counters.highestAckByMatch;
+      if (!(match in highest) && Object.keys(highest).length >= 64) {
+        delete highest[Object.keys(highest)[0]];
+        runtime.trace.retention.dropped.ackMatches = (runtime.trace.retention.dropped.ackMatches || 0) + 1;
+      }
+      highest[match] = Math.max(highest[match] ?? -1, ack);
+    }
+    const now = performance.now();
+    const combat = (snapshot.events || []).some(event => event?.by === client.you &&
+      ['shot', 'hit', 'kill'].includes(event.type));
+    if (!combat && runtime.lastServerSnapshot && now - runtime.lastServerSnapshot.at < 100) return;
+    runtime.lastServerSnapshot = { at: now };
+    const slot = me.slots?.[me.active];
+    const predicted = client.predictor;
+    const predictedSlot = predicted?.slots?.[predicted.active];
+    const sentAt = ack === null ? null : client.sentAt?.get?.(ack);
+    recordTrace('serverSnapshots', {
+      at: now, match, tick: Number.isFinite(snapshot.t) ? snapshot.t : null, ack,
+      ackLatencyMs: Number.isFinite(sentAt) && now >= sentAt ? now - sentAt : null,
+      reportedRttMs: Number.isFinite(client.rtt) ? client.rtt : null,
+      weaponId: safeWeaponId(slot?.weapon),
+      server: { ads: Number.isFinite(me.ads) ? me.ads : null,
+        magazine: Number.isFinite(slot?.mag) ? slot.mag : null,
+        reload: Number.isFinite(me.reload) ? me.reload : null,
+        position: vector3(me.pos), velocity: vector3(me.vel),
+        crouch: Number.isFinite(me.crouch) ? me.crouch : null,
+        grounded: typeof me.grounded === 'boolean' ? me.grounded : null,
+        sprinting: typeof me.sprinting === 'boolean' ? me.sprinting : null,
+        health: Number.isFinite(me.health) ? me.health : null },
+      predictorBeforeReconcile: predicted ? {
+        ads: Number.isFinite(predicted.ws?.ads) ? predicted.ws.ads : null,
+        bloom: Number.isFinite(predicted.ws?.bloom) ? predicted.ws.bloom : null,
+        magazine: Number.isFinite(predictedSlot?.mag) ? predictedSlot.mag : null,
+        position: vector3(predicted.ps?.pos)
+      } : null,
+      selfCombatEvents: combat
+    });
+  }
+
+  function targetSnapshot(target) {
+    return target ? { index: target.index, distance: target.distance,
+      origin: vector3(target.origin), point: vector3(target.point),
+      position: vector3(target.position), velocity: vector3(target.velocity),
+      aimPart: target.aimPart, visibility: target.visibility, sampled: target.sampled } : null;
+  }
+
+  function aimBasis(yaw, pitch) {
+    const sy = Math.sin(yaw), cy = Math.cos(yaw), sp = Math.sin(pitch), cp = Math.cos(pitch);
+    return { forward: [-sy * cp, sp, -cy * cp], right: [cy, 0, -sy], up: [sy * sp, cp, cy * sp] };
+  }
+
+  function angularMiss(target, yaw, pitch) {
+    if (!target || !Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;
+    const forward = aimBasis(yaw, pitch).forward;
+    const dot = Math.max(-1, Math.min(1, forward.reduce((sum, value, i) => sum + value * target.direction[i], 0)));
+    const radians = Math.acos(dot);
+    return { degrees: radians * 180 / Math.PI,
+      centerOffsetMeters: dot > 0 ? target.distance * Math.sin(radians) : null };
+  }
+
+  function predictedMiss(shot, target, yaw, pitch) {
+    if (!shot || !target || !Number.isFinite(yaw) || !Number.isFinite(pitch) ||
+        !Number.isFinite(shot.yaw) || !Number.isFinite(shot.pitch) ||
+        !Array.isArray(shot.directions)) return null;
+    const source = aimBasis(shot.yaw, shot.pitch), destination = aimBasis(yaw, pitch);
+    const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
+    let min = Infinity, max = 0, sum = 0, ahead = 0, behind = 0;
+    for (const direction of shot.directions.slice(0, 32)) {
+      if (!vector3(direction)) continue;
+      const components = [dot(direction, source.right), dot(direction, source.up), dot(direction, source.forward)];
+      const rotated = destination.forward.map((value, i) =>
+        components[0] * destination.right[i] + components[1] * destination.up[i] + components[2] * value);
+      const length = Math.hypot(...rotated);
+      const alignment = length ? dot(rotated, target.direction) / length : -1;
+      if (alignment <= 0) { behind++; continue; }
+      const miss = target.distance * Math.sqrt(Math.max(0, 1 - Math.min(1, alignment * alignment)));
+      min = Math.min(min, miss);
+      max = Math.max(max, miss);
+      sum += miss;
+      ahead++;
+    }
+    return { pellets: ahead + behind, behind,
+      minMeters: ahead ? min : null, meanMeters: ahead ? sum / ahead : null, maxMeters: ahead ? max : null };
+  }
+
+  function recordAimDecision(client, frame, target, shot, correction, buttons, yaw, pitch, reason) {
+    const weapon = weaponSnapshot(client);
+    const player = playerSnapshot(client);
+    const sampled = runtime.sampleContexts.get(frame.s);
+    runtime.sampleContexts.delete(frame.s);
+    const targetNow = targetSnapshot(target);
+    const sameTarget = sampled?.target && targetNow && sampled.target.index === targetNow.index;
+    const selectionDriftMeters = sameTarget && sampled.target.position && targetNow.position
+      ? Math.hypot(...targetNow.position.map((value, i) => value - sampled.target.position[i])) : null;
     recordTrace('aimDecisions', {
-      at: performance.now(), match: runtime.trace.match, sequence: frame.s,
+      at: performance.now(), match: runtime.trace.match, sequence: frame.s, tick: frame.vt,
       targetDistance: target ? Math.round(target.distance * 10) / 10 : null,
-      weaponId: typeof weaponId === 'string' && /^[a-z0-9_-]{1,32}$/i.test(weaponId) ? weaponId : null,
-      weaponRangeEnd: Number.isFinite(rangeEnd) ? rangeEnd : null,
-      localAds: Number.isFinite(localAds) ? Math.round(localAds * 1000) / 1000 : null,
+      weaponId: weapon.id, weaponRangeEnd: weapon.stats.rangeEnd ?? null,
+      localAds: weapon.ads === null ? null : Math.round(weapon.ads * 1000) / 1000,
+      localSpeed: player.velocity ? Math.hypot(player.velocity[0], player.velocity[2]) : null,
       movingInput: Math.hypot(frame.mx, frame.mz) > 0.1,
-      adsRequested: !!(buttons & 2),
-      localShotPredicted: !!shot,
-      correctionApplied: !!correction,
-      fireSent: !!(buttons & 1)
-    }, 256);
+      adsRequested: !!(buttons & 2), localShotPredicted: !!shot,
+      correctionApplied: !!correction, fireSent: !!(buttons & 1), reason,
+      input: { yaw: frame.yaw, pitch: frame.pitch, mx: frame.mx, mz: frame.mz, buttons: frame.buttons },
+      outgoing: { yaw, pitch, buttons },
+      weapon, player, target: targetNow,
+      sampled: sampled ? { gate: sampled.reason, weaponAds: sampled.weaponAds,
+        target: sampled.target, delayMs: Math.max(0, performance.now() - sampled.at),
+        selectionDriftMeters } : null,
+      correction: correction ? { yaw: correction.yaw, pitch: correction.pitch } : null,
+      geometry: target ? {
+        inputAim: angularMiss(target, frame.yaw, frame.pitch),
+        outgoingAim: angularMiss(target, yaw, pitch),
+        predictedInput: predictedMiss(shot, target, frame.yaw, frame.pitch),
+        predictedOutgoing: predictedMiss(shot, target, yaw, pitch)
+      } : null
+    });
   }
 
   function jitterAngle(value, amount) {
@@ -318,6 +543,7 @@
     const target = selectTarget(client, { ...frame, vt: tick });
     if (!target) {
       state.pendingManualUntil = 0;
+      runtime.sampleHoldReason = 'target-lost-at-sample';
       return options.rage && requestedFire ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
     const ready = alignedWithTarget(state, target);
@@ -326,6 +552,7 @@
     if (!ready || (paceShot() && stealthSkip())) {
       if (requestedFire && !options.rage) state.pendingManualUntil = now + 900;
       if (!requestedFire) return frame;
+      runtime.sampleHoldReason = !ready ? 'aligning' : 'stealth-delay';
       runtime.stealth.heldShots++;
       return { ...frame, buttons: frame.buttons & ~1 };
     }
@@ -404,21 +631,25 @@
       if (target) runtime.target = target;
 
       let buttons = frame.buttons;
+      let reason = target ? 'sent' : 'no-target';
       if (buttons & 1) {
         const ready = target ? state.ready : !options.rage &&
           Math.abs(normalizedDelta(nextYaw, frame.yaw)) <= OUTGOING_AIM_TOLERANCE &&
           Math.abs(nextPitch - frame.pitch) <= OUTGOING_AIM_TOLERANCE;
-        if (!ready || (target && paceShot() && stealthSkip())) {
+        const paceHeld = ready && target && paceShot() && stealthSkip();
+        if (!ready || paceHeld) {
           buttons &= ~1;
           runtime.stealth.heldShots++;
+          reason = !ready ? (target ? 'aligning' : 'no-target') : 'stealth-delay';
         } else if (target) {
           runtime.rewrites++;
           if (correction) runtime.compensated++;
           recordStealthShot({ yaw: frame.yaw, pitch: frame.pitch }, { yaw: nextYaw, pitch: nextPitch });
           state.pendingManualUntil = 0;
-        }
+        } else reason = 'manual-unassisted';
       }
-      if (frame.buttons & 1) recordAimDecision(client, frame, target, shot, correction, buttons);
+      if (frame.buttons & 1) recordAimDecision(client, frame, target, shot, correction,
+        buttons, nextYaw, nextPitch, reason);
 
       const delta = normalizedDelta(frame.yaw, nextYaw);
       if (buttons === frame.buttons && Math.abs(delta) < 1e-9 && Math.abs(nextPitch - frame.pitch) < 1e-9) return frame;
@@ -445,7 +676,8 @@
       const target = selectTarget(client, frame, shot?.eye);
       if (!target) {
         const buttons = options.rage ? frame.buttons & ~1 : frame.buttons;
-        recordAimDecision(client, frame, null, shot, null, buttons);
+        recordAimDecision(client, frame, null, shot, null, buttons, frame.yaw, frame.pitch,
+          options.rage ? 'no-target' : 'manual-unassisted');
         if (buttons !== frame.buttons) {
           modified = true;
           return { ...frame, buttons };
@@ -456,6 +688,8 @@
         // A deferred shot must not become an unassisted shot on the wire.
         modified = true;
         runtime.stealth.heldShots++;
+        recordAimDecision(client, frame, target, shot, null, frame.buttons & ~1,
+          frame.yaw, frame.pitch, 'stealth-delay');
         return { ...frame, buttons: frame.buttons & ~1 };
       }
       const correction = compensateSpread(shot, target);
@@ -469,7 +703,8 @@
       runtime.target = target;
       runtime.rewrites++;
       recordStealthShot(angles.original, angles);
-      recordAimDecision(client, frame, target, shot, correction, frame.buttons);
+      recordAimDecision(client, frame, target, shot, correction, frame.buttons,
+        angles.yaw, angles.pitch, 'sent');
       // Prediction retains frame references. Clone only the outgoing frame and preserve world movement.
       return {
         ...frame, yaw: angles.yaw, pitch: angles.pitch,
@@ -495,7 +730,8 @@
           directions: result.weapon.dirs.map(direction => [...direction])
         });
         recordTrace('localShots', { at: performance.now(), match: runtime.trace.match,
-          sequence: frame.s, yaw: frame.yaw, pitch: frame.pitch,
+          sequence: frame.s, tick: frame.vt, yaw: frame.yaw, pitch: frame.pitch,
+          inputMovement: [frame.mx, frame.mz], weapon: weaponSnapshot(client), player: playerSnapshot(client),
           eye: [...result.eye], directions: result.weapon.dirs.map(direction => [...direction]) });
         while (runtime.predictions.size > 16) runtime.predictions.delete(runtime.predictions.keys().next().value);
       }
@@ -505,24 +741,67 @@
   }
 
   function rageInput(client, frame) {
-    if (!options.rage || !playable(client)) return frame;
+    if (!options.rage) return frame;
+    if (!playable(client)) {
+      runtime.sampleGate = { reason: 'unplayable', target: null, scan: null };
+      return frame;
+    }
     const predictor = client.predictor;
     const weapon = predictor?.activeStats;
     const slot = predictor?.slots?.[predictor.active];
-    if (!weapon || !slot || !predictor.ws) return frame;
+    if (!weapon || !slot || !predictor.ws) {
+      runtime.sampleGate = { reason: 'weapon-unavailable', target: null, scan: null };
+      return frame;
+    }
     const scopedButtons = (frame.buttons & ~(1 | 16)) | 2;
     const tick = typeof client.renderTick === 'function' ? Math.round(client.renderTick()) : undefined;
-    if (!selectTarget(client, { ...frame, vt: tick })) {
+    const scan = { tick: Number.isFinite(tick) ? tick : null, range: options.range,
+      visibleOnly: options.visibleOnly, physicsAvailable: !!(runtime.physics.getCollisionWorld && runtime.physics.hasLineOfSight),
+      observed: 0, counts: {}, closest: null, selected: null };
+    const target = selectTarget(client, { ...frame, vt: tick }, null, scan);
+    if (!target) {
       // Stay scoped before a target appears so the first shot is not a hip shot.
+      runtime.sampleGate = { reason: 'no-target', target: null, scan };
       return { ...frame, buttons: scopedButtons };
     }
     const ws = predictor.ws;
     let buttons = scopedButtons;
+    let reason = 'fire-request';
     if (slot.mag <= 0) {
-      if (predictor.ammo?.[weapon.ammo] > 0) buttons |= 32;
-    } else if ((!Number.isFinite(ws.ads) || ws.ads >= 0.995) &&
-        (weapon.fireMode === 'auto' || (!ws.trigger && ws.cooldown <= 1 / 30 + 1e-9))) buttons |= 1;
+      if (predictor.ammo?.[weapon.ammo] > 0) { buttons |= 32; reason = 'reload'; }
+      else reason = 'no-ammo';
+    } else if (Number.isFinite(ws.ads) && ws.ads < 0.995) reason = 'ads-ramp';
+    else if (weapon.fireMode !== 'auto' && (ws.trigger || ws.cooldown > 1 / 30 + 1e-9)) reason = 'cooldown';
+    else buttons |= 1;
+    runtime.sampleGate = { reason, target, scan };
     return { ...frame, buttons };
+  }
+
+  function recordFireGate(client, original, prepared) {
+    const gate = runtime.sampleGate;
+    if (!gate || !options.rage) return;
+    const reason = gate.reason === 'fire-request'
+      ? (prepared.buttons & 1 ? 'fire-sampled' : runtime.sampleHoldReason || 'aim-hold') : gate.reason;
+    const counters = runtime.trace.counters;
+    counters.rageSamples++;
+    counters.gateReasons[reason] = (counters.gateReasons[reason] || 0) + 1;
+    for (const [name, count] of Object.entries(gate.scan?.counts || {})) {
+      if (name !== 'eligible') counters.targetRejects[name] = (counters.targetRejects[name] || 0) + count;
+    }
+    const now = performance.now(), weapon = weaponSnapshot(client);
+    if (Number.isSafeInteger(original.s)) {
+      runtime.sampleContexts.set(original.s, { at: now, reason, weaponAds: weapon.ads,
+        target: targetSnapshot(gate.target) });
+      while (runtime.sampleContexts.size > 64) runtime.sampleContexts.delete(runtime.sampleContexts.keys().next().value);
+    }
+    const key = [reason, gate.target?.index ?? '-', weapon.id ?? '-',
+      Math.round((gate.target?.distance || 0) / 25)].join(':');
+    if (runtime.lastGateTrace?.key === key && now - runtime.lastGateTrace.at < 250) return;
+    runtime.lastGateTrace = { key, at: now };
+    recordTrace('fireGates', { at: now, match: runtime.trace.match, sequence: original.s,
+      tick: original.vt, reason, originalButtons: original.buttons, sampledButtons: prepared.buttons,
+      inputMovement: [original.mx, original.mz], weapon, player: playerSnapshot(client),
+      target: targetSnapshot(gate.target), scan: gate.scan });
   }
 
   function autoReloadFrame(client, frame) {
@@ -549,20 +828,32 @@
     detachClient();
     runtime.client = client;
     runtime.trace.match++;
+    recordSettings('match-start');
     runtime.rewrites = 0;
     runtime.compensated = 0;
     runtime.stealth.heldShots = 0;
     runtime.outgoingAim = { yaw: null, pitch: null, targetIndex: null, ready: false, pendingManualUntil: 0 };
     runtime.predictions.clear();
+    runtime.sampleContexts.clear();
     seenServerEvents.clear();
     runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
     runtime.target = null;
+    runtime.sampleGate = null;
+    runtime.lastGateTrace = null;
+    runtime.lastServerSnapshot = null;
     runtime.error = runtime.aimRejected ? 'Server rejected aim assistance / aim disabled' : '';
     const checkRejection = () => {
-      const record = { at: new Date().toISOString(), state: client.connection?.state, error: client.connection?.error, aimRejected: runtime.aimRejected };
+      const connectionError = client.connection?.error;
+      const aimError = /aim assistance|anti-cheat/i.test(connectionError || '');
+      const connectionState = client.connection?.state;
+      const record = { at: new Date().toISOString(), match: runtime.trace.match,
+        state: ['connected', 'connecting', 'kicked', 'disconnected', 'closed', 'error',
+          'idle', 'reconnecting'].includes(connectionState) ? connectionState : 'other',
+        errorKind: aimError ? 'aim-assistance' : connectionError ? 'other' : null,
+        aimRejected: runtime.aimRejected };
       recordTrace('connectionStates', record);
       if (runtime.client !== client || client.connection?.state !== 'kicked') return;
-      if (!/aim assistance|anti-cheat/i.test(client.connection.error || '')) return;
+      if (!aimError) return;
       recordTrace('kicks', { ...record, match: runtime.trace.match,
         lastSequence: runtime.trace.frames.at(-1)?.sequence });
       runtime.aimRejected = true;
@@ -579,6 +870,9 @@
       const originalEvents = client.ingestEvents;
       replaceMethod(client, 'ingestEvents', function (snapshot, ...rest) {
         if (runtime.client === client && !runtime.stopped) {
+          try { recordServerSnapshot(client, snapshot); }
+          catch (error) { recordTrace('errors', { at: new Date().toISOString(),
+            where: 'server-snapshot', type: error?.name || 'Error' }); }
           const occurrences = new Map();
           for (const event of snapshot.events || []) {
             if (event?.by !== client.you) continue;
@@ -590,8 +884,13 @@
             seenServerEvents.add(key);
             if (seenServerEvents.size > 1024) seenServerEvents.delete(seenServerEvents.values().next().value);
             if (['shot', 'hit', 'kill'].includes(event.type)) {
+              const numericFields = {};
+              for (const field of ['target', 'victim', 'to', 'sequence', 's']) {
+                if (Number.isSafeInteger(event[field])) numericFields[field] = event[field];
+              }
               recordTrace('serverEvents', { at: performance.now(), match: runtime.trace.match,
-                tick: event.t ?? snapshot.t, type: event.type,
+                tick: event.t ?? snapshot.t, snapshotTick: Number.isFinite(snapshot.t) ? snapshot.t : null,
+                type: event.type, fields: numericFields,
                 damage: Number.isFinite(event.damage) ? event.damage : null,
                 head: event.head === true });
             }
@@ -615,9 +914,16 @@
         const frame = Reflect.apply(originalSample, this, args);
         if (runtime.client !== client) return frame;
         let prepared = frame;
+        runtime.sampleGate = null;
+        runtime.sampleHoldReason = null;
         try { prepared = autoReloadFrame(client, frame); }
-        catch (error) { recordTrace('errors', { at: new Date().toISOString(), where: 'ammo', message: String(error) }); }
-        try { return holdStealthShot(client, rageInput(client, prepared)); }
+        catch (error) { recordTrace('errors', { at: new Date().toISOString(),
+          where: 'ammo', type: error?.name || 'Error' }); }
+        try {
+          const sampled = holdStealthShot(client, rageInput(client, prepared));
+          recordFireGate(client, frame, sampled);
+          return sampled;
+        }
         catch (error) { runtime.error = 'Rage hook: ' + error.message; return holdOnAimError(frame); }
       });
     }
@@ -1050,8 +1356,9 @@
       heldShots: runtime.stealth.heldShots,
       server: { ...runtime.server }, error: runtime.error, options: { ...options } }),
     trace: traceSnapshot,
-    exportTrace: () => JSON.stringify({ formatVersion: 1, scriptVersion: VERSION,
-      capturedAt: new Date().toISOString(), trace: traceSnapshot() }, null, 2),
+    exportTrace: () => JSON.stringify({ formatVersion: 2, scriptVersion: VERSION,
+      capturedAt: new Date().toISOString(), clock: 'performance.now milliseconds since page start',
+      trace: traceSnapshot() }, null, 2),
     destroy() {
       if (runtime.stopped) return;
       runtime.stopped = true;

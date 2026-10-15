@@ -637,8 +637,10 @@ test('fast fire corrects predicted moving spread at long range without aim jitte
   const h = harness();
   const fake = rageClient();
   const spread = 1.6 * Math.PI / 180;
-  fake.client.predictor.activeStats.id = 'longbow';
+  fake.client.predictor.slots[0].weapon = 'longbow';
   fake.client.predictor.activeStats.rangeEnd = 35;
+  fake.client.predictor.activeStats.moveSpread = 4;
+  fake.client.predictor.activeStats.rpm = 45;
   fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
     fired: true, dirs: [[
       -Math.sin(input.yaw + spread) * Math.cos(input.pitch),
@@ -663,12 +665,21 @@ test('fast fire corrects predicted moving spread at long range without aim jitte
   assert.ok(decision.targetDistance > 500 && decision.targetDistance < 600);
   assert.equal(decision.weaponRangeEnd, 35);
   assert.equal(decision.weaponId, 'longbow');
+  assert.equal(decision.weapon.idSource, 'slot');
   assert.equal(decision.localAds, 1);
   assert.equal(decision.movingInput, true);
   assert.equal(decision.adsRequested, true);
   assert.equal(decision.localShotPredicted, true);
   assert.equal(decision.correctionApplied, true);
   assert.equal(decision.fireSent, true);
+  assert.equal(decision.target.aimPart, 'chest');
+  assert.equal(decision.weapon.stats.rangeEnd, 35);
+  assert.equal(decision.weapon.stats.moveSpread, 4);
+  assert.equal(decision.weapon.stats.rpm, 45);
+  assert.ok(decision.geometry.predictedInput.meanMeters > 10,
+    'moving spread would miss the selected point without correction');
+  assert.ok(decision.geometry.predictedOutgoing.meanMeters < 0.01,
+    'the corrected local ray reaches the selected point');
   const correctedDirection = [
     -Math.sin(outgoing.yaw + spread) * Math.cos(outgoing.pitch),
     Math.sin(outgoing.pitch),
@@ -727,11 +738,34 @@ test('Rage drops Fire when the target disappears after input sampling', () => {
     const sampled = fake.client.input.sample('sample-argument');
     assert.equal(sampled.buttons & 1, 1);
     fake.client.remoteFrames = [];
-    const outgoing = send(fake, [frame({ ...sampled, s: 974 })])[0];
+    const outgoing = send(fake, [sampled])[0];
     assert.equal(outgoing.buttons & 1, 0, `stale ${stealth ? 'stealth' : 'direct'} target`);
-    assert.equal(h.api.trace().aimDecisions.at(-1).fireSent, false);
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(decision.fireSent, false);
+    assert.equal(decision.sampled.target.index, 1,
+      'the trace preserves the sample-time target after it disappears at send time');
+    assert.equal(decision.target, null);
     h.api.destroy();
   }
+});
+
+test('trace measures target movement between sampling and outgoing aim', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  for (let sequence = 980; sequence < 984; sequence++) {
+    const sampled = fake.client.input.sample('sample-argument');
+    send(fake, [frame({ ...sampled, s: sequence })]);
+  }
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 1);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2.4, 0, -10] }) }];
+  send(fake, [sampled]);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.sampled.target.index, decision.target.index);
+  close(decision.sampled.selectionDriftMeters, 0.4, 1e-9);
+  assert.equal(decision.sampled.delayMs, 0);
+  h.api.destroy();
 });
 
 test('aim hook errors hold Fire instead of sending an unassisted shot', () => {
@@ -799,6 +833,10 @@ test('Rage prefers a nearer aim angle and honors the range slider beyond rangeEn
   assert.equal(outOfRange.buttons & 1, 0, 'the selected 600 m limit still applies');
   assert.equal(outOfRange.buttons & 2, 2, 'Rage remains scoped before a target enters range');
   assert.equal(outOfRange.buttons & 16, 0, 'sprint is released while Rage holds scope');
+  const gate = h.api.trace().fireGates.at(-1);
+  assert.equal(gate.reason, 'no-target');
+  assert.equal(gate.scan.closest.reason, 'range');
+  assert.ok(gate.scan.closest.distance > 600);
 });
 
 test('Rage holds ADS through the weapon scope ramp before firing', () => {
@@ -821,6 +859,10 @@ test('Rage holds ADS through the weapon scope ramp before firing', () => {
   }
   weapon.ws.ads = 0.995;
   assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1);
+  const counts = h.api.trace().counters.gateReasons;
+  assert.equal(counts['no-target'], 1);
+  assert.equal(counts['ads-ramp'], 1);
+  assert.equal(counts['fire-sampled'], 1);
   h.api.destroy();
 });
 
@@ -1493,7 +1535,11 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   attach(h, fake);
   const original = frame({ s: 41 });
   const outgoing = send(fake, [original])[0];
-  fake.client.ingestEvents({ t: 100, events: [
+  fake.client.sentAt = new Map([[41, 900]]);
+  fake.client.rtt = 80;
+  fake.client.ingestEvents({ t: 100, me: { ack: 41, active: 0,
+    slots: [{ weapon: 'vanguard', mag: 29 }], ads: 0.9,
+    pos: [0, 0, 0], vel: [1, 0, 0], health: 100 }, events: [
     { t: 100, by: 0, type: 'shot' },
     { t: 100, by: 0, type: 'hit', damage: 12 }
   ] });
@@ -1505,16 +1551,33 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(trace.frames.at(-1).after[0], outgoing.yaw);
   assert.equal(trace.aimDecisions.at(-1).sequence, 41);
   assert.equal(trace.aimDecisions.at(-1).targetDistance > 10, true);
+  assert.equal(trace.aimDecisions.at(-1).target.origin.length, 3);
+  assert.equal(trace.aimDecisions.at(-1).geometry.outgoingAim.centerOffsetMeters < 1, true);
   assert.deepEqual(Array.from(trace.serverEvents, event => event.type), ['shot', 'hit']);
+  assert.equal(trace.serverEvents.at(-1).snapshotTick, 100);
+  assert.equal(trace.serverSnapshots.at(-1).ack, 41);
+  assert.equal(trace.serverSnapshots.at(-1).weaponId, 'vanguard');
+  assert.equal(trace.serverSnapshots.at(-1).ackLatencyMs, 100);
+  assert.equal(trace.counters.serverSnapshotsSeen, 1);
+  assert.equal(trace.counters.highestAckByMatch[1], 41);
+  assert.equal(trace.settings.some(setting => setting.reason === 'match-start'), true);
+  assert.equal(trace.settings.at(-1).values.silent, false,
+    'the trace records the post-rejection settings transition');
+  assert.equal(trace.connectionStates.at(-1).errorKind, 'aim-assistance');
+  assert.equal(trace.connectionStates.at(-1).error, undefined,
+    'raw connection errors are not included in shared traces');
   assert.equal(trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
-  assert.equal(exported.formatVersion, 1);
-  assert.equal(exported.scriptVersion, '1.5.7');
+  assert.equal(exported.formatVersion, 2);
+  assert.equal(exported.scriptVersion, '1.5.8');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
+  trace.aimDecisions[0].target.origin[0] = 999;
   assert.equal(h.api.trace().frames[0].before[0], 0, 'callers cannot mutate retained evidence');
+  assert.equal(h.api.trace().aimDecisions[0].target.origin[0], 0,
+    'callers cannot mutate retained shot geometry');
   for (let batch = 0; batch < 17; batch++) {
     const frames = Array.from({ length: 256 }, (_, index) =>
       frame({ s: batch * 256 + index, buttons: 0 }));
@@ -1522,6 +1585,8 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   }
   assert.equal(h.api.trace().frames.length, 4096);
   assert.equal(h.api.trace().frames.at(-1).sequence, 4351);
+  assert.equal(h.api.trace().retention.dropped.frames, 257,
+    'the export reports older frames displaced by the bounded buffer');
   h.api.destroy();
 });
 
@@ -1537,7 +1602,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.7');
+  assert.equal(payload.scriptVersion, '1.5.8');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
