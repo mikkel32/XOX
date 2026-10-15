@@ -93,6 +93,23 @@ test('competing tick offsets prevent provisional shot and ray pairing', async ()
   assert.equal(report.correlatedShots.rayEvidence.comparedRays, 0);
 });
 
+test('a unanimous short trace permits labeled provisional ray comparisons', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const local = Array.from({ length: 6 }, (_, index) => localShot(index));
+  const server = local.map(shot => serverShot(shot));
+  const report = traceReport(analyzeTrace, local, server);
+  assert.equal(report.correlatedShots.byMatch[1].offsetStatus, 'supportedShortTrace');
+  assert.equal(report.correlatedShots.paired, 6);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 6);
+  assert.match(formatReport(report), /limited pairs remain provisional/);
+
+  const duplicate = traceReport(analyzeTrace, local,
+    [...server.slice(0, 5), { ...server[4], at: server[4].at + 1 }]);
+  assert.equal(duplicate.correlatedShots.byMatch[1].offsetStatus, 'tooFewVotes');
+  assert.equal(duplicate.correlatedShots.paired, 0);
+  assert.equal(duplicate.correlatedShots.rayEvidence.comparedRays, 0);
+});
+
 test('missing metadata and incompatible pellet counts cannot manufacture ray comparisons', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const local = Array.from({ length: 16 }, (_, index) => localShot(index));

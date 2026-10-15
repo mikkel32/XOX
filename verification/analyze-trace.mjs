@@ -346,11 +346,21 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     const ranked = [...offsets].sort((a, b) => b[1] - a[1] || a[0] - b[0]);
     const [offset, votes = 0] = ranked[0] || [];
     const runnerUpVotes = ranked[1]?.[1] || 0;
+    // A short export can still support a provisional offset when every
+    // server shot has one distinct, compatible local candidate at that offset.
+    // Keep the lower-confidence status visible in the report.
+    const shortTraceCandidates = server.length >= 6 && server.length < 10 &&
+      votes === server.length && runnerUpVotes === 0 ?
+      server.map(event => shots.filter(shot => event.tick - shot.tick === offset &&
+        withinWindow(shot, event) && !shotPairMismatch(shot, event))) : [];
+    const shortTraceUnanimous = shortTraceCandidates.length === server.length &&
+      shortTraceCandidates.every(candidates => candidates.length === 1) &&
+      new Set(shortTraceCandidates.map(candidates => candidates[0])).size === server.length;
     const offsetStatus = !server.length ? 'noEligibleServerShots' :
-      votes < 10 ? 'tooFewVotes' :
+      votes < 10 ? shortTraceUnanimous ? 'supportedShortTrace' : 'tooFewVotes' :
       votes < 0.4 * Math.min(shots.length, server.length) ? 'weakCoverage' :
       votes < 2 * runnerUpVotes ? 'competingOffsets' : 'supported';
-    const supported = offsetStatus === 'supported';
+    const supported = offsetStatus === 'supported' || offsetStatus === 'supportedShortTrace';
     const compatibleByShot = new Map();
     const contendersByServer = new Map();
     if (supported) for (const shot of shots) {
@@ -1045,10 +1055,23 @@ export function analyzeTrace(document) {
     authoritative.medianAckLatencyMs);
   const agentActions = {};
   const agentRoutes = { observed: 0, bySource: {}, full: 0, partial: 0, blocked: 0,
-    maxStuckCount: 0, maxAbsSteerDegrees: 0, dropPlans: {}, maxAbsLateralMeters: 0 };
+    maxStuckCount: 0, maxAbsSteerDegrees: 0, dropPlans: {}, maxAbsLateralMeters: 0,
+    dropActions: 0, observedDropDistances: 0, minDropDistanceMeters: null,
+    maxDropDistanceMeters: null };
   for (const item of list(trace.agentDecisions)) {
     const action = typeof item?.action === 'string' ? item.action : 'unknown';
     agentActions[action] = (agentActions[action] || 0) + 1;
+    if (action === 'drop') {
+      agentRoutes.dropActions++;
+      if (finite(item?.route?.planeDistanceMeters)) {
+        const distance = item.route.planeDistanceMeters;
+        agentRoutes.observedDropDistances++;
+        agentRoutes.minDropDistanceMeters = Math.min(
+          agentRoutes.minDropDistanceMeters ?? distance, distance);
+        agentRoutes.maxDropDistanceMeters = Math.max(
+          agentRoutes.maxDropDistanceMeters ?? distance, distance);
+      }
+    }
     if (finite(item?.stuckCount)) agentRoutes.maxStuckCount = Math.max(
       agentRoutes.maxStuckCount, item.stuckCount);
     const route = item?.route;
@@ -1107,6 +1130,7 @@ export function analyzeTrace(document) {
       'An ACK covers an input sequence; it does not establish that the server fired or hit.',
       'Server events have no guaranteed input sequence, so server hits cannot be assigned to a weapon, target, or distance.',
       'Tick-aligned shot pairs are provisional. A shared tick and plausible arrival delay do not prove which input caused a server hit.',
+      'A short-trace offset is reported separately when six to nine server shots all have distinct compatible local candidates at one unanimous offset. These limited pairs remain provisional and can be wrong if events are missing or clocks drift.',
       'Pairing requires one compatible local shot and one compatible server shot within the selected tick offset and delay window. Unsupported offsets, missing fields, and ambiguous candidates remain unmatched.',
       'A paired shot at a unique server-shot hit tick is only a same-tick observation. Multiple own-player server shots at one hit tick are excluded from paired-hit groups; neither case proves which ray hit.',
       'Server-reported shot directions are visual event data from the game. Their difference from a rotated local prediction can diagnose spread-seed or aim-state drift only when provisional pairing is correct.',

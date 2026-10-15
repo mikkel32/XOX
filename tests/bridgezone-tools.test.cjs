@@ -991,8 +991,8 @@ test('combat agent drops over observed land and steers after exiting the plane',
   attach(h, fake);
   h.api.setOptions({ agent: true });
   assert.equal(fake.client.input.sample().buttons & 4, 0);
-  assert.equal(h.api.runtime.agent.dropFraction, 0.5,
-    'the route midpoint is a fallback until terrain loads');
+  assert.equal(h.api.runtime.agent.dropFraction, 1 / 3,
+    'the 400 m mark is a fallback until terrain loads');
   const heights = new Float32Array(385 * 385).fill(-1.3);
   for (const row of [192, 193]) for (const col of [207, 208])
     heights[row * 385 + col] = 2;
@@ -1026,6 +1026,30 @@ test('combat agent drops over observed land and steers after exiting the plane',
   assert.equal(fake.client.input.sample().buttons & 4, 0,
     'a held Jump cannot create a second rising edge');
   h.api.destroy();
+});
+
+test('default agent waits until the plane has traveled 400 m before dropping', () => {
+  for (const length of [1200, 3000]) {
+    const h = harness();
+    assert.equal(h.api.options.agent, true);
+    const fake = rageClient();
+    fake.client.input.sample = () => frame({ s: 822, vt: 230, buttons: 0, mx: 0, mz: 0 });
+    fake.client.latest = { phase: 'plane', t: 230,
+      plane: { start: [-length / 2, 0], end: [length / 2, 0], departTick: 100 } };
+    Object.assign(fake.client.predictor.ps,
+      { mode: 'plane', pos: [-length / 2 + 399, 300, 0], jumpHeld: false });
+    fake.client.remoteFrames = [];
+    attach(h, fake);
+    h.api.setOptions({ agent: true });
+    const waiting = fake.client.input.sample();
+    assert.equal(waiting.buttons & 4, 0);
+    assert.equal(h.api.trace().agentDecisions.at(-1).route.plannedDropDistanceMeters, 400);
+    fake.client.predictor.ps.pos = [-length / 2 + 400, 300, 0];
+    const dropped = fake.client.input.sample();
+    assert.equal(dropped.buttons & 4, 4);
+    assert.equal(h.api.trace().agentDecisions.at(-1).route.planeDistanceMeters, 400);
+    h.api.destroy();
+  }
 });
 
 test('combat agent finds narrow land between coarse plane samples', () => {
@@ -3343,7 +3367,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.31');
+  assert.equal(exported.scriptVersion, '1.5.32');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -3376,7 +3400,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.31');
+  assert.equal(payload.scriptVersion, '1.5.32');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -3422,7 +3446,7 @@ test('a terminal match downloads one trace even when IndexedDB is unavailable', 
     assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
     assert.ok(h.api.inspect().archive.downloadRequestedAt);
     const payload = JSON.parse(await h.createdBlobs[0].text());
-    assert.equal(payload.scriptVersion, '1.5.31');
+    assert.equal(payload.scriptVersion, '1.5.32');
     assert.equal(payload.trace.frames.at(-1).sequence, 199);
     h.tick();
     assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
@@ -3443,7 +3467,7 @@ test('detaching an eliminated client exports the trace before the next timer tic
   assert.equal(h.downloads.length, 1);
   const payload = JSON.parse(await h.createdBlobs[0].text());
   assert.equal(payload.trace.frames.at(-1).sequence, 200);
-  assert.equal(payload.scriptVersion, '1.5.31');
+  assert.equal(payload.scriptVersion, '1.5.32');
 });
 
 test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {

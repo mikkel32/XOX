@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.31.** All 147 local tests pass with the captured client bundles. Checks cover combat-agent deployment, recovery and pickup inputs, storm navigation, 468 varied-condition shot-kernel replays, exact hitbox and world-ray cover checks, automatic trace export, and provisional server-ray comparison. The agent has not yet been tested in a live XOX match. Server-side zero spread is not established by client-side correction.
+> **Current version: 1.5.32.** All 149 local tests pass with the captured client bundles. Checks cover combat-agent deployment, recovery and pickup inputs, storm navigation, 468 varied-condition shot-kernel replays, exact hitbox and world-ray cover checks, automatic trace export, and provisional server-ray comparison. The newest XOX-enabled trace is from 1.5.31: six server shots, three hits, and an aim-assistance kick. Version 1.5.32 has not yet been tested live. Server-side zero spread is not established by client-side correction.
 
 ## Explore
 
@@ -86,13 +86,13 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable suite passes 126 tests and skips 10 that need locally captured
+The portable suite passes 139 tests and skips 10 that need locally captured
 client bundles. Tests validate local behavior and fixtures, not a live server
 outcome.
 Set `XOX_CLIENT_PHYSICS` to a local copy of the captured
 `3ep-katvfqbjo.js` bundle to run the optional firing and spread checks, and
 `XOX_CLIENT_RUNTIME` to the captured `turbopack-37jd2rjmtu1y9.js` bundle to
-run the optional loader checks. With both bundles, all 114 tests pass.
+run the optional loader checks. With both bundles, all 149 tests pass.
 The physics tests require the bundle's SHA-256 to match the recorded
 [source manifest](research/manifest.json).
 
@@ -171,7 +171,8 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.28 | No live XOX trace yet | The default combat agent seeks matching reserve ammo before running empty when no nearby opponent is observed, while storm movement and active combat take priority. A calibrated local replay replaces rigid ray rotation for spread scoring and refines single-projectile aim. The analyzer records replay calibration, measures separation among server-reported rays in one shot independently of local pairing, and gives bounded differences for ambiguous candidate pairs. Current public physics and runtime bundle hashes match the captured test inputs; server spread and live agent behavior still need a new trace. |
 | 1.5.29 | No live XOX trace yet | Uses the exported kernel for spread replay and refines every pellet candidate. Cover probes include near-face edge midpoints and verify that a requested-zone player hit comes before a world hit. The agent requests normal medkit and armor plate inputs when safe; trace analysis distinguishes requests from server resource changes. All 141 local tests pass with the captured bundles, including 468 varied-condition replay cases. Live server behavior still needs a new trace. |
 | 1.5.30 | No live XOX trace yet | Retained sampled targets now use the predicted shot eye for outgoing correction, fixing a local head-box miss after a 0.3 m eye shift. Repeated ACK rows no longer erase earlier finite aim-angle differences in the analyzer. All 143 local tests pass with the captured bundles. A private match started in the Codex browser, but that browser had no XOX extension and did not capture pointer lock, so it provides no server hit or spread result for this version. |
-| 1.5.31 | No live XOX trace yet | The default agent samples observed terrain at roughly 2 m intervals along the middle of the plane route and checks nearby land up to 256 m to either side. It penalizes landing points far behind the plane. Traces label sampled land, missing terrain, and no nearby land, with the chosen lateral offset; the analyzer summarizes those labels. Synthetic terrain tests cover narrow land, off-route land, and forward land preference. All 147 local tests pass with the captured bundles; live drop and shot results still need a trace. |
+| 1.5.31 | 6 server shots, 3 hits, 2 head hits, 0 kills | A short XOX-enabled match recorded sampled-land drop planning and three air-steer decisions. Stealth was turned off before an aim-assistance kick; the cause is unconfirmed. The agent was disabled before ground combat. Six limited provisional shot pairs show a median 0.43° difference between reported rays and rotated local predictions. This does not establish long-range accuracy, server zero spread, or ground-agent behavior. Raw export remains in Downloads; see [findings](FINDINGS.md). |
+| 1.5.32 | No live XOX trace yet | The default agent prefers a drop after 400 m of plane travel, scans observed land from that point forward, waits for the plane door, and records traveled and planned drop distances. A short-trace analyzer rule labels six unanimous 1.5.31 shot pairs as limited provisional evidence rather than discarding the ray comparison. All 149 local tests pass with the captured bundles; live drop, ground-agent behavior, and server spread still need a new match. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

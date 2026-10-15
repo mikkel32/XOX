@@ -44,6 +44,7 @@ trace ended, not that the server would never kick.
 | User-supplied export, not mirrored | 1.5.9 | 351 shots, 82 hits, 13 kills, 2295.8 damage | Mixed weapons in one match; no recorded kick |
 | User-supplied export, not mirrored | 1.5.10 | 520 shots, 117 hits, 12 kills, 2536.2 damage | One match; no recorded kick |
 | User-supplied export, not mirrored | 1.5.11 | 378 shots, 138 hits, 15 kills, 14 headshots | One match; no recorded kick |
+| Local saved export, not mirrored | 1.5.31 | 6 shots, 3 hits, 2 head hits, 0 kills | Short XOX-enabled match; Stealth was turned off before an `aim-assistance` kick; trigger unconfirmed |
 
 The two 1.5.5 files share `trace.startedAt =
 2026-10-15T14:33:31.561Z`, the same match counter, and the same two server
@@ -677,7 +678,57 @@ counts those labels and the largest selected lateral offset.
 Synthetic height-grid tests cover narrow on-route land, land beside a water
 path, and a choice between land ahead of and behind the plane. All 147 local
 tests pass with the captured public client bundles. These tests do not prove
-the landing succeeds in a live match; XOX still needs a fresh server trace.
+the landing succeeds in a live match.
+
+### Version 1.5.31: short live trace
+
+The saved export `bridgezone-trace-2026-10-15T22-54-47-134Z.json` has SHA-256
+`30ce11e91e416b5514e616578ddfc95603b8b111e1cf55971e5e67a0ae5a4224`.
+It remains in the user's Downloads folder. The trace reports script version
+1.5.31 and one match. It contains 636 outgoing frames, eight retained local
+Fire decisions, six server shot events, three server hit events (two marked
+head), no kill event, and a `kicked` state classified as `aim-assistance`.
+No raw connection error was exported, and the trace does not reveal which
+behavior triggered the server's decision. The settings rows confirm Stealth
+was turned off before the kick. The player reports that this was the likely
+cause; the trace establishes timing, not causation.
+
+The agent logged nine `plane-wait` decisions with `sampled-land` plans and
+three `air-steer` decisions. A manual override and an `off` decision followed;
+the agent setting was later switched off before the recorded sidearm shots.
+The game later reported ground mode, but the trace cannot attribute that
+landing to the agent's plan. There is no ground combat-agent action or pickup
+in this trace. All eight retained Fire decisions selected Head and a clear local
+point at 51–57 m. Six server shots used the sidearm. The analyzer's bounded
+short-trace rule finds six distinct, compatible local candidates at one
+unanimous nine-tick offset. These are **provisional** pairs: three share ticks
+with hit events, but the protocol still does not link a hit to an input frame.
+Across the six reported rays, the median angular difference from the rotated
+local prediction is 0.43 degrees and the maximum is 0.65 degrees. Two rays
+intersect the locally sampled target boxes. The residual ray difference can
+reflect seed, bloom, aim state, timing, or pairing error; it is not a measured
+server spread parameter. These observations do not establish long-range
+accuracy or server zero spread.
+
+### Version 1.5.32: 400 m deployment and short-trace diagnostics
+
+The default agent now prefers the point 400 m along the observed plane route,
+or 80% of the route when it is shorter than 500 m. It samples
+land at and beyond that point, keeping a later reachable land choice when the
+400 m point is water. It sends Jump only after the plane door opens and the
+plane reaches the selected point. Each plane decision records traveled and
+planned drop distance; the analyzer summarizes the actual distances of
+recorded Jump actions. A local 1,200 m route test confirms no Jump at 399 m
+and one Jump at 400 m. Other terrain tests cover narrow, lateral, and ahead
+land choices. This is a local result; no 1.5.32 match trace exists yet.
+
+The trace analyzer now accepts a short export's tick offset for **provisional**
+ray comparison only when six to nine server shots each have a distinct
+compatible local candidate at one unanimous offset. Competing or duplicated
+candidates remain unmatched. On the 1.5.31 trace, this yields six limited
+pairs and the angular differences reported above, without treating same-tick
+hit events as proof of individual shot causation. All 149 local tests pass with
+the hash-matched captured physics and runtime bundles.
 
 ## What changed and what was observed
 
