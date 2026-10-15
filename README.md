@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.13.** The portable local suite reports 78 passes and 4
+> **Current version: 1.5.14.** The portable local suite reports 80 passes and 6
 > skips without the optional captured client archive. Live traces include both server anti-cheat
 > removals and short matches without one. They do **not** prove a general bypass.
 
@@ -27,11 +27,11 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Xray | Draws player boxes, names, and distances, including opponents behind cover when they are present in client snapshots. |
 | Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. |
-| Rage | Selects a clear target across 360 degrees up to the range slider, scopes when a target is available, waits for the weapon's ADS ramp, and fires. Explicit Head and Chest choices are respected for every weapon. Auto can adapt between head and chest for distant or moving targets. Target choice weighs turn, target speed, and distance against the active weapon's damage-falloff range without imposing a hard cutoff. Once a shot is predicted, the send path keeps Fire and reuses its sampled target if the current target disappears or changes substantially, to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
-| Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It still follows local aim alignment, weapon cooldown, and server ammunition. |
+| Rage | Selects a clear target across 360 degrees up to the range slider, scopes when a target is available, and fires after aim alignment. It normally waits for full ADS; Fast fire can take a correctable close shot sooner. Explicit Head and Chest choices are respected for every weapon. Auto can adapt between head and chest for distant or moving targets. Target choice weighs turn, target speed, and distance against the active weapon's damage-falloff range without imposing a hard cutoff. Once a shot is predicted, the send path keeps Fire and reuses its sampled target if the current target disappears or changes substantially, to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
+| Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It can request a close single-projectile shot during ADS ramp when a conservative spread bound fits inside the existing 8-degree outgoing turn. It still follows local aim alignment, weapon cooldown, and server ammunition. |
 | Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation. For multi-pellet weapons, it tests the average and each pellet offset against the selected hitbox, then uses the angle predicted to intersect it with the most pellets. Server spread and visible camera recoil may remain. |
 | Ammo assist | Requests a normal reload and pulses Interact when the game's own pickup target is compatible ammo below the observed reserve cap. It never changes the local or server ammo count directly. |
-| Trace export | Saves bounded per-shot target geometry, movement, weapon and ADS state, predicted ray deviation and pellet intersections, aiming changes, settings, fire gates, F/E and pointer-lock state, button changes before send, server input acknowledgements, and combat events. |
+| Trace export | Saves bounded per-shot target geometry, movement, weapon and ADS state, predicted ray deviation and pellet intersections, early-ADS shot status, aiming changes, settings, fire gates, F/E and pointer-lock state, button changes before send, server input acknowledgements, and combat events. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
@@ -87,12 +87,12 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable local suite passed **78 tests with 4 skips** on 2026-10-15. Four
+The portable local suite passed **80 tests with 6 skips** on 2026-10-15. Six
 tests use locally captured client bundles that are intentionally not mirrored
 here. Tests validate local behavior and
 fixtures, not a live server outcome.
 Set `XOX_CLIENT_PHYSICS` to a local copy of the captured
-`3ep-katvfqbjo.js` bundle to run the optional spread inversion check. The test
+`3ep-katvfqbjo.js` bundle to run the optional firing and spread checks. Each test
 requires its SHA-256 to match the recorded [source manifest](research/manifest.json).
 
 ### Read a diagnostic trace
@@ -146,6 +146,7 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.11 | 378 shots, 138 hits, 15 kills | User-supplied trace with no recorded kick. Head was selected, but 481 of 512 retained Fire decisions chose chest, including 15 of 17 Longbow decisions. No Fire removals occurred in the retained pre-send frames; raw export is not mirrored. |
 | 1.5.12 | No live trace yet | Explicit Head and Chest now stay exact for all weapons; only Auto adapts to movement and range. The analyzer reports requested versus selected aim points. Local tests pass; server headshots and hit rate await a new trace. |
 | 1.5.13 | No live trace yet | Optimizes predicted multi-pellet aim for hitbox intersections while preserving single-projectile correction and the existing fire cadence. Replay of three retained Breacher predictions changed each from zero to one locally projected pellet intersection; server effect awaits a new trace. |
+| 1.5.14 | No live trace yet | Fast fire can request a close single-projectile shot before full ADS when a conservative spread bound fits inside the 8-degree outgoing turn. The captured client accepts Fire before ADS completes, and a 64-seed local replay landed the corrected ray inside the captured torso box. Server fire timing and hits await a new trace. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

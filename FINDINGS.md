@@ -193,6 +193,35 @@ These are local geometric predictions, not server-confirmed hits; no 1.5.13
 server match has been recorded. The captured weapon model still enforces its
 fire mode, cooldown, and ammunition; this change does not create extra shots.
 
+### Version 1.5.14 guarded fire during ADS ramp
+
+The hash-matched captured shared physics fires when Fire is pressed and the
+weapon is ready, even before ADS reaches 1. ADS instead changes the spread
+used for that shot. XOX previously waited until local ADS reached 0.995 for
+every Rage shot. The retained 1.5.11 trace counted 496 `ads-ramp` samples
+among 13,898 Rage samples; those are input ticks, not proven missed shots.
+
+With Fast fire enabled, 1.5.14 can request a close single-projectile shot
+during ADS ramp when the current aim turn, an upper bound on the captured
+spread formula, and a one-degree margin fit inside the existing eight-degree
+outgoing turn. It still requests ADS on that input. Distant targets,
+multi-pellet weapons, switching, jump, reload, or an insufficient turn budget
+retain the full-ADS gate. The semi/pump/bolt trigger and cooldown checks remain
+in place. New traces label these early-ADS decisions and report how many were
+predicted and corrected locally.
+
+An optional test executes the captured `stepWeapon` function with ADS below 1
+and observes a shot. A second optional test sends 64 captured-kernel spread
+samples through XOX's bounded correction and projects each corrected ray
+through the captured standing torso box at 10 m. These tests establish the
+local mechanics, not current server timing or hit rate. No 1.5.14 server match
+has been recorded.
+
+The captured shared `startSwitch` helper clears cooldown, but the actual
+client predictor's swap path sets switching time without calling that helper
+or clearing cooldown. That code does not support claiming a quick-swap firing
+rate exploit, so 1.5.14 does not automate weapon swapping.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

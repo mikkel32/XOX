@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.13
+// @version      1.5.14
 // @description  Xray, adaptive Rage aim, auto fire, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.13';
+  const VERSION = '1.5.14';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
@@ -564,6 +564,7 @@
       outgoing: { yaw, pitch, buttons },
       weapon, player, target: targetNow,
       sampled: sampled ? { gate: sampled.reason, weaponAds: sampled.weaponAds,
+        earlyAds: sampled.earlyAds,
         target: sampled.target, delayMs: Math.max(0, performance.now() - sampled.at),
         selectionDriftMeters } : null,
       correction: correction ? { yaw: correction.yaw, pitch: correction.pitch } : null,
@@ -874,6 +875,30 @@
     clientRestores.push(() => hookedPredictors.delete(predictor));
   }
 
+  function canFireDuringAdsRamp(client, frame, target, weapon, ws) {
+    if (!options.rapidFire || weapon.pellets !== 1 || (frame.buttons & (4 | 32 | 128)) ||
+        !Number.isFinite(ws.ads) || !Number.isFinite(ws.bloom) ||
+        !Number.isFinite(ws.switching) || ws.switching > 1 / 30 ||
+        ![weapon.hipSpread, weapon.adsSpread, weapon.moveSpread].every(Number.isFinite) ||
+        target.distance > Math.min(40, Number.isFinite(weapon.rangeEnd) ? weapon.rangeEnd : 40))
+      return false;
+    const player = ownState(client);
+    if (player?.sprinting) return false;
+    const ads = Math.max(0, Math.min(1, ws.ads));
+    // The captured kernel adds at most the full movement term to the ADS blend.
+    // Keep one degree for differences between sampled aim and outgoing aim.
+    const airborne = player?.grounded === true ? 0 : 2.5 * (1 - 0.5 * ads);
+    const spread = Math.max(0, weapon.hipSpread) * (1 - ads) +
+      Math.max(0, weapon.adsSpread) * ads +
+      Math.max(0, weapon.moveSpread) * (1 - 0.6 * ads) +
+      Math.max(0, ws.bloom) * (1 - 0.7 * ads) + airborne;
+    const currentYaw = runtime.outgoingAim.yaw ?? frame.yaw;
+    const currentPitch = runtime.outgoingAim.pitch ?? frame.pitch;
+    const turn = Math.max(Math.abs(normalizedDelta(currentYaw, target.yaw)),
+      Math.abs(currentPitch - target.pitch));
+    return turn + (spread + 1) * Math.PI / 180 <= MAX_OUTGOING_TURN;
+  }
+
   function rageInput(client, frame) {
     if (!options.rage) return frame;
     if (frame.buttons & INTERACT_BUTTON) {
@@ -914,10 +939,12 @@
     }
     let buttons = scopedButtons;
     let reason = 'fire-request';
-    if (Number.isFinite(ws.ads) && ws.ads < 0.995) reason = 'ads-ramp';
+    const earlyAds = Number.isFinite(ws.ads) && ws.ads < 0.995 &&
+      canFireDuringAdsRamp(client, frame, target, weapon, ws);
+    if (Number.isFinite(ws.ads) && ws.ads < 0.995 && !earlyAds) reason = 'ads-ramp';
     else if (weapon.fireMode !== 'auto' && (ws.trigger || ws.cooldown > 1 / 30 + 1e-9)) reason = 'cooldown';
     else buttons |= 1;
-    runtime.sampleGate = { reason, target, scan };
+    runtime.sampleGate = { reason, target, scan, earlyAds: earlyAds && !!(buttons & 1) };
     return { ...frame, buttons };
   }
 
@@ -933,14 +960,15 @@
       if (name !== 'eligible') counters.targetRejects[name] = (counters.targetRejects[name] || 0) + count;
     }
     const now = performance.now(), weapon = weaponSnapshot(client);
-    const sampled = { at: now, reason, weaponAds: weapon.ads,
+    const sampled = { at: now, reason, weaponAds: weapon.ads, earlyAds: !!gate.earlyAds,
       target: targetSnapshot(gate.target), liveTarget: gate.target };
     runtime.pendingSampleContext = sampled;
     if (Number.isSafeInteger(original.s)) {
       runtime.sampleContexts.set(original.s, sampled);
       while (runtime.sampleContexts.size > 64) runtime.sampleContexts.delete(runtime.sampleContexts.keys().next().value);
     }
-    const key = [reason, gate.target?.index ?? '-', weapon.id ?? '-',
+    const key = [reason, gate.earlyAds ? 'early-ads' : 'full-ads',
+      gate.target?.index ?? '-', weapon.id ?? '-',
       Math.round((gate.target?.distance || 0) / 25)].join(':');
     if (runtime.lastGateTrace?.key === key && now - runtime.lastGateTrace.at < 250) return;
     runtime.lastGateTrace = { key, at: now };
@@ -951,7 +979,8 @@
     const pitchGap = target && Number.isFinite(aim.pitch)
       ? Math.abs(aim.pitch - target.pitch) : null;
     recordTrace('fireGates', { at: now, match: runtime.trace.match, sequence: original.s,
-      tick: original.vt, reason, originalButtons: original.buttons, sampledButtons: prepared.buttons,
+      tick: original.vt, reason, earlyAds: !!gate.earlyAds,
+      originalButtons: original.buttons, sampledButtons: prepared.buttons,
       inputMovement: [original.mx, original.mz], weapon, player: playerSnapshot(client),
       target: targetSnapshot(target), scan: gate.scan,
       aimState: { targetIndex: aim.targetIndex, ready: aim.ready,

@@ -213,7 +213,9 @@ export function analyzeTrace(document) {
     const reasons = [];
     if (!item.localShotPredicted && !(finite(item.weapon?.cooldown) && item.weapon.cooldown > 0))
       reasons.push('no local prediction without recorded cooldown');
-    if (finite(item.localAds) && item.localAds < 0.995) reasons.push('ADS below ready threshold');
+    if (finite(item.localAds) && item.localAds < 0.995 &&
+        !(item.sampled?.earlyAds === true && item.correctionApplied))
+      reasons.push('ADS below ready threshold');
     if (finite(after) && after > 0.3) reasons.push('predicted ray over 0.3 m from selected point');
     if (finite(item.sampled?.selectionDriftMeters) && item.sampled.selectionDriftMeters > 0.2) {
       reasons.push('target shifted over 0.2 m between sample and send');
@@ -372,10 +374,14 @@ export function analyzeTrace(document) {
     frameSendChanges, originalGateSamples: originalGateButtons,
     preparedGateSamples: sampledGateButtons, gateSampleChanges: gateButtonChanges,
     outgoingFrameAckCoverage: frameAckCoverage };
+  const earlyAdsSent = sent.filter(item => item.sampled?.earlyAds === true);
   const firingEvidence = { originalFireGateRows: originalGateButtons.byButton.fire,
     preparedFireGateRows: sampledGateButtons.byButton.fire,
     sampledFireFrames: sampledFrameButtons.observed ? sampledFrameButtons.byButton.fire : null,
     outgoingFireFrames: frameButtons.byButton.fire, sentDecisionRows: sent.length,
+    earlyAdsSent: earlyAdsSent.length,
+    earlyAdsPredicted: earlyAdsSent.filter(item => item.localShotPredicted).length,
+    earlyAdsCorrected: earlyAdsSent.filter(item => item.correctionApplied).length,
     serverShotEvents: server.shots };
   anomalies.sort((a, b) => (b.predictedMissMeters ?? 0) - (a.predictedMissMeters ?? 0) ||
     b.reasons.length - a.reasons.length);
@@ -436,6 +442,9 @@ export function formatReport(report) {
       `${report.firingEvidence.sampledFireFrames ?? 'unavailable'}, outgoing frames ` +
       `${report.firingEvidence.outgoingFireFrames}, sent decisions ${report.firingEvidence.sentDecisionRows}, ` +
       `server shot events ${report.firingEvidence.serverShotEvents}`,
+    `Early ADS Fire (retained decisions): sent ${report.firingEvidence.earlyAdsSent}, ` +
+      `locally predicted ${report.firingEvidence.earlyAdsPredicted}, ` +
+      `corrected ${report.firingEvidence.earlyAdsCorrected}`,
     `Prediction/send overlap: ${report.predictionConsistency.overlappingFrames} retained frames with local shots; ` +
       `${report.predictionConsistency.predictedFireRemovedOnWire} had Fire removed before send`,
     `Local multi-pellet projection: ${JSON.stringify(report.pelletProjection)}`,

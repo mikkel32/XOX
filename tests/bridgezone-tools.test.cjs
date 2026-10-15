@@ -649,6 +649,47 @@ test('fast fire skips local pacing but still waits for aim and real ammunition',
   h.api.destroy();
 });
 
+test('fast fire takes a correctable close shot during ADS ramp but waits when spread is too wide', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -10] }) }];
+  fake.client.predictor.ps.grounded = true;
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats, {
+    hipSpread: 3.2, adsSpread: 0.12, moveSpread: 1.6, rangeEnd: 90
+  });
+  const spread = 3 * Math.PI / 180;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: !!(input.buttons & 1), dirs: [[
+      -Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+      Math.sin(input.pitch),
+      -Math.cos(input.yaw + spread) * Math.cos(input.pitch)
+    ]]
+  } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, point: 'chest' });
+  send(fake, [frame({ s: 610, buttons: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 3, 3, 'Fire and ADS are both requested before full ADS');
+  fake.client.predictor.predict(sampled);
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 3, 3);
+  assert.ok(Math.abs(outgoing.yaw) <= 8 * Math.PI / 180);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.ok(decision.geometry.predictedOutgoing.minMeters < 0.01);
+  assert.equal(decision.sampled.earlyAds, true);
+  assert.equal(decision.correctionApplied, true);
+
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -100] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0,
+    'a distant shot keeps the full ADS accuracy gate');
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -10] }) }];
+  Object.assign(fake.client.predictor.activeStats, { hipSpread: 8, adsSpread: 0, moveSpread: 4 });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0,
+    'an uncorrectable early spread remains held');
+  h.api.destroy();
+});
+
 test('outgoing aim remains aligned when the sampled camera kicks', () => {
   const h = harness();
   const fake = rageClient();
@@ -1160,6 +1201,79 @@ test('automatic clear-point targeting falls back from blocked head to chest', ()
 
 const physicsPath = process.env.XOX_CLIENT_PHYSICS ||
   path.join(__dirname, '..', 'research', '3ep-katvfqbjo.js');
+
+test('captured weapon step accepts a shot before ADS completes', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const startMarker = '"stepWeapon",0,', endMarker = ',"stormCircleAt",0';
+  const start = kernel.indexOf(startMarker), end = kernel.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start);
+  const stepWeapon = vm.runInNewContext(`(${kernel.slice(start + startMarker.length, end)})`, {
+    te: 1 / 30, t: { Buttons: { Fire: 1, Aim: 2, Reload: 32 } },
+    tG: () => 0, tU: () => [[0, 0, -1]], tn: () => 1
+  });
+  const state = { cooldown: 0, reload: 0, reloadTotal: 0, switching: 0,
+    ads: 0, bloom: 0, burst: 0, trigger: false, shots: 0 };
+  const weapon = { magSize: 30, reloadSeconds: 2, adsSeconds: 0.24,
+    fireMode: 'auto', rpm: 760, recoilV: 0.5 };
+  const player = { mode: 'ground', vault: 0, mantle: 0, sprinting: false,
+    yaw: 0, pitch: 0 };
+  const result = stepWeapon(state, weapon, { buttons: 3 }, player, 30, 90, 1, 0);
+  assert.equal(result.fired, true);
+  assert.ok(state.ads > 0 && state.ads < 1);
+  assert.ok(state.cooldown > 0);
+});
+
+test('captured pre-ADS spread is corrected through the bounded outgoing path', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const directions = vm.runInNewContext(['tl', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') + ';tU', {
+    tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value))
+  });
+  const weapon = { pellets: 1, pelletSpread: 0 };
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -10] }) }];
+  fake.client.predictor.ps.grounded = true;
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats, {
+    hipSpread: 3.2, adsSpread: 0.12, moveSpread: 1.6, rangeEnd: 90
+  });
+  let seed = 1;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: true, dirs: directions(weapon, input.yaw, input.pitch, 4.8, seed) } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, point: 'chest' });
+  for (seed = 1; seed <= 64; seed++) {
+    send(fake, [frame({ s: 7000 + seed * 2, buttons: 0 })]);
+    const input = { ...fake.client.input.sample('sample-argument'), s: 7001 + seed * 2 };
+    assert.equal(input.buttons & 1, 1, `seed ${seed} should reach prediction before ADS completes`);
+    fake.client.predictor.predict(input);
+    const output = send(fake, [input])[0];
+    const ray = directions(weapon, output.yaw, output.pitch, 4.8, seed)[0];
+    const distance = -10 / ray[2];
+    assert.ok(ray[2] < 0 && Math.abs(distance * ray[0]) <= 0.25 &&
+      1.62 + distance * ray[1] >= 0.9 && 1.62 + distance * ray[1] <= 1.52,
+    `seed ${seed} should intersect the captured torso box`);
+  }
+  h.api.destroy();
+});
 
 test('captured single-projectile spread is inverted against the actual game function', {
   skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
@@ -1882,7 +1996,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.13');
+  assert.equal(exported.scriptVersion, '1.5.14');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -1914,7 +2028,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.13');
+  assert.equal(payload.scriptVersion, '1.5.14');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

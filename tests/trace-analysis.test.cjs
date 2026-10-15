@@ -101,6 +101,25 @@ test('multi-pellet report keeps local hit projections separate from server hits'
   assert.equal(report.serverEvents.hits, 0);
 });
 
+test('early ADS shots are counted without treating corrected ramp fire as a failure', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.14', trace: {
+    aimDecisions: [
+      { match: 1, sequence: 1, fireSent: true, weaponId: 'vanguard', localAds: 0.3,
+        sampled: { earlyAds: true }, localShotPredicted: true, correctionApplied: true,
+        geometry: { predictedOutgoing: { meanMeters: 0.01 } } },
+      { match: 1, sequence: 2, fireSent: true, weaponId: 'vanguard', localAds: 0.3,
+        sampled: { earlyAds: true }, localShotPredicted: true, correctionApplied: false,
+        geometry: { predictedOutgoing: { meanMeters: 2 } } }
+    ]
+  } });
+  assert.equal(report.firingEvidence.earlyAdsSent, 2);
+  assert.equal(report.firingEvidence.earlyAdsPredicted, 2);
+  assert.equal(report.firingEvidence.earlyAdsCorrected, 1);
+  assert.deepEqual(report.investigate.map(item => item.sequence), [2]);
+  assert.match(formatReport(report), /Early ADS Fire.*sent 2/);
+});
+
 test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.10', trace: {
@@ -169,7 +188,8 @@ test('no-fire report distinguishes sampled gates, outbound frames, and server ev
   assert.deepEqual(report.firingEvidence, {
     originalFireGateRows: 2, preparedFireGateRows: 0, sampledFireFrames: 1,
     outgoingFireFrames: 0,
-    sentDecisionRows: 0, serverShotEvents: 0
+    sentDecisionRows: 0, earlyAdsSent: 0, earlyAdsPredicted: 0,
+    earlyAdsCorrected: 0, serverShotEvents: 0
   });
   assert.equal(report.gateSamples.aimState.retained, 2);
   assert.equal(report.gateSamples.aimState.readyTrue, 1);
