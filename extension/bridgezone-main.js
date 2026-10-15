@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.9
-// @description  Xray, 360-degree Rage, auto fire, and server-consistent reloads.
+// @version      1.5.10
+// @description  Xray, adaptive Rage aim, auto fire, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
 // @run-at       document-start
@@ -15,15 +15,17 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.9';
+  const VERSION = '1.5.10';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
   const INTERACT_BUTTON = 64;
+  const AMMO_TYPES = ['light', 'heavy', 'shells', 'sniper'];
+  const AMMO_CAPS = { light: 240, heavy: 180, shells: 48, sniper: 40 };
   const TRACE_LIMITS = Object.freeze({ frames: 4096, localShots: 512, aimDecisions: 512,
     fireGates: 512, serverSnapshots: 1024, serverEvents: 1024,
-    settings: 64, interactions: 128, kicks: 64, connectionStates: 128, errors: 128 });
-  const defaults = { xray: true, loot: true, silent: true, rage: false, rapidFire: true, fov: 90, range: 600, point: 'auto', visibleOnly: true, stealth: true, smooth: 1, ammo: true };
+    settings: 64, interactions: 128, ammoPickups: 128, kicks: 64, connectionStates: 128, errors: 128 });
+  const defaults = { xray: true, loot: true, silent: true, rage: false, rapidFire: true, fov: 90, range: 600, point: 'auto', smartAim: true, visibleOnly: true, stealth: true, smooth: 1, ammo: true };
   const options = { ...defaults };
   const runtime = {
     client: null, physics: {}, hookReady: false, stopped: false, aimRejected: false,
@@ -32,6 +34,7 @@
   };
   runtime.stealth = { deterministic: 0, misses: 0, cooldown: 0, backoffUntil: 0, lastShotAt: 0, heldShots: 0, phase: Math.random() * Math.PI * 2 };
   runtime.outgoingAim = { yaw: null, pitch: null, targetIndex: null, ready: false, pendingManualUntil: 0 };
+  runtime.ammoPickup = { id: null, nextAt: 0 };
   runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
   const seenServerEvents = new Set();
   const restores = [];
@@ -56,6 +59,7 @@
     serverEvents: [],
     settings: [],
     interactions: [],
+    ammoPickups: [],
     kicks: [],
     connectionStates: [],
     errors: [],
@@ -98,7 +102,7 @@
 
   function recordSettings(reason) {
     const values = Object.fromEntries(['silent', 'rage', 'rapidFire', 'fov', 'range',
-      'point', 'visibleOnly', 'stealth', 'smooth', 'ammo'].map(key => [key, options[key]]));
+      'point', 'smartAim', 'visibleOnly', 'stealth', 'smooth', 'ammo'].map(key => [key, options[key]]));
     const previous = runtime.trace.settings.at(-1);
     if (reason !== 'match-start' && previous && JSON.stringify(previous.values) === JSON.stringify(values)) return;
     recordTrace('settings', { at: performance.now(), match: runtime.trace.match, reason, values });
@@ -119,6 +123,7 @@
     runtime.predictions.clear();
     runtime.sampleContexts.clear();
     runtime.target = null;
+    runtime.ammoPickup = { id: null, nextAt: 0 };
     lootCacheClient = null;
     lootCache = [];
   }
@@ -126,7 +131,7 @@
   function setOptions(patch, persist = true) {
     if (!patch || typeof patch !== 'object') return;
     const wasStealth = options.stealth;
-    for (const name of ['xray', 'loot', 'silent', 'rage', 'rapidFire', 'visibleOnly', 'stealth', 'ammo']) {
+    for (const name of ['xray', 'loot', 'silent', 'rage', 'rapidFire', 'smartAim', 'visibleOnly', 'stealth', 'ammo']) {
       if (typeof patch[name] === 'boolean') options[name] = patch[name];
     }
     if (Number.isFinite(patch.fov)) options.fov = Math.max(1, Math.min(90, patch.fov));
@@ -178,6 +183,11 @@
     return Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) ? [...value] : null;
   }
 
+  function ammoSnapshot(ammo) {
+    return Object.fromEntries(AMMO_TYPES.filter(type => Number.isFinite(ammo?.[type]))
+      .map(type => [type, ammo[type]]));
+  }
+
   function noteScan(scan, snap, distance, reason) {
     if (!scan) return;
     scan.counts[reason] = (scan.counts[reason] || 0) + 1;
@@ -200,6 +210,9 @@
     // The captured kernel uses rangeEnd for damage falloff, not target reach.
     const maxRange = options.range;
     const approachYaw = runtime.outgoingAim.yaw ?? frame.yaw;
+    const approachPitch = runtime.outgoingAim.pitch ?? frame.pitch;
+    const ownVelocity = vector3(me.vel) || vector3(me.v) || [0, 0, 0];
+    const ownSpeed = Math.hypot(ownVelocity[0], ownVelocity[2]);
     let best = null;
     let bestScore = Infinity;
     for (const { snap: current } of client.remoteFrames || []) {
@@ -226,7 +239,11 @@
       }
       const speed = Math.hypot(...(snap.v || [0, 0, 0]));
       const distanceToFeet = Math.hypot(...snap.p.map((value, i) => value - origin[i]));
-      const preferred = options.point === 'auto' && (distanceToFeet > 50 || speed > 4) ? 'chest' : options.point;
+      const adaptive = options.point === 'auto' ||
+        (options.rage && options.smartAim && options.point === 'head');
+      const preferred = adaptive
+        ? (distanceToFeet > 50 || speed > 4 || ownSpeed > 3 ? 'chest' : 'head')
+        : options.point;
       let point = aimPoint(snap, preferred);
       const delta = point.map((value, i) => value - origin[i]);
       const distance = Math.hypot(...delta);
@@ -249,7 +266,7 @@
         }
         const world = getCollisionWorld();
         if (!hasLineOfSight(world, origin, point)) {
-          if (options.point !== 'auto') {
+          if (!adaptive) {
             noteScan(scan, snap, distance, 'cover');
             continue;
           }
@@ -271,8 +288,9 @@
       noteScan(scan, snap, distance, 'eligible');
       // Favor targets that need little turning, then keep the current target stable.
       const score = options.rage
-        ? Math.abs(normalizedDelta(approachYaw, yaw)) + 0.25 * distance / maxRange -
-          (snap.i === runtime.outgoingAim.targetIndex ? 0.25 : 0)
+        ? Math.max(Math.abs(normalizedDelta(approachYaw, yaw)), Math.abs(approachPitch - pitch)) +
+          0.5 * distance / maxRange + 0.012 * Math.min(speed, 20) -
+          (snap.i === runtime.outgoingAim.targetIndex ? 0.15 : 0)
         : 1 - dot;
       if (score >= bestScore) continue;
       bestScore = score;
@@ -401,6 +419,7 @@
       weaponId: safeWeaponId(slot?.weapon),
       server: { ads: Number.isFinite(me.ads) ? me.ads : null,
         magazine: Number.isFinite(slot?.mag) ? slot.mag : null,
+        ammo: ammoSnapshot(me.ammo),
         reload: Number.isFinite(me.reload) ? me.reload : null,
         position: vector3(me.pos), velocity: vector3(me.vel),
         crouch: Number.isFinite(me.crouch) ? me.crouch : null,
@@ -411,6 +430,7 @@
         ads: Number.isFinite(predicted.ws?.ads) ? predicted.ws.ads : null,
         bloom: Number.isFinite(predicted.ws?.bloom) ? predicted.ws.bloom : null,
         magazine: Number.isFinite(predictedSlot?.mag) ? predictedSlot.mag : null,
+        ammo: ammoSnapshot(predicted.ammo),
         position: vector3(predicted.ps?.pos)
       } : null,
       selfCombatEvents: combat
@@ -775,7 +795,7 @@
   function rageInput(client, frame) {
     if (!options.rage) return frame;
     if (frame.buttons & INTERACT_BUTTON) {
-      runtime.sampleGate = { reason: 'interaction', target: null, scan: null };
+      runtime.sampleGate = { reason: runtime.autoPickupRequested ? 'ammo-pickup' : 'interaction', target: null, scan: null };
       return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
     if (!playable(client)) {
@@ -795,18 +815,24 @@
       visibleOnly: options.visibleOnly, physicsAvailable: !!(runtime.physics.getCollisionWorld && runtime.physics.hasLineOfSight),
       observed: 0, counts: {}, closest: null, selected: null };
     const target = selectTarget(client, { ...frame, vt: tick }, null, scan);
+    const ws = predictor.ws;
+    if (ws.reload > 0 || slot.mag <= 0) {
+      const reserve = predictor.ammo?.[weapon.ammo] || 0;
+      const reason = reserve > 0 || ws.reload > 0 ? 'reload' : 'no-ammo';
+      runtime.sampleGate = { reason, target, scan };
+      // Keep the player's own ADS choice, but do not force ADS or cancel sprint
+      // while the server reloads or the magazine is empty.
+      const buttons = (frame.buttons & ~1) | (slot.mag <= 0 && reserve > 0 && !(ws.reload > 0) ? 32 : 0);
+      return buttons === frame.buttons ? frame : { ...frame, buttons };
+    }
     if (!target) {
       // Do not hold ADS or suppress sprint while travelling between targets.
       runtime.sampleGate = { reason: 'no-target', target: null, scan };
       return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
-    const ws = predictor.ws;
     let buttons = scopedButtons;
     let reason = 'fire-request';
-    if (slot.mag <= 0) {
-      if (predictor.ammo?.[weapon.ammo] > 0) { buttons |= 32; reason = 'reload'; }
-      else reason = 'no-ammo';
-    } else if (Number.isFinite(ws.ads) && ws.ads < 0.995) reason = 'ads-ramp';
+    if (Number.isFinite(ws.ads) && ws.ads < 0.995) reason = 'ads-ramp';
     else if (weapon.fireMode !== 'auto' && (ws.trigger || ws.cooldown > 1 / 30 + 1e-9)) reason = 'cooldown';
     else buttons |= 1;
     runtime.sampleGate = { reason, target, scan };
@@ -863,6 +889,35 @@
     return { ...frame, buttons: frame.buttons | 32 };
   }
 
+  function autoPickupAmmoFrame(client, frame) {
+    if (!options.ammo || (frame.buttons & (1 | INTERACT_BUTTON)) ||
+        client.you == null || client.latest?.phase === 'finished' ||
+        client.input?.enabled === false || client.disposed || client.paused ||
+        client.localDead?.() || client.localDowned?.()) return frame;
+    const me = ownState(client);
+    if (me?.mode !== 'ground' || me.downed || me.spectating != null) return frame;
+    const ref = client.target?.target;
+    if (ref?.kind !== 'item') return frame;
+    const item = client.loot?.items?.get?.(ref.id);
+    const predictor = client.predictor;
+    const weapon = predictor?.activeStats;
+    const ammoType = weapon?.ammo;
+    const reserve = predictor?.ammo?.[ammoType];
+    const cap = AMMO_CAPS[ammoType] ||
+      Math.max(40, 4 * (weapon?.magSize || 0));
+    if (item?.kind !== 'ammo' || item.ammo !== ammoType ||
+        !Number.isFinite(reserve) || reserve >= cap) return frame;
+    const now = performance.now();
+    if (runtime.ammoPickup.id === ref.id && now < runtime.ammoPickup.nextAt) return frame;
+    runtime.ammoPickup = { id: ref.id, nextAt: now + 850 };
+    runtime.autoPickupRequested = true;
+    recordTrace('ammoPickups', { at: now, match: runtime.trace.match,
+      ammoType: AMMO_TYPES.includes(ammoType) ? ammoType : 'other',
+      amount: Number.isFinite(item.amount) ? item.amount : null,
+      reserveBefore: reserve });
+    return { ...frame, buttons: frame.buttons | INTERACT_BUTTON };
+  }
+
   function replaceMethod(object, name, replacement) {
     const original = object[name];
     object[name] = replacement;
@@ -885,6 +940,7 @@
     seenServerEvents.clear();
     runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
     runtime.target = null;
+    runtime.ammoPickup = { id: null, nextAt: 0 };
     runtime.sampleGate = null;
     runtime.lastGateTrace = null;
     runtime.lastServerSnapshot = null;
@@ -963,9 +1019,13 @@
         let prepared = frame;
         runtime.sampleGate = null;
         runtime.sampleHoldReason = null;
-        try { prepared = autoReloadFrame(client, frame); }
+        runtime.autoPickupRequested = false;
+        try { prepared = autoPickupAmmoFrame(client, prepared); }
         catch (error) { recordTrace('errors', { at: new Date().toISOString(),
-          where: 'ammo', type: error?.name || 'Error' }); }
+          where: 'ammo-pickup', type: error?.name || 'Error' }); }
+        try { prepared = autoReloadFrame(client, prepared); }
+        catch (error) { recordTrace('errors', { at: new Date().toISOString(),
+          where: 'ammo-reload', type: error?.name || 'Error' }); }
         try {
           const sampled = holdStealthShot(client, rageInput(client, prepared));
           recordFireGate(client, frame, sampled);
@@ -1262,7 +1322,7 @@
 
   function syncControls() {
     if (!root) return;
-    for (const name of ['xray', 'loot', 'silent', 'rage', 'visibleOnly', 'stealth', 'ammo']) root.querySelector('[name="' + name + '"]').checked = options[name];
+    for (const name of ['xray', 'loot', 'silent', 'rage', 'smartAim', 'visibleOnly', 'stealth', 'ammo']) root.querySelector('[name="' + name + '"]').checked = options[name];
     for (const name of ['fov', 'range', 'point']) root.querySelector('[name="' + name + '"]').value = options[name];
     root.querySelector('[name="smooth"]').value = options.smooth;
     root.querySelector('[data-value="fov"]').textContent = options.fov + ' deg';
@@ -1336,11 +1396,12 @@
         <div class="setting"><label for="fov">Normal aim cone (half-angle)<output data-value="fov"></output></label><input id="fov" name="fov" aria-label="Aim cone" type="range" min="1" max="90" step="1"></div>
         <div class="setting"><label for="range">Maximum range<output data-value="range"></output></label><input id="range" name="range" aria-label="Maximum range" type="range" min="10" max="600" step="10"></div>
         <label>Target point<select name="point" aria-label="Target point"><option value="auto">Auto / clear point</option><option value="head">Head</option><option value="chest">Chest</option></select></label>
+        <label>Smart Rage aim<input name="smartAim" aria-label="Smart Rage aim" type="checkbox"></label>
         <label>Skip targets behind cover<input name="visibleOnly" aria-label="Skip targets behind cover" type="checkbox"></label>
         <label class="feature">Anticheat stealth<input name="stealth" aria-label="Anticheat stealth" type="checkbox"></label>
-        <label class="feature">Auto reload<input name="ammo" aria-label="Auto reload" type="checkbox"></label>
+        <label class="feature">Ammo assist / reload + pickup<input name="ammo" aria-label="Ammo assist" type="checkbox"></label>
         <div class="setting"><label for="smooth">Aim smoothing<output data-value="smooth"></output></label><input id="smooth" name="smooth" aria-label="Aim smoothing" type="range" min="0.1" max="0.95" step="0.05"></div>
-        <p class="note">Insert: show/hide. Press Resume after using this panel to restore game controls. F/E interaction takes priority over automatic aim and fire. Rage follows weapon scope time, cooldown, and server ammo. Shot correction reduces predicted deviation; server spread and camera recoil may remain. Cover still blocks shots. Use server hits to judge results.</p>
+        <p class="note">Insert: show/hide. Press Resume after using this panel to restore game controls. F/E interaction takes priority over automatic aim and fire. Smart Rage aim uses chest for distant or moving shots even when Head is selected. Ammo assist picks up matching ammo within reach and requests normal reloads. Scoped movement stays slower while firing; Rage releases automatic scope during reload. Server spread and camera recoil may remain. Cover still blocks shots. Use server hits to judge results.</p>
       </div><div class="status"><div role="status"></div><div class="stats"></div></div>
     </aside><button type="button" class="show-tools" data-show-panel hidden aria-label="Show tools panel">Show tools</button>`;
     document.documentElement.appendChild(host);

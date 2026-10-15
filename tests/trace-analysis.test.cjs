@@ -58,6 +58,30 @@ test('older trace format remains readable without inventing weapon or range deta
   assert.throws(() => analyzeTrace({ formatVersion: 7, trace: {} }), /formatVersion 1 or 2/);
 });
 
+test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.10', trace: {
+    match: 1,
+    ammoPickups: [{ match: 1, ammoType: 'light', amount: 30, reserveBefore: 20 }],
+    serverSnapshots: [
+      { match: 1, server: { ammo: { light: 20 } } },
+      { match: 1, server: { ammo: { light: 50 } } }
+    ],
+    aimDecisions: [
+      { match: 1, sequence: 1, fireSent: true, localShotPredicted: false,
+        weapon: { cooldown: 0.03 }, weaponId: 'vanguard' },
+      { match: 1, sequence: 2, fireSent: true, localShotPredicted: false,
+        weapon: { cooldown: 0 }, weaponId: 'vanguard' }
+    ]
+  } });
+  assert.deepEqual(report.ammoAssist, { pickupRequests: 1, requestsByType: { light: 1 },
+    serverReserveIncreases: { light: { transitions: 1, rounds: 30 } } });
+  assert.equal(report.outgoingFire.missingPredictionWithCooldown, 1);
+  assert.equal(report.outgoingFire.missingPredictionWithoutCooldown, 1);
+  assert.deepEqual(report.investigate.map(item => item.sequence), [2]);
+  assert.match(formatReport(report), /Ammo assist: 1 pickup requests/);
+});
+
 test('no-fire report distinguishes sampled gates, outbound frames, and server evidence', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.8', trace: {

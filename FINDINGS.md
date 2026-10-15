@@ -41,6 +41,7 @@ trace ended, not that the server would never kick.
 | [Early export](verification/live-trace-v1.5.5-2026-10-15.json) and [later export](verification/live-trace-v1.5.5-25bots-2026-10-15.json) | 1.5.5 | 1 shot, 1 hit, 32 damage | Two snapshots of **one short match**, with no recorded kick |
 | User-supplied export, not mirrored | 1.5.6 | 88 shots, 27 hits, 6 kills | Mixed weapons in one match; no recorded kick |
 | User-supplied export, not mirrored | 1.5.8 | 0 shots, 0 hits | No outgoing Fire; 202 Rage samples held at alignment after ADS, no recorded kick |
+| User-supplied export, not mirrored | 1.5.9 | 351 shots, 82 hits, 13 kills, 2295.8 damage | Mixed weapons in one match; no recorded kick |
 
 The two 1.5.5 files share `trace.startedAt =
 2026-10-15T14:33:31.561Z`, the same match counter, and the same two server
@@ -63,6 +64,41 @@ these SHA-256 values.
 The user-supplied 1.5.8 export `bridgezone-trace-2026-10-15T17-58-42-665Z.json`
 has SHA-256 `15e714ce62166969f4b019ff06ce114a4d505c7a44e19ee72bb2d96ad16399f8`.
 It is kept in the user's Downloads folder rather than mirrored here.
+The user-supplied 1.5.9 export `bridgezone-trace-2026-10-15T18-16-25-542Z.json`
+has SHA-256 `dda31783653b3f8898b6cb56fcfb22d2491428b4c1cc60f3a7426611f46c1084`.
+It also remains in the user's Downloads folder.
+
+### Version 1.5.9 mixed-weapon trace
+
+The server recorded 351 shots, 82 hits, 32 headshots, and 13 kills. This
+confirms that the earlier no-fire regression was fixed in this match; it does
+not establish accurate shots at every distance. The retained outgoing input
+included Interact on 11 frames. Three F keydowns and three keyups were
+recorded while pointer lock and input were enabled, so the F path reached the
+outgoing frame. The export does not separately confirm a completed pickup.
+
+The saved target setting was Head for the full trace. All 512 retained sent
+aim decisions used the head aim point, including decisions for targets hundreds
+of metres away. The new Smart Rage aim setting adapts that saved preference to
+chest when either player moves quickly or the target is over 50 metres away,
+and scores pitch as well as yaw when choosing a target. Version 1.5.10 has no
+server trace yet, so any hit-rate improvement remains unverified.
+
+There were 579 Rage samples classified as reload and 86 as no-ammo. Earlier
+code could request ADS on a selected target while reloading or empty; 1.5.10
+releases that automatic ADS request and keeps sprint available in those states.
+The captured shared game physics also applies a movement slowdown while ADS
+is held for an active shot. The browser client cannot make the server treat
+continuous ADS as full-speed movement or grant an unlimited reserve through a
+supported input. Ammo assist now requests nearby compatible ground-ammo
+pickups and normal reloads, while leaving ammunition authoritative to the
+server. New traces record pickup requests and server reserve changes as
+separate observations.
+
+The 1.5.9 trace had 282 outgoing Fire decisions without a local shot prediction.
+Every one of those decisions recorded active weapon cooldown. Holding Fire
+through cooldown is normal for automatic weapons, so the analyzer now reports
+these separately from unexplained prediction gaps.
 
 ## What changed and what was observed
 

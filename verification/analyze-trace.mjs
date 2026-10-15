@@ -139,6 +139,7 @@ export function analyzeTrace(document) {
   const groups = new Map();
   const anomalies = [];
   let missingWeapon = 0, missingDistance = 0, missingPrediction = 0, missingGeometry = 0;
+  let missingPredictionWithCooldown = 0, missingPredictionWithoutCooldown = 0;
   const ackCoverage = { covered: 0, pendingOrUnobserved: 0, unknown: 0 };
 
   for (const item of sent) {
@@ -149,7 +150,11 @@ export function analyzeTrace(document) {
       : item.movingInput ? 'moving' : 'still';
     if (weapon === 'unknown') missingWeapon++;
     if (band === 'unknown') missingDistance++;
-    if (!item.localShotPredicted) missingPrediction++;
+    if (!item.localShotPredicted) {
+      missingPrediction++;
+      if (finite(item.weapon?.cooldown) && item.weapon.cooldown > 0) missingPredictionWithCooldown++;
+      else missingPredictionWithoutCooldown++;
+    }
     const before = item.geometry?.predictedInput?.meanMeters;
     const after = item.geometry?.predictedOutgoing?.meanMeters;
     const status = ackStatus(item, highestAckByMatch);
@@ -171,7 +176,8 @@ export function analyzeTrace(document) {
       group.predictedMissAfterSum += after;
     }
     const reasons = [];
-    if (!item.localShotPredicted) reasons.push('no local prediction');
+    if (!item.localShotPredicted && !(finite(item.weapon?.cooldown) && item.weapon.cooldown > 0))
+      reasons.push('no local prediction without recorded cooldown');
     if (finite(item.localAds) && item.localAds < 0.995) reasons.push('ADS below ready threshold');
     if (finite(after) && after > 0.3) reasons.push('predicted ray over 0.3 m from selected point');
     if (finite(item.sampled?.selectionDriftMeters) && item.sampled.selectionDriftMeters > 0.2) {
@@ -221,8 +227,30 @@ export function analyzeTrace(document) {
       finite(item.predictorBeforeReconcile?.magazine) &&
       item.server.magazine !== item.predictorBeforeReconcile.magazine).length };
 
+  const ammoPickups = list(trace.ammoPickups);
+  const requestsByType = {};
+  for (const request of ammoPickups) {
+    const type = typeof request?.ammoType === 'string' ? request.ammoType : 'unknown';
+    requestsByType[type] = (requestsByType[type] || 0) + 1;
+  }
+  const serverReserveIncreases = {};
+  const lastAmmoByMatch = new Map();
+  for (const snapshot of snapshots) {
+    const ammo = snapshot?.server?.ammo;
+    if (!ammo || typeof ammo !== 'object') continue;
+    const previous = lastAmmoByMatch.get(snapshot.match);
+    for (const [type, amount] of Object.entries(ammo)) {
+      if (!finite(amount) || !finite(previous?.[type]) || amount <= previous[type]) continue;
+      serverReserveIncreases[type] ||= { transitions: 0, rounds: 0 };
+      serverReserveIncreases[type].transitions++;
+      serverReserveIncreases[type].rounds += amount - previous[type];
+    }
+    lastAmmoByMatch.set(snapshot.match, ammo);
+  }
+  const ammoAssist = { pickupRequests: ammoPickups.length, requestsByType, serverReserveIncreases };
+
   const retained = Object.fromEntries(['frames', 'localShots', 'aimDecisions', 'fireGates',
-    'serverSnapshots', 'serverEvents', 'settings', 'interactions', 'kicks', 'connectionStates', 'errors']
+    'serverSnapshots', 'serverEvents', 'settings', 'interactions', 'ammoPickups', 'kicks', 'connectionStates', 'errors']
     .map(key => [key, list(trace[key]).length]));
   const interactionEvidence = { retained: interactions.length, keyDowns: 0, keyUps: 0,
     keyDownsWithoutPointerLock: 0, keyDownsWithInputDisabled: 0,
@@ -295,10 +323,11 @@ export function analyzeTrace(document) {
     retention: { retained, dropped: trace.retention?.dropped || null },
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
-    inputButtons, firingEvidence, interactionEvidence,
+    inputButtons, firingEvidence, interactionEvidence, ammoAssist,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
       ackCoverage, missingWeapon, missingDistance,
-      missingPrediction, missingGeometry, byWeaponRangeMovement },
+      missingPrediction, missingPredictionWithCooldown, missingPredictionWithoutCooldown,
+      missingGeometry, byWeaponRangeMovement },
     serverEvents: server, authoritative,
     investigate: anomalies.slice(0, 20),
     interpretation: [
@@ -307,8 +336,10 @@ export function analyzeTrace(document) {
       'Server events have no guaranteed input sequence, so server hits cannot be assigned to a weapon, target, or distance.',
       'Fire-gate rows are coalesced samples; gate counters cover every Rage sample when present.',
       'Fire-gate original buttons are the game input before this hook; prepared gate buttons are after sample rewriting. Frame sampledButtons, when present, are before sendInput rewriting; frame buttons are on the wire.',
-      'This trace has no raw keyboard events, so absent Interact bits do not prove F/E was never pressed.',
+      'Older traces may lack F/E keyboard events; absent Interact bits do not prove F/E was never pressed.',
       'Button names use the captured client bit map: Fire 1, Aim 2, Interact 64 (F/E).',
+      'A Fire input held during recorded weapon cooldown may have no local shot prediction; this is normal for automatic fire.',
+      'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
       'Retained buffers may cover different time windows; inspect dropped counts before comparing totals.'
     ]
@@ -343,6 +374,9 @@ export function formatReport(report) {
       `${report.inputButtons.sampledFrames.observed ? report.inputButtons.sampledFrames.byButton.interact : 'unavailable'}, outgoing frames ` +
       `${report.inputButtons.outgoingFrames.byButton.interact}`,
     `F/E and pointer-lock evidence: ${JSON.stringify(report.interactionEvidence)}`,
+    `Ammo assist: ${report.ammoAssist.pickupRequests} pickup requests ` +
+      `${JSON.stringify(report.ammoAssist.requestsByType)}; observed server reserve increases ` +
+      `${JSON.stringify(report.ammoAssist.serverReserveIncreases)}`,
     `Game sample -> prepared button changes in ${report.inputButtons.gateSampleChanges.comparable} retained gate rows: ` +
       `added ${JSON.stringify(report.inputButtons.gateSampleChanges.added)}, ` +
       `removed ${JSON.stringify(report.inputButtons.gateSampleChanges.removed)}`,
@@ -362,7 +396,10 @@ export function formatReport(report) {
     `Retained: ${JSON.stringify(report.retention.retained)}`,
     `Dropped: ${JSON.stringify(report.retention.dropped || {})}`,
     `Missing among sent Fire: weapon ${report.outgoingFire.missingWeapon}, distance ${report.outgoingFire.missingDistance}, ` +
-      `local prediction ${report.outgoingFire.missingPrediction}, geometry ${report.outgoingFire.missingGeometry}`,
+      `local prediction ${report.outgoingFire.missingPrediction} ` +
+      `(with recorded cooldown ${report.outgoingFire.missingPredictionWithCooldown}, ` +
+      `without ${report.outgoingFire.missingPredictionWithoutCooldown}), ` +
+      `geometry ${report.outgoingFire.missingGeometry}`,
     '', 'Outgoing Fire by weapon / selected distance / movement (local estimates):'
   ];
   for (const group of report.outgoingFire.byWeaponRangeMovement) {

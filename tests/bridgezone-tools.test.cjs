@@ -873,7 +873,7 @@ test('Rage prefers a nearer aim angle and honors the range slider beyond rangeEn
   fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -550] }) }];
   assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1,
     'weapon rangeEnd does not impose an extra client cutoff');
-  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, -0.04, -600] }) }];
+  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0.41, -600] }) }];
   assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1,
     'a target exactly 600 m from the firing eye is selectable');
   fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -610] }) }];
@@ -962,6 +962,61 @@ test('auto reload sends the server reload input without changing predicted ammun
   h.api.setOptions({ ammo: false });
   fake.client.predictor.ammo.light = 20;
   assert.equal(fake.client.input.sample('sample-argument').buttons & 32, 0);
+});
+
+test('Rage keeps sprint available and releases automatic ADS during reload or empty reserve', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, ammo: true });
+  const predictor = fake.client.predictor;
+  predictor.slots[0].mag = 0;
+  const reload = fake.client.input.sample('sample-argument');
+  assert.equal(reload.buttons & 32, 32);
+  assert.equal(reload.buttons & (1 | 2), 0);
+  assert.equal(reload.buttons & 16, 16);
+  assert.equal(h.api.runtime.sampleGate.reason, 'reload');
+  predictor.ws.reload = 1;
+  const duringReload = fake.client.input.sample('sample-argument');
+  assert.equal(duringReload.buttons & (1 | 2 | 32), 0);
+  assert.equal(duringReload.buttons & 16, 16);
+  predictor.ws.reload = 0;
+  predictor.ammo.light = 0;
+  const empty = fake.client.input.sample('sample-argument');
+  assert.equal(empty.buttons & (1 | 2 | 32), 0);
+  assert.equal(empty.buttons & 16, 16);
+  assert.equal(h.api.runtime.sampleGate.reason, 'no-ammo');
+  h.api.destroy();
+});
+
+test('ammo assist pulses Interact only for visible matching ammo below the reserve cap', () => {
+  const h = harness();
+  const fake = attach(h, rageClient({ target: { target: { kind: 'item', id: 'a1' } },
+    loot: { items: new Map([['a1', { kind: 'ammo', ammo: 'light', amount: 30, pos: [0, 0, -1] }]]) } }));
+  h.api.setOptions({ rage: true, ammo: true });
+  const pickup = fake.client.input.sample('sample-argument');
+  assert.equal(pickup.buttons & 64, 64);
+  assert.equal(pickup.buttons & 1, 0);
+  assert.equal(pickup.buttons & 16, 16);
+  assert.equal(h.api.runtime.sampleGate.reason, 'ammo-pickup');
+  assert.equal(h.api.trace().ammoPickups[0].reserveBefore, 50);
+  assert.equal(h.api.trace().ammoPickups[0].amount, 30);
+  assert.equal(send(fake, [pickup])[0].buttons & 64, 64);
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0,
+    'the same item is not activated on every frame');
+  fake.client.loot.items.get('a1').ammo = 'heavy';
+  fake.client.target.target.id = 'a2';
+  fake.client.loot.items.set('a2', { kind: 'ammo', ammo: 'heavy', amount: 30 });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0);
+  fake.client.loot.items.get('a2').ammo = 'light';
+  fake.client.predictor.ammo.light = 240;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0);
+  fake.client.predictor.ammo.light = 20;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 64);
+  h.api.setOptions({ ammo: false });
+  fake.client.target.target.id = 'a3';
+  fake.client.loot.items.set('a3', { kind: 'ammo', ammo: 'light', amount: 30 });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0);
+  h.api.destroy();
 });
 
 test('Rage does not fire without a clear target and low smoothing settings migrate to exact aim', () => {
@@ -1389,6 +1444,35 @@ test('automatic targeting prefers chest at long range or high speed and head for
   }
 });
 
+test('Smart Rage aim adapts saved Head to distance and player motion, and scores pitch', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, point: 'head', smartAim: true, range: 600 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -80] }) }];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'chest');
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20] }) }];
+  fake.client.predictor.ps.vel = [4, 0, 0];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'chest');
+  fake.client.predictor.ps.vel = [0, 0, 0];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'head');
+  h.api.setOptions({ smartAim: false });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -80] }) }];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'head');
+  h.api.setOptions({ smartAim: true });
+  fake.client.remoteFrames = [
+    { snap: opponent(1, { p: [0, 20, -40] }) },
+    { snap: opponent(2, { p: [2, 0, -40] }) }
+  ];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.index, 2,
+    'a small yaw difference should not beat a large pitch correction');
+  h.api.destroy();
+});
+
 test('Jump fire frames and active movement actions are not silently rotated', () => {
   const h = harness();
   const fake = attach(h, rageClient());
@@ -1588,6 +1672,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   fake.client.rtt = 80;
   fake.client.ingestEvents({ t: 100, me: { ack: 41, active: 0,
     slots: [{ weapon: 'vanguard', mag: 29 }], ads: 0.9,
+    ammo: { light: 150, heavy: 20 },
     pos: [0, 0, 0], vel: [1, 0, 0], health: 100 }, events: [
     { t: 100, by: 0, type: 'shot' },
     { t: 100, by: 0, type: 'hit', damage: 12 }
@@ -1606,6 +1691,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(trace.serverEvents.at(-1).snapshotTick, 100);
   assert.equal(trace.serverSnapshots.at(-1).ack, 41);
   assert.equal(trace.serverSnapshots.at(-1).weaponId, 'vanguard');
+  assert.deepEqual({ ...trace.serverSnapshots.at(-1).server.ammo }, { light: 150, heavy: 20 });
   assert.equal(trace.serverSnapshots.at(-1).ackLatencyMs, 100);
   assert.equal(trace.counters.serverSnapshotsSeen, 1);
   assert.equal(trace.counters.highestAckByMatch[1], 41);
@@ -1619,7 +1705,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.9');
+  assert.equal(exported.scriptVersion, '1.5.10');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -1651,7 +1737,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.9');
+  assert.equal(payload.scriptVersion, '1.5.10');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

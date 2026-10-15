@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "BridgeZone Tools",
-  "version": "1.5.9",
-  "description": "Xray, Silent AIM, Rage, and anticheat stealth for BridgeZone.",
+  "version": "1.5.10",
+  "description": "Xray, adaptive Rage aim, ammo assist, and combat diagnostics for BridgeZone.",
   "action": {
     "default_title": "BridgeZone Tools",
     "default_popup": "popup.html"
