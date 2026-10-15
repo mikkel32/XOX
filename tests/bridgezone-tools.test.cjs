@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -542,7 +543,7 @@ function rageClient(patch = {}) {
   };
   const predictor = {
     ps: { pos: [0, 0, 0], mode: 'ground', crouch: 0, health: 100 },
-    ws: { trigger: false, cooldown: 0 },
+    ws: { trigger: false, cooldown: 0, ads: 1 },
     active: 0, slots: [{ mag: 10 }], ammo: { light: 50 },
     activeStats: { fireMode: 'auto', ammo: 'light', pellets: 1, magSize: 10 }
   };
@@ -632,6 +633,56 @@ test('outgoing aim remains aligned when the sampled camera kicks', () => {
   h.api.destroy();
 });
 
+test('fast fire corrects predicted moving spread at long range without aim jitter', () => {
+  const h = harness();
+  const fake = rageClient();
+  const spread = 1.6 * Math.PI / 180;
+  fake.client.predictor.activeStats.id = 'longbow';
+  fake.client.predictor.activeStats.rangeEnd = 35;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: true, dirs: [[
+      -Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+      Math.sin(input.pitch),
+      -Math.cos(input.yaw + spread) * Math.cos(input.pitch)
+    ]]
+  } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, range: 600, point: 'auto' });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2, 0, -550] }) }];
+  let input, outgoing;
+  for (let sequence = 840; sequence < 848; sequence++) {
+    input = frame({ ...fake.client.input.sample('sample-argument'), s: sequence, mx: 1, mz: 0 });
+    if (input.buttons & 1) fake.client.predictor.predict(input);
+    outgoing = send(fake, [input])[0];
+    if (outgoing.buttons & 1) break;
+  }
+  assert.equal(outgoing.buttons & 1, 1);
+  assert.equal(outgoing.buttons & 2, 2);
+  assert.equal(h.api.runtime.compensated, 1);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.ok(decision.targetDistance > 500 && decision.targetDistance < 600);
+  assert.equal(decision.weaponRangeEnd, 35);
+  assert.equal(decision.weaponId, 'longbow');
+  assert.equal(decision.localAds, 1);
+  assert.equal(decision.movingInput, true);
+  assert.equal(decision.adsRequested, true);
+  assert.equal(decision.localShotPredicted, true);
+  assert.equal(decision.correctionApplied, true);
+  assert.equal(decision.fireSent, true);
+  const correctedDirection = [
+    -Math.sin(outgoing.yaw + spread) * Math.cos(outgoing.pitch),
+    Math.sin(outgoing.pitch),
+    -Math.cos(outgoing.yaw + spread) * Math.cos(outgoing.pitch)
+  ];
+  const toChest = [2, 1.21 - 1.62, -550];
+  const distance = Math.hypot(...toChest);
+  toChest.forEach((value, index) => close(correctedDirection[index], value / distance, 1e-6));
+  const before = worldMovement(input), after = worldMovement(outgoing);
+  close(after[0], before[0]);
+  close(after[1], before[1]);
+  h.api.destroy();
+});
+
 test('a moving target invalidates ready aim before prediction fires again', () => {
   const h = harness();
   const fake = attach(h, rageClient());
@@ -646,6 +697,41 @@ test('a moving target invalidates ready aim before prediction fires again', () =
   const changed = fake.client.input.sample('sample-argument');
   assert.equal(changed.buttons & 1, 0, 'stale ready state cannot fire at the old position');
   h.api.destroy();
+});
+
+test('fast fire holds a distant shot after a small target movement', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, range: 600, point: 'auto' });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2, 0, -550] }) }];
+  const first = fake.client.input.sample('sample-argument');
+  send(fake, [frame({ ...first, s: 920 })]);
+  assert.equal(h.api.runtime.outgoingAim.ready, true);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2.35, 0, -550] }) }];
+  const moved = fake.client.input.sample('sample-argument');
+  assert.equal(moved.buttons & 1, 0, 'a sub-degree shift matters at 550 m');
+  const aligned = send(fake, [frame({ ...moved, s: 921 })])[0];
+  assert.equal(aligned.buttons & 1, 0);
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1);
+  h.api.destroy();
+});
+
+test('Rage drops Fire when the target disappears after input sampling', () => {
+  for (const stealth of [true, false]) {
+    const h = harness();
+    const fake = attach(h, rageClient());
+    h.api.setOptions({ rage: true, stealth, rapidFire: true });
+    for (let sequence = 970; sequence < 974; sequence++) {
+      send(fake, [frame({ s: sequence, buttons: 0 })]);
+    }
+    const sampled = fake.client.input.sample('sample-argument');
+    assert.equal(sampled.buttons & 1, 1);
+    fake.client.remoteFrames = [];
+    const outgoing = send(fake, [frame({ ...sampled, s: 974 })])[0];
+    assert.equal(outgoing.buttons & 1, 0, `stale ${stealth ? 'stealth' : 'direct'} target`);
+    assert.equal(h.api.trace().aimDecisions.at(-1).fireSent, false);
+    h.api.destroy();
+  }
 });
 
 test('aim hook errors hold Fire instead of sending an unassisted shot', () => {
@@ -689,7 +775,7 @@ test('Rage scans behind the player and samples autofire with ADS', () => {
   assert.equal(h.api.runtime.compensated, 0);
 });
 
-test('Rage prefers a nearer aim angle and stays inside useful weapon range', () => {
+test('Rage prefers a nearer aim angle and honors the range slider beyond rangeEnd', () => {
   const h = harness();
   const fake = attach(h, rageClient());
   h.api.setOptions({ rage: true, range: 600 });
@@ -702,9 +788,40 @@ test('Rage prefers a nearer aim angle and stays inside useful weapon range', () 
   const sampled = fake.client.input.sample('sample-argument');
   send(fake, [sampled]);
   assert.equal(h.api.runtime.target.index, 1, 'the reachable target near the current aim wins');
-  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -60] }) }];
-  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0,
-    'Rage does not spend ammunition beyond useful sidearm range');
+  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -550] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1,
+    'weapon rangeEnd does not impose an extra client cutoff');
+  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, -0.04, -600] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1,
+    'a target exactly 600 m from the firing eye is selectable');
+  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -610] }) }];
+  const outOfRange = fake.client.input.sample('sample-argument');
+  assert.equal(outOfRange.buttons & 1, 0, 'the selected 600 m limit still applies');
+  assert.equal(outOfRange.buttons & 2, 2, 'Rage remains scoped before a target enters range');
+  assert.equal(outOfRange.buttons & 16, 0, 'sprint is released while Rage holds scope');
+});
+
+test('Rage holds ADS through the weapon scope ramp before firing', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  const weapon = fake.client.predictor;
+  weapon.ws.ads = 0;
+  fake.client.remoteFrames = [];
+  const waiting = fake.client.input.sample('sample-argument');
+  assert.equal(waiting.buttons & 2, 2);
+  assert.equal(waiting.buttons & 1, 0);
+  fake.client.remoteFrames = [{ snap: opponent() }];
+  weapon.ws.ads = 0.75;
+  const ramping = fake.client.input.sample('sample-argument');
+  assert.equal(ramping.buttons & 2, 2);
+  assert.equal(ramping.buttons & 1, 0);
+  for (let sequence = 960; sequence < 963; sequence++) {
+    send(fake, [frame({ ...ramping, s: sequence })]);
+  }
+  weapon.ws.ads = 0.995;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1);
+  h.api.destroy();
 });
 
 test('Rage pulses semi, pump, and bolt triggers while auto holds Fire without manufacturing ammo', () => {
@@ -817,12 +934,18 @@ test('automatic clear-point targeting falls back from blocked head to chest', ()
   close(output.pitch, Math.atan2(1.21 - 1.62, Math.hypot(2, 10)));
 });
 
-const physicsPath = path.join(__dirname, '..', 'research', '3ep-katvfqbjo.js');
+const physicsPath = process.env.XOX_CLIENT_PHYSICS ||
+  path.join(__dirname, '..', 'research', '3ep-katvfqbjo.js');
 
 test('captured single-projectile spread is inverted against the actual game function', {
   skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
 }, () => {
-  const kernel = fs.readFileSync(physicsPath, 'utf8');
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected,
+    'the optional physics bundle must match the captured public client');
+  const kernel = bytes.toString('utf8');
   const start = kernel.indexOf('function tW('), end = kernel.indexOf('function tU(', start);
   assert.ok(start >= 0 && end > start, 'captured spread function remains identifiable');
   const spread = vm.runInNewContext(kernel.slice(start, end) + ';tW', {
@@ -1380,12 +1503,14 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(trace.frames.at(-1).sequence, 41);
   assert.deepEqual(Array.from(trace.frames.at(-1).before), [0, 0, 1, 1]);
   assert.equal(trace.frames.at(-1).after[0], outgoing.yaw);
+  assert.equal(trace.aimDecisions.at(-1).sequence, 41);
+  assert.equal(trace.aimDecisions.at(-1).targetDistance > 10, true);
   assert.deepEqual(Array.from(trace.serverEvents, event => event.type), ['shot', 'hit']);
   assert.equal(trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 1);
-  assert.equal(exported.scriptVersion, '1.5.6');
+  assert.equal(exported.scriptVersion, '1.5.7');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -1412,7 +1537,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.6');
+  assert.equal(payload.scriptVersion, '1.5.7');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

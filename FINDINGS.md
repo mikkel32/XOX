@@ -39,6 +39,7 @@ trace ended, not that the server would never kick.
 | [First trace](verification/live-trace-v1.5.4-2026-10-15.json) | 1.5.4 | 19 shots, 13 hits, 2 kills, 198.8 damage | No recorded kick before bot elimination |
 | [Second trace](verification/live-trace-v1.5.4-active-2026-10-15.json) | 1.5.4 | 51 shots, 14 hits, 228.2 damage | No recorded kick before bot elimination |
 | [Early export](verification/live-trace-v1.5.5-2026-10-15.json) and [later export](verification/live-trace-v1.5.5-25bots-2026-10-15.json) | 1.5.5 | 1 shot, 1 hit, 32 damage | Two snapshots of **one short match**, with no recorded kick |
+| User-supplied export, not mirrored | 1.5.6 | 88 shots, 27 hits, 6 kills | Mixed weapons in one match; no recorded kick |
 
 The two 1.5.5 files share `trace.startedAt =
 2026-10-15T14:33:31.561Z`, the same match counter, and the same two server
@@ -98,10 +99,39 @@ paths, but no broader live conclusion follows from the short trace.
 Version 1.5.6 adds automatic local build/reload while a Zone tab is open,
 removes XOX's extra stealth delay when Fast fire and Rage are enabled, checks
 alignment against a moving target before predicting a shot, and corrects the
-average direction of multiple predicted pellets. These are local code and test
-results. There is no 1.5.6 server trace, so its hit rate and rejection risk are
-unmeasured. It neither changes the server's fire cadence nor removes visible
-camera recoil. A perfect hit rate cannot be inferred from local prediction.
+average direction of multiple predicted pellets. A user-supplied 1.5.6 export
+contains 88 server shots, 27 hits, six kills, no kick, and no recorded errors.
+Its SHA-256 is `ea7066c1aefc4f9f2f75ebbfbaa520a5e72ebbbcc7fa3792ad625252b2daa425`.
+The raw export stays outside this public repository. It covers one match with
+sniper, SMG, gun, and rifle use, but records no weapon or target distance per
+shot. It cannot establish accuracy by weapon or at 600 m.
+
+In the part of the export where both a local prediction and its input frame are
+retained, 18 moving predictions average 0.56 degrees of deviation from the
+sampled aim and 18 stationary predictions average 0.06 degrees. For 36 server
+shot events whose ticks overlap retained input frames, 10 ticks have nonzero
+movement input and one same-tick hit; the other 26 have 11 same-tick hits.
+Server events can be delayed relative to input, and weapon, distance, and target
+movement are mixed. These figures show a problem worth testing, not a causal
+hit-rate comparison.
+
+The captured public physics bundle (SHA-256
+`2027d73bd9daea6e44f954bfce014af3ee8b5df3550bec44a2b9c046b7b71b1e`)
+uses `rangeEnd` as the end of damage falloff, then applies `minDamage`; it does
+not use that field as a maximum hit distance. Its weapon simulation ramps ADS
+over `adsSeconds` and adds movement and bloom to spread even when ADS reaches 1.
+That is static client evidence, not proof that the current server uses the same
+code or that arbitrary distant shots can hit.
+
+Version 1.5.7 removes XOX's `1.35 × rangeEnd` target-selection cap and uses
+the selected range up to 600 m. Rage holds ADS input before a target appears and
+waits until its local ADS state reaches 0.995 before firing. Fast fire uses exact
+corrected angles without XOX's added jitter. At long range it also requires
+tighter alignment after a target moves. Trace exports now record target distance,
+weapon ID, local ADS state, movement input, ADS request, prediction, and whether
+correction and Fire were sent. These are local code and test results; no 1.5.7
+server trace verifies distant hits. The server still owns shot reach, spread,
+fire cadence, and hit validation. Visible camera recoil is unchanged.
 
 ### Local display and movement limits
 

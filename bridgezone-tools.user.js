@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.6
+// @version      1.5.7
 // @description  Xray, 360-degree Rage, auto fire, and server-consistent reloads.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.6';
+  const VERSION = '1.5.7';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
@@ -45,6 +45,7 @@
     match: 0,
     frames: [],
     localShots: [],
+    aimDecisions: [],
     serverEvents: [],
     kicks: [],
     connectionStates: [],
@@ -77,6 +78,7 @@
       before: [...frame.before], after: [...frame.after] })),
       localShots: runtime.trace.localShots.map(shot => ({ ...shot,
         eye: [...shot.eye], directions: shot.directions.map(direction => [...direction]) })),
+      aimDecisions: runtime.trace.aimDecisions.map(decision => ({ ...decision })),
       serverEvents: runtime.trace.serverEvents.map(event => ({ ...event })),
       connectionStates: runtime.trace.connectionStates.map(state => ({ ...state })),
       kicks: runtime.trace.kicks.map(kick => ({ ...kick })),
@@ -158,9 +160,8 @@
     const cp = Math.cos(frame.pitch);
     const forward = [-Math.sin(frame.yaw) * cp, Math.sin(frame.pitch), -Math.cos(frame.yaw) * cp];
     const minDot = options.rage ? -1 : Math.cos(options.fov * Math.PI / 180);
-    const weaponRange = client.predictor?.activeStats?.rangeEnd;
-    const maxRange = options.rage && Number.isFinite(weaponRange)
-      ? Math.min(options.range, Math.max(30, weaponRange * 1.35)) : options.range;
+    // The captured kernel uses rangeEnd for damage falloff, not target reach.
+    const maxRange = options.range;
     const approachYaw = runtime.outgoingAim.yaw ?? frame.yaw;
     let best = null;
     let bestScore = Infinity;
@@ -249,6 +250,25 @@
     return { yaw, pitch };
   }
 
+  function recordAimDecision(client, frame, target, shot, correction, buttons) {
+    const weapon = client.predictor?.activeStats;
+    const rangeEnd = weapon?.rangeEnd;
+    const weaponId = weapon?.id;
+    const localAds = client.predictor?.ws?.ads;
+    recordTrace('aimDecisions', {
+      at: performance.now(), match: runtime.trace.match, sequence: frame.s,
+      targetDistance: target ? Math.round(target.distance * 10) / 10 : null,
+      weaponId: typeof weaponId === 'string' && /^[a-z0-9_-]{1,32}$/i.test(weaponId) ? weaponId : null,
+      weaponRangeEnd: Number.isFinite(rangeEnd) ? rangeEnd : null,
+      localAds: Number.isFinite(localAds) ? Math.round(localAds * 1000) / 1000 : null,
+      movingInput: Math.hypot(frame.mx, frame.mz) > 0.1,
+      adsRequested: !!(buttons & 2),
+      localShotPredicted: !!shot,
+      correctionApplied: !!correction,
+      fireSent: !!(buttons & 1)
+    }, 256);
+  }
+
   function jitterAngle(value, amount) {
     // Deterministic-looking noise avoids a perfectly periodic aim signature.
     const phase = performance.now() / 1000 * 2.1 + runtime.stealth.phase + value * 17.3;
@@ -259,10 +279,14 @@
     return Math.atan2(Math.sin(to - from), Math.cos(to - from));
   }
 
+  function aimTolerance(target) {
+    return Math.min(OUTGOING_AIM_TOLERANCE, Math.atan2(0.15, Math.max(1, target.distance)));
+  }
+
   function alignedWithTarget(state, target) {
-    return state.ready && state.targetIndex === target?.index &&
-      Math.abs(normalizedDelta(state.yaw, target.yaw)) <= OUTGOING_AIM_TOLERANCE &&
-      Math.abs(state.pitch - target.pitch) <= OUTGOING_AIM_TOLERANCE;
+    return !!target && state.ready && state.targetIndex === target.index &&
+      Math.abs(normalizedDelta(state.yaw, target.yaw)) <= aimTolerance(target) &&
+      Math.abs(state.pitch - target.pitch) <= aimTolerance(target);
   }
 
   function paceShot() {
@@ -294,7 +318,7 @@
     const target = selectTarget(client, { ...frame, vt: tick });
     if (!target) {
       state.pendingManualUntil = 0;
-      return frame;
+      return options.rage && requestedFire ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
     const ready = alignedWithTarget(state, target);
     if (requestedFire && !options.rage && !ready) state.pendingManualUntil = now + 900;
@@ -331,6 +355,10 @@
   }
 
   function applyStealth(frame, angles) {
+    if (options.rage && options.rapidFire) return {
+      yaw: angles.yaw, pitch: angles.pitch,
+      original: { yaw: frame.yaw, pitch: frame.pitch }
+    };
     // Exact landing is required; jitter is only large enough to break identical outgoing vectors.
     const jitter = 0.00045 + Math.random() * 0.00045;
     const yawDelta = normalizedDelta(frame.yaw, angles.yaw) + jitterAngle(angles.yaw, jitter);
@@ -356,7 +384,6 @@
         ? selectTarget(client, frame, shot?.eye) : null;
       let desired = target || { yaw: frame.yaw, pitch: frame.pitch };
       let correction = null;
-      const wasReady = alignedWithTarget(state, target);
       if (target && (frame.buttons & 1)) {
         const candidate = compensateSpread(shot, target);
         // Do not defer a locally predicted shot just to chase an unreachable spread correction.
@@ -372,13 +399,13 @@
       state.yaw = nextYaw;
       state.pitch = nextPitch;
       state.targetIndex = target?.index ?? null;
-      state.ready = !!target && Math.abs(normalizedDelta(nextYaw, desired.yaw)) <= OUTGOING_AIM_TOLERANCE &&
-        Math.abs(nextPitch - desired.pitch) <= OUTGOING_AIM_TOLERANCE;
+      state.ready = !!target && Math.abs(normalizedDelta(nextYaw, desired.yaw)) <= aimTolerance(target) &&
+        Math.abs(nextPitch - desired.pitch) <= aimTolerance(target);
       if (target) runtime.target = target;
 
       let buttons = frame.buttons;
       if (buttons & 1) {
-        const ready = target ? (state.ready || wasReady) :
+        const ready = target ? state.ready : !options.rage &&
           Math.abs(normalizedDelta(nextYaw, frame.yaw)) <= OUTGOING_AIM_TOLERANCE &&
           Math.abs(nextPitch - frame.pitch) <= OUTGOING_AIM_TOLERANCE;
         if (!ready || (target && paceShot() && stealthSkip())) {
@@ -391,6 +418,7 @@
           state.pendingManualUntil = 0;
         }
       }
+      if (frame.buttons & 1) recordAimDecision(client, frame, target, shot, correction, buttons);
 
       const delta = normalizedDelta(frame.yaw, nextYaw);
       if (buttons === frame.buttons && Math.abs(delta) < 1e-9 && Math.abs(nextPitch - frame.pitch) < 1e-9) return frame;
@@ -415,7 +443,15 @@
       const shot = runtime.predictions.get(frame.s);
       runtime.predictions.delete(frame.s);
       const target = selectTarget(client, frame, shot?.eye);
-      if (!target) return frame;
+      if (!target) {
+        const buttons = options.rage ? frame.buttons & ~1 : frame.buttons;
+        recordAimDecision(client, frame, null, shot, null, buttons);
+        if (buttons !== frame.buttons) {
+          modified = true;
+          return { ...frame, buttons };
+        }
+        return frame;
+      }
       if (options.stealth && stealthSkip()) {
         // A deferred shot must not become an unassisted shot on the wire.
         modified = true;
@@ -433,6 +469,7 @@
       runtime.target = target;
       runtime.rewrites++;
       recordStealthShot(angles.original, angles);
+      recordAimDecision(client, frame, target, shot, correction, frame.buttons);
       // Prediction retains frame references. Clone only the outgoing frame and preserve world movement.
       return {
         ...frame, yaw: angles.yaw, pitch: angles.pitch,
@@ -473,16 +510,18 @@
     const weapon = predictor?.activeStats;
     const slot = predictor?.slots?.[predictor.active];
     if (!weapon || !slot || !predictor.ws) return frame;
+    const scopedButtons = (frame.buttons & ~(1 | 16)) | 2;
     const tick = typeof client.renderTick === 'function' ? Math.round(client.renderTick()) : undefined;
     if (!selectTarget(client, { ...frame, vt: tick })) {
-      // Rage owns Fire while enabled; suppress blind shots at cover or missing targets.
-      return { ...frame, buttons: frame.buttons & ~1 };
+      // Stay scoped before a target appears so the first shot is not a hip shot.
+      return { ...frame, buttons: scopedButtons };
     }
     const ws = predictor.ws;
-    let buttons = (frame.buttons & ~(1 | 16)) | 2;
+    let buttons = scopedButtons;
     if (slot.mag <= 0) {
       if (predictor.ammo?.[weapon.ammo] > 0) buttons |= 32;
-    } else if (weapon.fireMode === 'auto' || (!ws.trigger && ws.cooldown <= 1 / 30 + 1e-9)) buttons |= 1;
+    } else if ((!Number.isFinite(ws.ads) || ws.ads >= 0.995) &&
+        (weapon.fireMode === 'auto' || (!ws.trigger && ws.cooldown <= 1 / 30 + 1e-9))) buttons |= 1;
     return { ...frame, buttons };
   }
 
@@ -883,9 +922,11 @@
     else if (performance.now() - runtime.renderedAt > 2500) status.textContent = 'Client captured / rendering paused';
     else status.textContent = 'Active / ' + (client.remoteFrames || []).filter(({ snap }) => enemy(client, snap)).length + ' opponents tracked';
     const targetName = runtime.target ? (client?.names?.get(runtime.target.index) || 'Player ' + (runtime.target.index + 1)) : '--';
+    const targetRange = runtime.target && Number.isFinite(runtime.target.distance)
+      ? ' @ ' + Math.round(runtime.target.distance) + ' m' : '';
     const metrics = 'AIM ' + runtime.rewrites + ' redirected / ' + runtime.stealth.heldShots + ' fire frames held / SERVER ' + runtime.server.hits + ' hits, ' + runtime.server.shots + ' shots';
     root.querySelector('[data-live-metrics]').textContent = metrics;
-    stats.textContent = 'TARGET ' + targetName + ' / ' + runtime.compensated + ' shot corrections / ' + metrics;
+    stats.textContent = 'TARGET ' + targetName + targetRange + ' / ' + runtime.compensated + ' shot corrections / ' + metrics;
   }
 
   function mount() {
@@ -927,7 +968,7 @@
         <label class="feature">Anticheat stealth<input name="stealth" aria-label="Anticheat stealth" type="checkbox"></label>
         <label class="feature">Auto reload<input name="ammo" aria-label="Auto reload" type="checkbox"></label>
         <div class="setting"><label for="smooth">Aim smoothing<output data-value="smooth"></output></label><input id="smooth" name="smooth" aria-label="Aim smoothing" type="range" min="0.1" max="0.95" step="0.05"></div>
-        <p class="note">Insert: show/hide. Rage picks a visible target within useful weapon range, aims down sights and fires on the ground. Fast fire removes the local stealth delay, but still follows weapon cooldown and server ammo. Shot correction reduces predicted deviation; camera recoil and pellet spread may remain. Cover still blocks shots. Fire may wait while aim turns; the held count is input frames, not bullets. Use server hits to judge results.</p>
+        <p class="note">Insert: show/hide. Rage holds scope input between targets, waits for the local scope ramp, and selects clear targets up to the range slider. Fast fire removes the local stealth delay and extra aim jitter, but follows weapon cooldown and server ammo. Shot correction reduces predicted deviation; server spread and camera recoil may remain. Cover still blocks shots. Fire may wait while aim turns; the held count is input frames, not bullets. Use server hits to judge results.</p>
       </div><div class="status"><div role="status"></div><div class="stats"></div></div>
     </aside><button type="button" class="show-tools" data-show-panel hidden aria-label="Show tools panel">Show tools</button>`;
     document.documentElement.appendChild(host);

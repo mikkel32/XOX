@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.6.** The portable local suite reports 54 passes and 3
+> **Current version: 1.5.7.** The portable local suite reports 58 passes and 3
 > skips without the optional captured client archive. Live traces include both server anti-cheat
 > removals and short matches without one. They do **not** prove a general bypass.
 
@@ -27,14 +27,14 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Xray | Draws player boxes, names, and distances, including opponents behind cover when they are present in client snapshots. |
 | Loot vision | Marks nearby weapons and unopened crates by rarity. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. |
-| Rage | Selects a clear target across 360 degrees, aims down sights, fires, and requests normal reloads from available reserve ammo. |
-| Fast fire | With Rage enabled, skips XOX's local stealth delay and fires when local aim and weapon state are ready. It does not change server weapon cadence. |
-| Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation or the average direction of multiple pellets. It does not remove visible camera recoil or pellet spread. |
-| Trace export | Saves bounded outgoing frames, local predictions, server events, and connection changes from the panel. |
+| Rage | Holds ADS input between targets, waits for the local scope ramp, selects a clear target across 360 degrees up to the range slider, fires, and requests normal reloads from reserve ammo. Server reach and hit validation still apply. |
+| Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It still follows local aim alignment, weapon cooldown, and server ammunition. |
+| Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation or the average direction of multiple pellets. Server spread and visible camera recoil may remain. |
+| Trace export | Saves bounded outgoing frames, local predictions, target distance, weapon ID, local ADS state, correction decisions, server events, and connection changes. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
-between tabs. In 1.5.6, Xray, loot vision, Silent AIM, and Stealth start enabled;
+between tabs. In 1.5.7, Xray, loot vision, Silent AIM, and Stealth start enabled;
 Rage starts disabled unless saved settings override them. Fast fire is enabled
 for Rage when it is turned on. After an aim-related
 server removal, Aim and Rage are disabled and remain off across the next match.
@@ -84,10 +84,13 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable local suite passed **54 tests with 3 skips** on 2026-10-15. Three
+The portable local suite passed **58 tests with 3 skips** on 2026-10-15. Three
 tests use locally captured client bundles that are intentionally not mirrored
 here. Tests validate local behavior and
 fixtures, not a live server outcome.
+Set `XOX_CLIENT_PHYSICS` to a local copy of the captured
+`3ep-katvfqbjo.js` bundle to run the optional spread inversion check. The test
+requires its SHA-256 to match the recorded [source manifest](research/manifest.json).
 
 ## Observed results
 
@@ -98,7 +101,8 @@ fixtures, not a live server outcome.
 | 1.5.3 | 44 shots, 8 hits, 1 kill | Removed for detected aim assistance; [trace](verification/live-trace-v1.5.3-2026-10-15.json) |
 | 1.5.4 | 19 shots, 13 hits, 2 kills; then 51 shots, 14 hits in a separate match | No kick before bot elimination in either bounded match; [first](verification/live-trace-v1.5.4-2026-10-15.json), [second](verification/live-trace-v1.5.4-active-2026-10-15.json) |
 | 1.5.5 | 1 shot, 1 hit | Short match, no recorded kick; [two exports](verification/live-trace-v1.5.5-2026-10-15.json) from the **same** match |
-| 1.5.6 | No live trace yet | Local tests cover the new build/reload and firing logic; server hit rate and camera recoil remain unverified. |
+| 1.5.6 | 88 shots, 27 hits, 6 kills | User-supplied trace from mixed weapons; no recorded kick. Its raw export is not mirrored here; see [findings](FINDINGS.md). |
+| 1.5.7 | No live trace yet | Local tests cover range selection, continuous ADS input, moving-shot correction, and diagnostic export. Server hit rate, physical weapon range, and camera recoil remain unverified. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.
