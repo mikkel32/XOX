@@ -941,6 +941,22 @@ test('combat agent moves toward the observed safe zone and does not fire while t
   assert.equal(move.buttons & 3, 0);
   assert.equal(h.api.inspect().agent.action, 'storm');
   assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'storm');
+  assert.equal(h.api.trace().agentDecisions.at(-1).distanceMeters, 93.5,
+    'the agent aims just inside the near storm edge rather than the center');
+  h.api.destroy();
+});
+
+test('combat agent can engage at the center of a small storm circle', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 819, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  fake.client.latest.storm = { state: 'waiting', center: [0, 0], radius: 4 };
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'engage',
+    'a small circle does not permanently override combat when already inside');
   h.api.destroy();
 });
 
@@ -1915,6 +1931,67 @@ test('captured pre-ADS spread is corrected through the bounded outgoing path', {
   h.api.destroy();
 });
 
+test('captured long-range Head correction intersects the hitbox while still or moving', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const shotDirections = vm.runInNewContext(
+    ['tl', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') + ';tU',
+    { tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value)) }
+  );
+  const spreadDegrees = vm.runInNewContext(capturedFunction('tG') + ';tG',
+    { e9: { walkSpeed: 5 }, tr: (a, b, amount) => a + (b - a) * amount });
+  for (const [caseIndex, motion] of [{ speed: 0, mx: 0 },
+    { speed: 4, mx: 1 }].entries()) {
+    const weaponStats = { hipSpread: 8, adsSpread: 0.12, moveSpread: 4 };
+    const spread = spreadDegrees({ ads: 1, bloom: 0 }, weaponStats,
+      { vel: [motion.speed, 0, 0], grounded: true, crouch: 0 });
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => frame({ buttons: 0, mx: motion.mx, mz: 0 });
+    fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -599.5] }) }];
+    Object.assign(fake.client.predictor.ps,
+      { grounded: true, vel: [motion.speed, 0, 0] });
+    Object.assign(fake.client.predictor.ws,
+      { ads: 1, bloom: 0, switching: 0 });
+    Object.assign(fake.client.predictor.activeStats, {
+      class: 'sniper', pellets: 1, ...weaponStats, rangeEnd: 600
+    });
+    let seed = 1;
+    fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+      weapon: { fired: !!(input.buttons & 1),
+        dirs: shotDirections({ pellets: 1 }, input.yaw, input.pitch, spread, seed) } });
+    attach(h, fake);
+    h.api.setOptions({ rage: true, agent: false, stealth: true, rapidFire: true,
+      hipFire: false, point: 'head', range: 600 });
+    for (seed = 1; seed <= 64; seed++) {
+      const sequence = 8000 + caseIndex * 1000 + seed * 2;
+      send(fake, [frame({ s: sequence, buttons: 0, mx: motion.mx, mz: 0 })]);
+      const input = { ...fake.client.input.sample('sample-argument'), s: sequence + 1 };
+      assert.equal(input.buttons & 1, 1, `case ${caseIndex}, seed ${seed} requests Fire`);
+      fake.client.predictor.predict(input);
+      const output = send(fake, [input])[0];
+      const ray = shotDirections({ pellets: 1 }, output.yaw, output.pitch,
+        spread, seed)[0];
+      const distance = -599.5 / ray[2];
+      assert.ok(ray[2] < 0 && Math.abs(distance * ray[0]) <= 0.14 &&
+        1.62 + distance * ray[1] >= 1.52 && 1.62 + distance * ray[1] <= 1.8,
+      `case ${caseIndex}, seed ${seed} intersects the 599.5 m head box`);
+    }
+    h.api.destroy();
+  }
+});
+
 test('captured shot seed selects correctable unscoped Longbow shots and scopes wider ones', {
   skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
 }, () => {
@@ -2772,7 +2849,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.23');
+  assert.equal(exported.scriptVersion, '1.5.24');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2804,7 +2881,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.23');
+  assert.equal(payload.scriptVersion, '1.5.24');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

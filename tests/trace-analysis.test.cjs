@@ -199,14 +199,14 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   const localShots = Array.from({ length: 12 }, (_, index) => ({
     at: 1000 + index * 1000, match: 1, sequence: index + 1,
     tick: 100 + index * 30, player: { velocity: [0, 0, 0] },
-    yaw: 0, pitch: 0, eye: [0, 0, 0], directions: [[0, 0, -1]],
+    yaw: 0, pitch: 0, eye: [0, 1.66, 0], directions: [[0, 0, -1]],
     weapon: { id: 'rifle' }
   }));
   const serverEvents = localShots.flatMap((shot, index) => {
     const tick = shot.tick + 9;
     const yaw = 0.1 + (index === 11 ? 0.02 : 0);
     const events = [{ at: shot.at + 210, match: 1, tick, type: 'shot',
-      shot: { weaponId: 'rifle', origin: [0, 0, 0],
+      shot: { weaponId: 'rifle', origin: [0, 1.66, 0],
         directions: [[-Math.sin(yaw), 0, -Math.cos(yaw)]],
         impacts: index === 0 ? [{ point: [0, 0, -5], material: 'concrete' }] : [] } }];
     if (index === 0 || index === 6) events.push({ at: shot.at + 210,
@@ -226,7 +226,10 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
       adsRequested: index >= 6, sampled: { hipFire: index < 6 },
       targetDistance: index < 6 ? 20 : 80, localSpeed: 0,
       target: { visibility: index < 3 ? 'front-partial' : index === 11 ? '__proto__' : 'clear',
-        point: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 0,
+        aimPart: 'head', bodyHeight: 1.8,
+        position: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 0,
+          -Math.cos(0.1) * (index < 6 ? 20 : 80)],
+        point: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 1.66,
         -Math.cos(0.1) * (index < 6 ? 20 : 80)] } }))
   } });
   assert.equal(report.correlatedShots.paired, 12);
@@ -239,6 +242,11 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   assert.deepEqual(report.correlatedShots.byVisibility,
     { 'front-partial': { shots: 3, hits: 1 }, clear: { shots: 8, hits: 1 },
       unknown: { shots: 1, hits: 0 } });
+  assert.deepEqual(report.correlatedShots.reportedHitboxByVisibility, {
+    'front-partial': { pairs: 3, rays: 3, raysIntersecting: 3, pairsWithIntersection: 3 },
+    clear: { pairs: 8, rays: 8, raysIntersecting: 8, pairsWithIntersection: 8 },
+    unknown: { pairs: 1, rays: 1, raysIntersecting: 0, pairsWithIntersection: 0 }
+  });
   assert.equal({}.shots, undefined);
   assert.deepEqual(report.authoritative.acknowledgedShotCount, { aligned: 1, diverged: 1 });
   assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithDirections, 12);
@@ -252,6 +260,7 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   assert.equal(report.correlatedShots.rayEvidence.impactsCloserThanSelectedPoint, 1);
   assert.match(formatReport(report), /Provisional server-shot pairs: 12 paired/);
   assert.match(formatReport(report), /Paired hits by selected-point visibility.*"front-partial":\{"shots":3,"hits":1\}/);
+  assert.match(formatReport(report), /Server-reported rays through sampled hitboxes by visibility/);
   assert.match(formatReport(report), /Server-reported ray comparison/);
 });
 

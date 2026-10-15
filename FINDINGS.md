@@ -483,6 +483,30 @@ a geometrically valid exposed-hitbox case, not a
 method for passing a shot through solid cover. There is no live XOX 1.5.23
 trace or server hit receipt yet.
 
+### Version 1.5.24: storm routing and reported-ray hitbox estimates
+
+The combat agent previously treated every position as urgent when the storm
+radius fell below eight metres, even at its center. It also travelled to the
+center when outside a larger circle. The urgency margin now scales down with
+small circles, and the goal is the nearest point just inside that margin.
+Local tests verify that the agent can keep engaging at the center of a small
+circle and that an outside route stops short of the center.
+
+When a trace contains a provisionally paired server shot with reported ray
+directions, a reported origin, and a retained target position, the analyzer
+checks each ray against the captured head or chest box geometry. It groups
+intersections by selected-point visibility so a future trace can show whether
+near-face choices actually put reported rays through the locally sampled box.
+An independent test calls the hash-matched captured spread and shot-direction
+functions for 64 seeds while still and another 64 while moving at 4 m/s, then
+checks the actual outgoing corrected rays against a head box 599.5 m away. All
+128 simulated rays intersect the box. This isolates the local correction math;
+it does not establish server seed agreement, target rewind, cover, or hits.
+The target may have occupied a different position on the server, and a box
+intersection does not establish a server hit or an unobstructed path. The
+latest user trace predates reported-ray capture, so this measurement still
+needs a new live XOX export.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

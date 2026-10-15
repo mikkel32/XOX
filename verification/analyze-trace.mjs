@@ -198,6 +198,29 @@ function rotatedShotRay(direction, source, destination) {
     right * destination.right[index] + up * destination.up[index]);
 }
 
+function sampledHitboxRayEntry(origin, ray, target) {
+  if (!validVector(origin) || !validVector(ray) || !validVector(target?.position) ||
+      !finite(target.bodyHeight) || target.bodyHeight < 0.5 || target.bodyHeight > 2.5 ||
+      !['head', 'chest'].includes(target.aimPart)) return null;
+  const [x, y, z] = target.position, h = target.bodyHeight;
+  const halfWidth = target.aimPart === 'head' ? 0.14 : 0.25;
+  const min = [x - halfWidth, y + (target.aimPart === 'head' ? h - 0.28 : h / 2), z - halfWidth];
+  const max = [x + halfWidth, y + h - (target.aimPart === 'head' ? 0 : 0.28), z + halfWidth];
+  let near = 0, far = 600;
+  for (let axis = 0; axis < 3; axis++) {
+    if (Math.abs(ray[axis]) < 1e-9) {
+      if (origin[axis] < min[axis] || origin[axis] > max[axis]) return null;
+      continue;
+    }
+    const first = (min[axis] - origin[axis]) / ray[axis];
+    const last = (max[axis] - origin[axis]) / ray[axis];
+    near = Math.max(near, Math.min(first, last));
+    far = Math.min(far, Math.max(first, last));
+    if (near > far) return null;
+  }
+  return far >= 0 ? near : null;
+}
+
 function correlateServerShots(localShots, events, decisions, frames, ackLatencyMs) {
   const serverShots = events.filter(event => event?.type === 'shot' &&
     Number.isSafeInteger(event.match) && Number.isSafeInteger(event.tick) && finite(event.at));
@@ -212,6 +235,7 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
   const byMatch = {};
   const byModeDistanceMovement = {};
   const byVisibility = {};
+  const reportedHitboxByVisibility = {};
   const outgoing = new Map(frames.filter(frame => Number.isSafeInteger(frame?.match) &&
     Number.isSafeInteger(frame?.sequence) && Array.isArray(frame?.after))
     .map(frame => [`${frame.match}:${frame.sequence}`, frame]));
@@ -275,6 +299,27 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
       const directions = list(reported?.directions);
       if (directions.length) {
         rayEvidence.pairedShotsWithDirections++;
+        if (validVector(reported?.origin) && validVector(decision?.target?.position) &&
+            finite(decision.target.bodyHeight) && ['head', 'chest'].includes(decision.target.aimPart)) {
+          let rays = 0, intersections = 0;
+          for (const direction of directions.slice(0, 32)) {
+            const ray = unitVector(direction);
+            if (!ray) continue;
+            rays++;
+            if (sampledHitboxRayEntry(reported.origin, ray, decision.target) !== null)
+              intersections++;
+          }
+          if (rays) {
+            const visibility = visibilityStatus(decision.target.visibility);
+            reportedHitboxByVisibility[visibility] ||= {
+              pairs: 0, rays: 0, raysIntersecting: 0, pairsWithIntersection: 0 };
+            const group = reportedHitboxByVisibility[visibility];
+            group.pairs++;
+            group.rays += rays;
+            group.raysIntersecting += intersections;
+            if (intersections) group.pairsWithIntersection++;
+          }
+        }
         const predicted = list(shot.directions);
         if (predicted.length !== directions.length) rayEvidence.pelletCountDisagreements++;
         const frame = outgoing.get(`${match}:${shot.sequence}`);
@@ -380,7 +425,8 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     }).sort((a, b) => a.weapon.localeCompare(b.weapon) ||
       a.distance.localeCompare(b.distance) || a.localFireMode.localeCompare(b.localFireMode));
   return { method: 'provisional same-match tick and arrival-time alignment',
-    paired, pairedWithDecision, pairedHits, byMatch, byVisibility, rayEvidence,
+    paired, pairedWithDecision, pairedHits, byMatch, byVisibility,
+    reportedHitboxByVisibility, rayEvidence,
     comparableRaysByWeaponDistanceMode,
     byModeDistanceMovement: Object.values(byModeDistanceMovement).sort((a, b) =>
       a.mode.localeCompare(b.mode) || a.distance.localeCompare(b.distance) ||
@@ -754,6 +800,7 @@ export function analyzeTrace(document) {
       'Server events have no guaranteed input sequence, so server hits cannot be assigned to a weapon, target, or distance.',
       'Tick-aligned shot pairs are provisional. A shared tick and plausible arrival delay do not prove which input caused a server hit.',
       'Server-reported shot directions are visual event data from the game. Their difference from a rotated local prediction can diagnose spread-seed or aim-state drift only when provisional pairing is correct.',
+      'Reported-ray intersections use the locally sampled target hitbox; they do not prove the target occupied that box on the server or that cover allowed the shot.',
       'Comparable-ray groups use locally selected distance and recorded local fire-mode flags. ADS requested or hip selected does not establish the server scope state.',
       'Server ray versus outgoing aim is an observed angular difference, not a direct server spread parameter. A small selected-point miss does not prove the target occupied that point on the server.',
       'Server-reported impacts are grouped with the preceding own-player shot by event order. An impact closer than the locally selected target point suggests an obstruction, but neither ordering nor provisional input pairing proves the hit path.',
@@ -816,6 +863,8 @@ export function formatReport(report) {
       `${JSON.stringify(report.correlatedShots.byModeDistanceMovement)}`,
     `Paired hits by selected-point visibility (provisional): ` +
       `${JSON.stringify(report.correlatedShots.byVisibility)}`,
+    `Server-reported rays through sampled hitboxes by visibility (provisional): ` +
+      `${JSON.stringify(report.correlatedShots.reportedHitboxByVisibility)}`,
     `Server-reported ray comparison (provisional pairs): ${JSON.stringify(report.correlatedShots.rayEvidence)}`,
     'Comparable ray angular differences by weapon / selected distance / local fire mode (provisional):',
     ...(report.correlatedShots.comparableRaysByWeaponDistanceMode.length

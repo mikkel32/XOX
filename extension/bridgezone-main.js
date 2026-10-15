@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.23
+// @version      1.5.24
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.23';
+  const VERSION = '1.5.24';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -1489,7 +1489,8 @@
     agent.scan = scan;
     const storm = stormCircle(client.latest?.storm, client.latest?.t);
     const stormDistance = storm ? Math.hypot(me.pos[0] - storm.center[0], me.pos[2] - storm.center[1]) : 0;
-    const stormUrgent = storm && stormDistance > storm.radius - 8;
+    const stormMargin = storm ? Math.min(8, Math.max(0, storm.radius) * 0.25) : 0;
+    const stormUrgent = storm && stormDistance > Math.max(0, storm.radius - stormMargin);
     const otherSlot = client.predictor?.slots?.[1 - (client.predictor?.active ?? 0)];
     const alternateSlotReady = weapon?.class === 'pistol' && otherSlot?.weapon &&
       otherSlot.weapon !== slot?.weapon;
@@ -1508,7 +1509,12 @@
       ? agentWeaponLoot(client, me, slot) : null;
     let goal = null, action = 'engage', stopAt = 0, sprint = false;
     if (stormUrgent) {
-      goal = { kind: 'storm', position: [storm.center[0], storm.center[1]] };
+      const safeRadius = Math.max(0, storm.radius - stormMargin - 1);
+      const fraction = safeRadius / stormDistance;
+      goal = { kind: 'storm', position: [
+        storm.center[0] + (me.pos[0] - storm.center[0]) * fraction,
+        storm.center[1] + (me.pos[2] - storm.center[1]) * fraction
+      ] };
       action = 'storm'; sprint = true;
     } else if (weaponItem) {
       goal = { kind: 'weapon', id: weaponItem.id,
