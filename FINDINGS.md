@@ -95,6 +95,14 @@ ended too early to measure sustained accuracy or anti-cheat acceptance: the
 server confirmed one shot and one hit. Local tests cover its input and prediction
 paths, but no broader live conclusion follows from the short trace.
 
+Version 1.5.6 adds automatic local build/reload while a Zone tab is open,
+removes XOX's extra stealth delay when Fast fire and Rage are enabled, checks
+alignment against a moving target before predicting a shot, and corrects the
+average direction of multiple predicted pellets. These are local code and test
+results. There is no 1.5.6 server trace, so its hit rate and rejection risk are
+unmeasured. It neither changes the server's fire cadence nor removes visible
+camera recoil. A perfect hit rate cannot be inferred from local prediction.
+
 ### Local display and movement limits
 
 The client predicts a shot locally before an outgoing input frame may be

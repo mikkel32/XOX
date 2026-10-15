@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.5
+// @version      1.5.6
 // @description  Xray, 360-degree Rage, auto fire, and server-consistent reloads.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,11 +15,11 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.5';
+  const VERSION = '1.5.6';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
-  const defaults = { xray: true, loot: true, silent: true, rage: false, fov: 90, range: 600, point: 'auto', visibleOnly: true, stealth: true, smooth: 1, ammo: true };
+  const defaults = { xray: true, loot: true, silent: true, rage: false, rapidFire: true, fov: 90, range: 600, point: 'auto', visibleOnly: true, stealth: true, smooth: 1, ammo: true };
   const options = { ...defaults };
   const runtime = {
     client: null, physics: {}, hookReady: false, stopped: false, aimRejected: false,
@@ -104,7 +104,7 @@
   function setOptions(patch, persist = true) {
     if (!patch || typeof patch !== 'object') return;
     const wasStealth = options.stealth;
-    for (const name of ['xray', 'loot', 'silent', 'rage', 'visibleOnly', 'stealth', 'ammo']) {
+    for (const name of ['xray', 'loot', 'silent', 'rage', 'rapidFire', 'visibleOnly', 'stealth', 'ammo']) {
       if (typeof patch[name] === 'boolean') options[name] = patch[name];
     }
     if (Number.isFinite(patch.fov)) options.fov = Math.max(1, Math.min(90, patch.fov));
@@ -225,8 +225,13 @@
   }
 
   function compensateSpread(shot, target) {
-    if (!shot || shot.directions.length !== 1) return null;
-    const y = shot.yaw, p = shot.pitch, d = shot.directions[0];
+    if (!Array.isArray(shot?.directions) || !shot.directions.length ||
+        !shot.directions.every(direction => Array.isArray(direction) &&
+          direction.length === 3 && direction.every(Number.isFinite))) return null;
+    // A single projectile can be corrected directly. For multiple pellets,
+    // align their average direction; their individual spread still remains.
+    const d = shot.directions.reduce((sum, direction) => sum.map((value, i) => value + direction[i]), [0, 0, 0]);
+    const y = shot.yaw, p = shot.pitch;
     const forward = [-Math.sin(y) * Math.cos(p), Math.sin(p), -Math.cos(y) * Math.cos(p)];
     const right = [Math.cos(y), 0, -Math.sin(y)];
     const up = [Math.sin(y) * Math.sin(p), Math.cos(p), Math.cos(y) * Math.sin(p)];
@@ -252,6 +257,16 @@
 
   function normalizedDelta(from, to) {
     return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  }
+
+  function alignedWithTarget(state, target) {
+    return state.ready && state.targetIndex === target?.index &&
+      Math.abs(normalizedDelta(state.yaw, target.yaw)) <= OUTGOING_AIM_TOLERANCE &&
+      Math.abs(state.pitch - target.pitch) <= OUTGOING_AIM_TOLERANCE;
+  }
+
+  function paceShot() {
+    return !(options.rage && options.rapidFire);
   }
 
   function stealthSkip() {
@@ -281,10 +296,10 @@
       state.pendingManualUntil = 0;
       return frame;
     }
-    const ready = state.ready && state.targetIndex === target.index;
+    const ready = alignedWithTarget(state, target);
     if (requestedFire && !options.rage && !ready) state.pendingManualUntil = now + 900;
     if (!requestedFire && !state.pendingManualUntil) return frame;
-    if (!ready || stealthSkip()) {
+    if (!ready || (paceShot() && stealthSkip())) {
       if (requestedFire && !options.rage) state.pendingManualUntil = now + 900;
       if (!requestedFire) return frame;
       runtime.stealth.heldShots++;
@@ -341,7 +356,7 @@
         ? selectTarget(client, frame, shot?.eye) : null;
       let desired = target || { yaw: frame.yaw, pitch: frame.pitch };
       let correction = null;
-      const wasReady = state.ready && state.targetIndex === target?.index;
+      const wasReady = alignedWithTarget(state, target);
       if (target && (frame.buttons & 1)) {
         const candidate = compensateSpread(shot, target);
         // Do not defer a locally predicted shot just to chase an unreachable spread correction.
@@ -366,7 +381,7 @@
         const ready = target ? (state.ready || wasReady) :
           Math.abs(normalizedDelta(nextYaw, frame.yaw)) <= OUTGOING_AIM_TOLERANCE &&
           Math.abs(nextPitch - frame.pitch) <= OUTGOING_AIM_TOLERANCE;
-        if (!ready || (target && stealthSkip())) {
+        if (!ready || (target && paceShot() && stealthSkip())) {
           buttons &= ~1;
           runtime.stealth.heldShots++;
         } else if (target) {
@@ -870,7 +885,7 @@
     const targetName = runtime.target ? (client?.names?.get(runtime.target.index) || 'Player ' + (runtime.target.index + 1)) : '--';
     const metrics = 'AIM ' + runtime.rewrites + ' redirected / ' + runtime.stealth.heldShots + ' fire frames held / SERVER ' + runtime.server.hits + ' hits, ' + runtime.server.shots + ' shots';
     root.querySelector('[data-live-metrics]').textContent = metrics;
-    stats.textContent = 'TARGET ' + targetName + ' / ' + runtime.compensated + ' spread corrections / ' + metrics;
+    stats.textContent = 'TARGET ' + targetName + ' / ' + runtime.compensated + ' shot corrections / ' + metrics;
   }
 
   function mount() {
@@ -904,6 +919,7 @@
         <label class="feature">Loot + crate vision<input aria-label="Loot vision" name="loot" type="checkbox"></label>
         <label class="feature">Silent AIM <span class="key">F9</span><input aria-label="Silent AIM" name="silent" type="checkbox"></label>
         <label class="feature">Rage / 360 + auto fire<input aria-label="Rage mode" name="rage" type="checkbox"></label>
+        <label class="feature">Fast fire when ready<input aria-label="Fast fire" name="rapidFire" type="checkbox"></label>
         <div class="setting"><label for="fov">Normal aim cone (half-angle)<output data-value="fov"></output></label><input id="fov" name="fov" aria-label="Aim cone" type="range" min="1" max="90" step="1"></div>
         <div class="setting"><label for="range">Maximum range<output data-value="range"></output></label><input id="range" name="range" aria-label="Maximum range" type="range" min="10" max="600" step="10"></div>
         <label>Target point<select name="point" aria-label="Target point"><option value="auto">Auto / clear point</option><option value="head">Head</option><option value="chest">Chest</option></select></label>
@@ -911,7 +927,7 @@
         <label class="feature">Anticheat stealth<input name="stealth" aria-label="Anticheat stealth" type="checkbox"></label>
         <label class="feature">Auto reload<input name="ammo" aria-label="Auto reload" type="checkbox"></label>
         <div class="setting"><label for="smooth">Aim smoothing<output data-value="smooth"></output></label><input id="smooth" name="smooth" aria-label="Aim smoothing" type="range" min="0.1" max="0.95" step="0.05"></div>
-        <p class="note">Insert: show/hide. Rage picks a visible target within useful weapon range, aims down sights and fires on the ground. Auto reload uses available server ammo. Cover still blocks shots. Fire may wait while aim turns; the held count is input frames, not bullets. Local tracers can follow your view; use server hits to judge results.</p>
+        <p class="note">Insert: show/hide. Rage picks a visible target within useful weapon range, aims down sights and fires on the ground. Fast fire removes the local stealth delay, but still follows weapon cooldown and server ammo. Shot correction reduces predicted deviation; camera recoil and pellet spread may remain. Cover still blocks shots. Fire may wait while aim turns; the held count is input frames, not bullets. Use server hits to judge results.</p>
       </div><div class="status"><div role="status"></div><div class="stats"></div></div>
     </aside><button type="button" class="show-tools" data-show-panel hidden aria-label="Show tools panel">Show tools</button>`;
     document.documentElement.appendChild(host);

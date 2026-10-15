@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.5.** The portable local suite reports 48 passes and 3
+> **Current version: 1.5.6.** The portable local suite reports 54 passes and 3
 > skips without the optional captured client archive. Live traces include both server anti-cheat
 > removals and short matches without one. They do **not** prove a general bypass.
 
@@ -28,12 +28,15 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Loot vision | Marks nearby weapons and unopened crates by rarity. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. |
 | Rage | Selects a clear target across 360 degrees, aims down sights, fires, and requests normal reloads from available reserve ammo. |
+| Fast fire | With Rage enabled, skips XOX's local stealth delay and fires when local aim and weapon state are ready. It does not change server weapon cadence. |
+| Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation or the average direction of multiple pellets. It does not remove visible camera recoil or pellet spread. |
 | Trace export | Saves bounded outgoing frames, local predictions, server events, and connection changes from the panel. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
-between tabs. In 1.5.5, Xray, loot vision, Silent AIM, and Stealth start enabled;
-Rage starts disabled unless saved settings override them. After an aim-related
+between tabs. In 1.5.6, Xray, loot vision, Silent AIM, and Stealth start enabled;
+Rage starts disabled unless saved settings override them. Fast fire is enabled
+for Rage when it is turned on. After an aim-related
 server removal, Aim and Rage are disabled and remain off across the next match.
 
 ## Install
@@ -46,10 +49,13 @@ server removal, Aim and Rage are disabled and remain off across the next match.
 3. Refresh the Zone page. Keep the Tampermonkey variant disabled on that page so
    the two copies do not compete.
 
-After editing the source, build the extension and open its toolbar popup to click
-**Reload extension**, then refresh Zone. The popup cannot write files in the
-repository; run the build command locally first. Edge also supports **Reload**
-on the extension card as a [local update flow](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading).
+For automatic development updates, run `node extension/build-extension.mjs --watch`
+in the repository folder. It builds on changes and serves a loopback-only status
+endpoint. An open Zone tab checks that endpoint through the extension, reloads
+the extension after a successful build, and then refreshes the tab. Keep the
+builder running while editing. The popup shows whether it is connected and has
+a manual **Reload now** fallback. Edge also supports **Reload** on the extension
+card as a [local update flow](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading). If the builder is stopped, refresh Zone after a manual reload.
 
 ### Tampermonkey
 
@@ -66,16 +72,19 @@ node extension/build-extension.mjs --check
 node --check bridgezone-tools.user.js
 node --check extension/loader.js
 node --check extension/bridgezone-main.js
+node --check extension/dev-background.js
+node --check extension/dev-reload.js
 node --test tests/*.test.cjs
 ```
 
 `extension/build-extension.cmd` is a Windows wrapper and
 `extension/build-extension.sh` is a shell wrapper. Both accept `--check` or
-`--watch`. Watch mode rebuilds after source edits; use the popup's reload button
-and refresh Zone to load each new build.
+`--watch`. The builder binds only to `127.0.0.1:43187`; it does not expose a
+remote build endpoint. The extension's localhost permission is used only to
+read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable local suite passed **48 tests with 3 skips** on 2026-10-15. Three
+The portable local suite passed **54 tests with 3 skips** on 2026-10-15. Three
 tests use locally captured client bundles that are intentionally not mirrored
 here. Tests validate local behavior and
 fixtures, not a live server outcome.
@@ -89,6 +98,7 @@ fixtures, not a live server outcome.
 | 1.5.3 | 44 shots, 8 hits, 1 kill | Removed for detected aim assistance; [trace](verification/live-trace-v1.5.3-2026-10-15.json) |
 | 1.5.4 | 19 shots, 13 hits, 2 kills; then 51 shots, 14 hits in a separate match | No kick before bot elimination in either bounded match; [first](verification/live-trace-v1.5.4-2026-10-15.json), [second](verification/live-trace-v1.5.4-active-2026-10-15.json) |
 | 1.5.5 | 1 shot, 1 hit | Short match, no recorded kick; [two exports](verification/live-trace-v1.5.5-2026-10-15.json) from the **same** match |
+| 1.5.6 | No live trace yet | Local tests cover the new build/reload and firing logic; server hit rate and camera recoil remain unverified. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

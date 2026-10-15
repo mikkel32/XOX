@@ -9,7 +9,8 @@ section{display:grid;grid-template-columns:24px 1fr;gap:13px;border-top:1px soli
 .step{font:11px/1.6 ui-monospace,monospace;color:#777}
 h2{font-size:14px;letter-spacing:-.02em;margin:0 0 5px}
 section p{color:#666;margin:0 0 12px}
-code{display:block;padding:10px;border:1px solid #e5e5e5;background:#f8f8f8;font:11px/1.5 ui-monospace,monospace;white-space:nowrap}
+code{display:block;padding:10px;border:1px solid #e5e5e5;background:#f8f8f8;font:10px/1.5 ui-monospace,monospace;white-space:nowrap}
+.connection{font-size:11px;margin:10px 0 0;color:#555}
 button{width:100%;border:1px solid #00a884;background:#00a884;color:#fff;border-radius:5px;padding:10px 12px;text-align:left;font:600 13px system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;display:flex;justify-content:space-between;align-items:center}
 button:hover{background:#008d70;border-color:#008d70}
 button:focus-visible{outline:2px solid #111;outline-offset:3px}

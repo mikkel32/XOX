@@ -1,12 +1,18 @@
 {
   "manifest_version": 3,
   "name": "BridgeZone Tools",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "Xray, Silent AIM, Rage, and anticheat stealth for BridgeZone.",
   "action": {
     "default_title": "BridgeZone Tools",
     "default_popup": "popup.html"
   },
+  "background": {
+    "service_worker": "dev-background.js"
+  },
+  "host_permissions": [
+    "http://127.0.0.1:43187/*"
+  ],
   "content_scripts": [
     {
       "matches": [
@@ -20,6 +26,19 @@
       "run_at": "document_start",
       "all_frames": false,
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.bridgegame.ai/*",
+        "https://bridgegame.ai/*"
+      ],
+      "js": [
+        "dev-revision.js",
+        "dev-reload.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false,
+      "world": "ISOLATED"
     }
   ],
   "web_accessible_resources": [

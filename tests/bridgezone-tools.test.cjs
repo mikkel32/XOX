@@ -553,7 +553,7 @@ function rageClient(patch = {}) {
 test('stealth holds Rage and manual Fire before prediction when a target is present', () => {
   const h = harness();
   const fake = attach(h, rageClient());
-  h.api.setOptions({ rage: true, stealth: true });
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: false });
   h.api.runtime.stealth.cooldown = 2000;
   const held = fake.client.input.sample('sample-argument');
   assert.equal(held.buttons & 1, 0);
@@ -584,6 +584,68 @@ test('stealth holds Rage and manual Fire before prediction when a target is pres
   assert.equal(manualFake.client.input.sample().buttons & 1, 0);
   assert.equal(manual.buttons & 1, 1);
   manualHarness.api.destroy();
+});
+
+test('fast fire skips local pacing but still waits for aim and real ammunition', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  h.api.runtime.stealth.cooldown = 1e9;
+  let fired = false;
+  for (let sequence = 800; sequence < 810; sequence++) {
+    const sampled = fake.client.input.sample('sample-argument');
+    const output = send(fake, [frame({ ...sampled, s: sequence })])[0];
+    if (output.buttons & 1) { fired = true; break; }
+  }
+  assert.equal(fired, true, 'local cooldown does not throttle ready Rage shots');
+  fake.client.predictor.slots[0].mag = 0;
+  fake.client.predictor.ammo.light = 0;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0);
+  h.api.destroy();
+});
+
+test('outgoing aim remains aligned when the sampled camera kicks', () => {
+  const h = harness();
+  const fake = rageClient();
+  let cameraYaw = 0, cameraPitch = 0, sequence = 820;
+  fake.client.input.sample = () => frame({
+    s: sequence++, buttons: 0, yaw: cameraYaw, pitch: cameraPitch
+  });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  let aimed;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const sampled = fake.client.input.sample();
+    aimed = send(fake, [sampled])[0];
+    if (aimed.buttons & 1) break;
+  }
+  assert.equal(aimed.buttons & 1, 1);
+  cameraYaw = 0.12;
+  cameraPitch = 0.08;
+  const kicked = fake.client.input.sample();
+  const corrected = send(fake, [kicked])[0];
+  assert.equal(corrected.buttons & 1, 1);
+  close(corrected.yaw, aimed.yaw, 0.001);
+  close(corrected.pitch, aimed.pitch, 0.001);
+  close(kicked.yaw, cameraYaw);
+  close(kicked.pitch, cameraPitch);
+  h.api.destroy();
+});
+
+test('a moving target invalidates ready aim before prediction fires again', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  for (let sequence = 900; sequence < 910; sequence++) {
+    const sampled = fake.client.input.sample('sample-argument');
+    send(fake, [frame({ ...sampled, s: sequence })]);
+    if (h.api.runtime.outgoingAim.ready) break;
+  }
+  assert.equal(h.api.runtime.outgoingAim.ready, true);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [-10, 0, -2] }) }];
+  const changed = fake.client.input.sample('sample-argument');
+  assert.equal(changed.buttons & 1, 0, 'stale ready state cannot fire at the old position');
+  h.api.destroy();
 });
 
 test('aim hook errors hold Fire instead of sending an unassisted shot', () => {
@@ -831,7 +893,7 @@ test('captured single-projectile spread is inverted against the actual game func
   assert.equal(fake.client.input.sample, fake.originalSample);
 });
 
-test('multiple projectile predictions retain center aim and do not count exact compensation', () => {
+test('multiple projectile predictions correct their average direction', () => {
   const h = harness();
   const fake = rageClient();
   fake.client.predictor.predict = () => ({
@@ -841,8 +903,9 @@ test('multiple projectile predictions retain center aim and do not count exact c
   const input = frame();
   fake.client.predictor.predict(input);
   const output = send(fake, [input])[0];
-  close(output.yaw, Math.atan2(-2, 10));
-  assert.equal(h.api.runtime.compensated, 0);
+  assert.ok(output.yaw > Math.atan2(-2, 10), 'outgoing yaw offsets the pellet centroid');
+  assert.ok(output.yaw < 0, 'the correction remains toward the target');
+  assert.equal(h.api.runtime.compensated, 1);
 });
 
 const runtimePath = path.join(__dirname, '..', 'research', 'turbopack-37jd2rjmtu1y9.js');
@@ -1322,7 +1385,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 1);
-  assert.equal(exported.scriptVersion, '1.5.5');
+  assert.equal(exported.scriptVersion, '1.5.6');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -1349,7 +1412,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.5');
+  assert.equal(payload.scriptVersion, '1.5.6');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

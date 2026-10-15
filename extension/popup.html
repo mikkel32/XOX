@@ -11,24 +11,25 @@
   <main>
     <div class="eyebrow">BRIDGEZONE / DEVELOPMENT</div>
     <h1>Extension tools</h1>
-    <p class="intro">Build the local files, then reload this extension to use them.</p>
+    <p class="intro">Build and reload automatically while you edit.</p>
     <section aria-labelledby="build-title">
       <span class="step">01</span>
       <div>
-        <h2 id="build-title">Build locally</h2>
-        <p>Run this in the repository folder:</p>
-        <code>node extension/build-extension.mjs</code>
+        <h2 id="build-title">Start auto updates</h2>
+        <p>Run once in the repository folder:</p>
+        <code>node extension/build-extension.mjs --watch</code>
+        <p class="connection" id="connection" role="status">Checking local builder…</p>
       </div>
     </section>
     <section aria-labelledby="reload-title">
       <span class="step">02</span>
       <div>
-        <h2 id="reload-title">Reload extension</h2>
-        <p>Load the latest files from the extension folder.</p>
-        <button id="reload" type="button">Reload extension <span aria-hidden="true">↗</span></button>
+        <h2 id="reload-title">Manual reload</h2>
+        <p>Use this if the local builder is stopped, then refresh Zone.</p>
+        <button id="reload" type="button">Reload now <span aria-hidden="true">↗</span></button>
       </div>
     </section>
-    <p class="footnote">Refresh the Zone tab after reloading. Version <span id="version"></span></p>
+    <p class="footnote">Open Zone tabs refresh automatically while the builder runs. Version <span id="version"></span></p>
   </main>
 </body>
 </html>
