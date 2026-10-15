@@ -45,7 +45,7 @@
   runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
     lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0, nextSwapAt: 0,
     navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
-    nextRecoveryAt: 0,
+    nextRecoveryAt: 0, lastRecoverySignature: null,
     dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
     dropTerrainChecked: false,
     lastDropPulseAt: -Infinity };
@@ -249,6 +249,7 @@
     runtime.agent.detourUntil = 0;
     runtime.agent.nextSwapAt = 0;
     runtime.agent.nextRecoveryAt = 0;
+    runtime.agent.lastRecoverySignature = null;
     runtime.agent.dropRouteKey = null;
     runtime.agent.dropTarget = null;
     runtime.agent.dropFraction = null;
@@ -1698,12 +1699,15 @@
     const recoveryNow = performance.now();
     if (safeToRecover && recoveryNow >= agent.nextRecoveryAt && predictor &&
         [predictor.health, predictor.armor, predictor.plates, predictor.medkits].every(Number.isFinite)) {
+      const recoverySignature = [predictor.health, predictor.armor,
+        predictor.plates, predictor.medkits].join(':');
       const heal = predictor.health <= 60 && predictor.medkits > 0;
       const plate = !heal && predictor.armor <= 100 && predictor.plates > 0;
-      if (heal || plate) {
+      if ((heal || plate) && recoverySignature !== agent.lastRecoverySignature) {
         // The captured client starts a timed channel on these ordinary input
         // bits. Wait for the predictor to acknowledge it before another pulse.
         agent.nextRecoveryAt = recoveryNow + (heal ? 4300 : 1400);
+        agent.lastRecoverySignature = recoverySignature;
         agentNote(heal ? 'heal' : 'plate', { kind: heal ? 'health' : 'armor' }, null,
           { source: 'normal-input', health: predictor.health, armor: predictor.armor,
             plates: predictor.plates, medkits: predictor.medkits });
@@ -2074,7 +2078,7 @@
     runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
       lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0, nextSwapAt: 0,
       navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
-      nextRecoveryAt: 0,
+      nextRecoveryAt: 0, lastRecoverySignature: null,
       dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
       dropTerrainChecked: false,
       lastDropPulseAt: -Infinity };

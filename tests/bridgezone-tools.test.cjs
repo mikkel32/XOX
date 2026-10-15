@@ -1141,6 +1141,9 @@ test('combat agent uses observed recovery supplies only while safe and preserves
     { source: 'normal-input', health: 45, armor: 50, plates: 2, medkits: 1 });
   assert.equal(fake.client.input.sample().buttons & 512, 0,
     'the agent does not hold Heal while waiting for prediction');
+  h.api.runtime.agent.nextRecoveryAt = 0;
+  assert.equal(fake.client.input.sample().buttons & 512, 0,
+    'a failed or unobserved Heal request is not retried without a state change');
 
   fake.client.predictor.healing = 3.5;
   assert.equal(fake.client.input.sample().buttons & (1 | 256 | 512), 0,
@@ -1158,6 +1161,8 @@ test('combat agent uses observed recovery supplies only while safe and preserves
   assert.equal(fake.client.input.sample().buttons & (1 | 256 | 512), 0);
   fake.client.predictor.plating = 0;
   h.api.runtime.agent.nextRecoveryAt = 0;
+  assert.equal(fake.client.input.sample().buttons & 256, 0,
+    'a Plate request is not repeated before armor or plate stock changes');
   fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20] }) }];
   assert.equal(fake.client.input.sample().buttons & (256 | 512), 0,
     'a nearby opponent preempts automatic recovery');

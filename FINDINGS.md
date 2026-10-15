@@ -631,7 +631,8 @@ The predictor exposes health, armor, carried plates and medkits, and timed
 plating and healing channels. The default combat agent now pulses those normal
 inputs when grounded, supplies are predicted available, no opponent is nearby,
 and the storm move is not urgent. It pauses during a predicted recovery
-channel and yields to manual input. The trace records both predicted and
+channel, waits for a health, armor, or stock change before another request,
+and yields to manual input. The trace records both predicted and
 server-reported recovery state; the analyzer counts agent requests separately
 from observed server health, armor, stock, and channel transitions. Health
 can also regenerate, so an increase is not attributed to a particular Heal
