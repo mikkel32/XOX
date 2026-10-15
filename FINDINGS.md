@@ -639,6 +639,28 @@ can also regenerate, so an increase is not attributed to a particular Heal
 request. Local tests cover outgoing inputs and priorities, but no live XOX
 1.5.29 match trace exists yet.
 
+### Version 1.5.30: correction origin and ACK diagnostics
+
+When a predicted Rage shot retained its sampled target across a snapshot
+change, the outgoing correction previously kept the target geometry relative
+to the eye position at input sampling. The local predicted shot can start from
+a different eye position. The correction now recomputes target direction,
+distance, yaw, and pitch from that shot eye in both outgoing modes. A focused
+test moves the eye 0.3 m and checks that the outgoing ray still intersects the
+captured head box. This is a local geometry check, not a server-confirmed hit.
+
+Repeated snapshots can carry the same acknowledged input sequence without
+repeating both aim-angle measurements. The analyzer now keeps the latest
+finite yaw and pitch difference separately, instead of replacing an earlier
+measurement with a missing field. A regression test checks the report values.
+
+All 143 local tests pass with the hash-matched captured public physics and
+runtime bundles. A private match was started in the Codex in-app browser, but
+that browser did not have XOX loaded or capture pointer lock. The game
+auto-ejected the player, who was later eliminated by the storm. The match
+does not measure XOX aim, movement, shots, or server spread. A live XOX trace
+is still needed.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

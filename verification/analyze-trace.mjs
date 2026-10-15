@@ -139,7 +139,14 @@ function summarizeAcknowledgedAim(snapshots) {
   for (const snapshot of snapshots) {
     const frame = snapshot?.acknowledgedFrame;
     if (!Number.isSafeInteger(snapshot?.match) || !Number.isSafeInteger(frame?.sequence)) continue;
-    byFrame.set(`${snapshot.match}:${frame.sequence}`, frame);
+    const key = `${snapshot.match}:${frame.sequence}`;
+    const previous = byFrame.get(key);
+    byFrame.set(key, {
+      serverYawDifferenceDegrees: finite(frame.serverYawDifferenceDegrees)
+        ? frame.serverYawDifferenceDegrees : previous?.serverYawDifferenceDegrees,
+      serverPitchDifferenceDegrees: finite(frame.serverPitchDifferenceDegrees)
+        ? frame.serverPitchDifferenceDegrees : previous?.serverPitchDifferenceDegrees
+    });
   }
   const yaw = [], pitch = [];
   for (const frame of byFrame.values()) {

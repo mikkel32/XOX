@@ -1541,6 +1541,39 @@ test('a predicted Rage shot keeps Fire and the sampled target when snapshots cha
   }
 });
 
+test('a retained sampled target uses the predicted shot eye for outgoing correction', () => {
+  for (const stealth of [true, false]) {
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => Object.freeze(frame({ s: undefined, vt: undefined,
+      buttons: 16, mx: 0, mz: 0 }));
+    fake.client.predictor.predict = input => ({ eye: [0.3, 1.62, 0],
+      weapon: { fired: !!(input.buttons & 1), dirs: [[0, 0, -1]] } });
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth, rapidFire: true, point: 'head' });
+    if (stealth) for (let sequence = 1200; sequence < 1204; sequence++)
+      send(fake, [frame({ s: sequence, buttons: 0, mx: 0, mz: 0 })]);
+    const sampled = fake.client.input.sample();
+    assert.equal(sampled.buttons & 1, 1);
+    const predicted = frame({ ...sampled, s: 1212, vt: 100 });
+    fake.client.predictor.predict(predicted);
+    fake.client.remoteFrames = [];
+    const outgoing = send(fake, [predicted])[0];
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(outgoing.buttons & 1, 1);
+    close(decision.sampled.target.origin[0], 0);
+    close(decision.target.origin[0], 0.3);
+    close(decision.target.distance, Math.hypot(1.7, 0.04, 10));
+    const ray = [-Math.sin(outgoing.yaw) * Math.cos(outgoing.pitch),
+      Math.sin(outgoing.pitch), -Math.cos(outgoing.yaw) * Math.cos(outgoing.pitch)];
+    const travel = -10 / ray[2];
+    const impact = [0.3 + travel * ray[0], 1.62 + travel * ray[1]];
+    assert.ok(Math.abs(impact[0] - 2) < 0.14 && Math.abs(impact[1] - 1.66) < 0.14,
+      `${stealth ? 'bounded' : 'direct'} correction must land in the captured head box`);
+    h.api.destroy();
+  }
+});
+
 test('trace measures target movement between sampling and outgoing aim', () => {
   const h = harness();
   const fake = attach(h, rageClient());
@@ -3236,7 +3269,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.29');
+  assert.equal(exported.scriptVersion, '1.5.30');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -3269,7 +3302,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.29');
+  assert.equal(payload.scriptVersion, '1.5.30');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -3315,7 +3348,7 @@ test('a terminal match downloads one trace even when IndexedDB is unavailable', 
     assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
     assert.ok(h.api.inspect().archive.downloadRequestedAt);
     const payload = JSON.parse(await h.createdBlobs[0].text());
-    assert.equal(payload.scriptVersion, '1.5.29');
+    assert.equal(payload.scriptVersion, '1.5.30');
     assert.equal(payload.trace.frames.at(-1).sequence, 199);
     h.tick();
     assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
@@ -3336,7 +3369,7 @@ test('detaching an eliminated client exports the trace before the next timer tic
   assert.equal(h.downloads.length, 1);
   const payload = JSON.parse(await h.createdBlobs[0].text());
   assert.equal(payload.trace.frames.at(-1).sequence, 200);
-  assert.equal(payload.scriptVersion, '1.5.29');
+  assert.equal(payload.scriptVersion, '1.5.30');
 });
 
 test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {

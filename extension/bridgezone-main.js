@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.29
+// @version      1.5.30
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.29';
+  const VERSION = '1.5.30';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -980,6 +980,18 @@
       Math.abs(current.pitch - sampled.pitch) > MAX_OUTGOING_TURN);
   }
 
+  function sampledTargetAtShotEye(sampled, shot) {
+    const origin = vector3(shot?.eye), point = vector3(sampled?.point);
+    if (!origin || !point) return null;
+    const delta = point.map((value, axis) => value - origin[axis]);
+    const distance = Math.hypot(...delta);
+    if (!(distance > 0.01)) return null;
+    return { ...sampled, origin, distance,
+      direction: delta.map(value => value / distance),
+      yaw: Math.atan2(-delta[0], -delta[2]),
+      pitch: Math.atan2(delta[1], Math.hypot(delta[0], delta[2])) };
+  }
+
   function stealthSkip() {
     const state = runtime.stealth;
     const now = performance.now();
@@ -1102,7 +1114,7 @@
       if (state.pendingManualUntil && performance.now() > state.pendingManualUntil) state.pendingManualUntil = 0;
       const shot = runtime.predictions.get(frame.s);
       runtime.predictions.delete(frame.s);
-      const sampledTarget = runtime.sampleContexts.get(frame.s)?.liveTarget;
+      const sampledTarget = sampledTargetAtShotEye(runtime.sampleContexts.get(frame.s)?.liveTarget, shot);
       let target = !(frame.buttons & 4) &&
         ((options.rage && client.predictor?.activeStats) || state.pendingManualUntil || (frame.buttons & 1))
         ? selectTarget(client, frame, shot?.eye) : null;
@@ -1178,7 +1190,7 @@
           ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) return frame;
       const shot = runtime.predictions.get(frame.s);
       runtime.predictions.delete(frame.s);
-      const sampledTarget = runtime.sampleContexts.get(frame.s)?.liveTarget;
+      const sampledTarget = sampledTargetAtShotEye(runtime.sampleContexts.get(frame.s)?.liveTarget, shot);
       let target = selectTarget(client, frame, shot?.eye);
       if (options.rage && shot && sampledTargetPreferred(target, sampledTarget))
         target = sampledTarget;

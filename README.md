@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.29.** All 141 local tests pass with the captured client bundles. Checks cover combat-agent deployment, recovery and pickup inputs, storm navigation, 468 varied-condition shot-kernel replays, exact hitbox and world-ray cover checks, automatic trace export, and provisional server-ray comparison. The agent has not yet been tested in a live XOX match. Server-side zero spread is not established by client-side correction.
+> **Current version: 1.5.30.** All 143 local tests pass with the captured client bundles. Checks cover combat-agent deployment, recovery and pickup inputs, storm navigation, 468 varied-condition shot-kernel replays, exact hitbox and world-ray cover checks, automatic trace export, and provisional server-ray comparison. The agent has not yet been tested in a live XOX match. Server-side zero spread is not established by client-side correction.
 
 ## Explore
 
@@ -170,6 +170,7 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.27 | No live XOX trace yet | Adds four near-face corner probes after center and interior points are covered. Every selected point stays inside the captured head or torso box and must pass world visibility. The trace labels corner choices separately. This targets small exposed openings, not shots through solid cover; live hit results need a new trace. |
 | 1.5.28 | No live XOX trace yet | The default combat agent seeks matching reserve ammo before running empty when no nearby opponent is observed, while storm movement and active combat take priority. A calibrated local replay replaces rigid ray rotation for spread scoring and refines single-projectile aim. The analyzer records replay calibration, measures separation among server-reported rays in one shot independently of local pairing, and gives bounded differences for ambiguous candidate pairs. Current public physics and runtime bundle hashes match the captured test inputs; server spread and live agent behavior still need a new trace. |
 | 1.5.29 | No live XOX trace yet | Uses the exported kernel for spread replay and refines every pellet candidate. Cover probes include near-face edge midpoints and verify that a requested-zone player hit comes before a world hit. The agent requests normal medkit and armor plate inputs when safe; trace analysis distinguishes requests from server resource changes. All 141 local tests pass with the captured bundles, including 468 varied-condition replay cases. Live server behavior still needs a new trace. |
+| 1.5.30 | No live XOX trace yet | Retained sampled targets now use the predicted shot eye for outgoing correction, fixing a local head-box miss after a 0.3 m eye shift. Repeated ACK rows no longer erase earlier finite aim-angle differences in the analyzer. All 143 local tests pass with the captured bundles. A private match started in the Codex browser, but that browser had no XOX extension and did not capture pointer lock, so it provides no server hit or spread result for this version. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

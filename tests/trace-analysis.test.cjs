@@ -97,6 +97,25 @@ test('cover and acknowledged aim diagnostics stay separate from hit evidence', a
   assert.match(formatReport(report), /Preferred-center cover blockers/);
 });
 
+test('later ACK rows without angles do not erase measured aim differences', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    serverSnapshots: [
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverYawDifferenceDegrees: 1.25, serverPitchDifferenceDegrees: -0.8 } },
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverPitchDifferenceDegrees: 0.2 } },
+      { match: 1, acknowledgedFrame: { sequence: 5 } }
+    ]
+  } });
+  assert.deepEqual(report.authoritative.acknowledgedAim, {
+    uniqueAcknowledgedFrames: 1, yawSamples: 1, pitchSamples: 1,
+    yawOverHalfDegree: 1, pitchOverHalfDegree: 0,
+    medianAbsoluteYawDegrees: 1.25, medianAbsolutePitchDegrees: 0.2,
+    maxAbsoluteYawDegrees: 1.25, maxAbsolutePitchDegrees: 0.2
+  });
+});
+
 test('aim report exposes explicit point overrides in old and new trace rows', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.11', trace: {
