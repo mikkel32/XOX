@@ -1648,14 +1648,14 @@ test('automatic clear-point targeting falls back from blocked head to chest', ()
   });
   const input = frame();
   const output = send(fake, [input])[0];
-  assert.equal(points.length, 10);
+  assert.equal(points.length, 11);
   close(points[0][1], 1.66);
-  close(points[9][1], 1.21);
+  close(points[10][1], 1.21);
   close(output.pitch, Math.atan2(1.21 - 1.62, Math.hypot(2, 10)));
   h.api.setOptions({ point: 'head' });
   points.length = 0;
   const blockedHead = send(fake, [frame({ s: 24 })])[0];
-  assert.equal(points.length, 9, 'explicit Head searches inside the head but never tries the chest');
+  assert.equal(points.length, 10, 'explicit Head searches inside the head but never tries the chest');
   assert.equal(blockedHead.buttons & 1, 0, 'a covered head is not replaced by a chest shot');
   h.api.setOptions({ point: 'chest' });
   points.length = 0;
@@ -1714,6 +1714,62 @@ test('a visible part of the requested head remains selectable behind cover', () 
   close(output.pitch, Math.atan2(1.73 - 1.62, Math.hypot(2, 10)));
   assert.ok(target.point[1] < target.position[1] + target.bodyHeight,
     'the selected point stays inside the captured head hitbox');
+  h.api.destroy();
+});
+
+test('an exposed near face remains targetable when the hitbox center is covered', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const wallZ = -9.925;
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      const distance = Math.hypot(...point.map((value, axis) => value - origin[axis]));
+      const wallDistance = (wallZ - origin[2]) / (point[2] - origin[2]) * distance;
+      return wallDistance >= distance - 0.05;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 10, 'front face is checked once after covered interior points');
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'front-partial');
+  assert.ok(target.point[2] > wallZ && target.point[2] < -9.86,
+    'the chosen point is inside the head hitbox before the world surface');
+  h.api.destroy();
+});
+
+test('the near-face probe does not fire through cover in front of the hitbox', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) { return point[2] > -9.7; }
+  });
+  const output = fake.client.input.sample('sample-argument');
+  assert.equal(output.buttons & 1, 0);
+  assert.equal(h.api.trace().fireGates.at(-1).scan.counts.cover, 1);
+  h.api.destroy();
+});
+
+test('Auto records a chest near-face fallback when the head stays covered', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'auto', visibleOnly: true });
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) { return point[1] < 1.3 && point[2] > -9.85; }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'chest');
+  assert.equal(target.visibility, 'fallback-front-partial');
   h.api.destroy();
 });
 
@@ -2716,7 +2772,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.22');
+  assert.equal(exported.scriptVersion, '1.5.23');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2748,7 +2804,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.22');
+  assert.equal(payload.scriptVersion, '1.5.23');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

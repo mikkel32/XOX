@@ -225,7 +225,8 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
       sequence: shot.sequence, fireSent: true, weaponId: 'rifle',
       adsRequested: index >= 6, sampled: { hipFire: index < 6 },
       targetDistance: index < 6 ? 20 : 80, localSpeed: 0,
-      target: { point: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 0,
+      target: { visibility: index < 3 ? 'front-partial' : index === 11 ? '__proto__' : 'clear',
+        point: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 0,
         -Math.cos(0.1) * (index < 6 ? 20 : 80)] } }))
   } });
   assert.equal(report.correlatedShots.paired, 12);
@@ -235,6 +236,10 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
     { mode: 'ads', distance: '40-99 m', movement: 'still', shots: 6, hits: 1 },
     { mode: 'hip', distance: '0-39 m', movement: 'still', shots: 6, hits: 1 }
   ]);
+  assert.deepEqual(report.correlatedShots.byVisibility,
+    { 'front-partial': { shots: 3, hits: 1 }, clear: { shots: 8, hits: 1 },
+      unknown: { shots: 1, hits: 0 } });
+  assert.equal({}.shots, undefined);
   assert.deepEqual(report.authoritative.acknowledgedShotCount, { aligned: 1, diverged: 1 });
   assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithDirections, 12);
   assert.equal(report.correlatedShots.rayEvidence.comparedRays, 12);
@@ -246,6 +251,7 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithImpacts, 1);
   assert.equal(report.correlatedShots.rayEvidence.impactsCloserThanSelectedPoint, 1);
   assert.match(formatReport(report), /Provisional server-shot pairs: 12 paired/);
+  assert.match(formatReport(report), /Paired hits by selected-point visibility.*"front-partial":\{"shots":3,"hits":1\}/);
   assert.match(formatReport(report), /Server-reported ray comparison/);
 });
 

@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 const list = value => Array.isArray(value) ? value : [];
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const rounded = value => finite(value) ? Math.round(value * 100) / 100 : null;
+const VISIBILITY = new Set(['clear', 'partial', 'front-partial', 'fallback',
+  'fallback-partial', 'fallback-front-partial', 'unchecked']);
+const visibilityStatus = value => VISIBILITY.has(value) ? value : 'unknown';
 const BUTTONS = Object.freeze({ fire: 1, aim: 2, jump: 4, crouch: 8,
   sprint: 16, reload: 32, interact: 64, swap: 128, plate: 256, heal: 512 });
 const buttonMask = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -208,6 +211,7 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     .map(event => `${event.match}:${event.tick}`));
   const byMatch = {};
   const byModeDistanceMovement = {};
+  const byVisibility = {};
   const outgoing = new Map(frames.filter(frame => Number.isSafeInteger(frame?.match) &&
     Number.isSafeInteger(frame?.sequence) && Array.isArray(frame?.after))
     .map(frame => [`${frame.match}:${frame.sequence}`, frame]));
@@ -330,6 +334,10 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
       }
       if (!decision) continue;
       pairedWithDecision++;
+      const visibility = visibilityStatus(decision.target?.visibility);
+      byVisibility[visibility] ||= { shots: 0, hits: 0 };
+      byVisibility[visibility].shots++;
+      if (hit) byVisibility[visibility].hits++;
       const mode = decision.sampled?.hipFire === true && decision.adsRequested === false
         ? 'hip' : decision.adsRequested === true ? 'ads' : 'other';
       const distance = finite(decision.target?.distance) ? decision.target.distance :
@@ -372,7 +380,7 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     }).sort((a, b) => a.weapon.localeCompare(b.weapon) ||
       a.distance.localeCompare(b.distance) || a.localFireMode.localeCompare(b.localFireMode));
   return { method: 'provisional same-match tick and arrival-time alignment',
-    paired, pairedWithDecision, pairedHits, byMatch, rayEvidence,
+    paired, pairedWithDecision, pairedHits, byMatch, byVisibility, rayEvidence,
     comparableRaysByWeaponDistanceMode,
     byModeDistanceMovement: Object.values(byModeDistanceMovement).sort((a, b) =>
       a.mode.localeCompare(b.mode) || a.distance.localeCompare(b.distance) ||
@@ -404,8 +412,7 @@ export function analyzeTrace(document) {
   const aimPointChoices = summarizeAimPointChoices(sent, settings);
   const aimVisibility = {};
   for (const decision of sent) {
-    const status = typeof decision?.target?.visibility === 'string'
-      ? decision.target.visibility : 'unknown';
+    const status = visibilityStatus(decision?.target?.visibility);
     aimVisibility[status] = (aimVisibility[status] || 0) + 1;
   }
   const gateAimState = summarizeGateAim(gates);
@@ -807,6 +814,8 @@ export function formatReport(report) {
       `by match ${JSON.stringify(report.correlatedShots.byMatch)}`,
     `Paired shot modes by distance and movement (provisional): ` +
       `${JSON.stringify(report.correlatedShots.byModeDistanceMovement)}`,
+    `Paired hits by selected-point visibility (provisional): ` +
+      `${JSON.stringify(report.correlatedShots.byVisibility)}`,
     `Server-reported ray comparison (provisional pairs): ${JSON.stringify(report.correlatedShots.rayEvidence)}`,
     'Comparable ray angular differences by weapon / selected distance / local fire mode (provisional):',
     ...(report.correlatedShots.comparableRaysByWeaponDistanceMode.length

@@ -463,6 +463,26 @@ separately from agent Interact and Swap requests. None of those observations
 prove that a particular request caused a slot change, and no 1.5.22 live XOX
 match trace exists yet.
 
+### Version 1.5.23: near-face visibility on covered targets
+
+The captured `playerHitboxes` and `raycastPlayer` functions intersect an
+axis-aligned head or torso box at its first exposed surface. The old cover
+filter tested the hitbox center and eight interior offsets, all near the
+center depth. A world surface behind the near face could make all those points
+look covered even though the shot ray would enter the hitbox first. After the
+interior probes fail, the filter now tests one point 6 cm inside the box along
+the eye-to-center ray. The captured `hasLineOfSight` rule still checks world
+collision on that ray. Local tests cover an exposed near face, cover in front
+of the box, and an Auto fallback from covered head to chest near face.
+
+The trace records these decisions as `front-partial` or
+`fallback-front-partial`; the analyzer counts retained selections and
+provisional shot/hit pairs by visibility. The paired hit counts depend on
+inferred tick alignment and cannot assign a server hit with certainty. This is
+a geometrically valid exposed-hitbox case, not a
+method for passing a shot through solid cover. There is no live XOX 1.5.23
+trace or server hit receipt yet.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

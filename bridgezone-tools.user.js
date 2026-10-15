@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.22
+// @version      1.5.23
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.22';
+  const VERSION = '1.5.23';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -315,6 +315,24 @@
     for (const point of candidates) {
       if (hasLineOfSight(world, origin, point)) return { point, visibility: 'partial' };
     }
+    // The server ray tests the front of the captured AABB before its center.
+    // Center and lateral samples can be covered even when the near face is
+    // exposed. Probe 6 cm inside that face so a clear ray can hit the box.
+    const half = part === 'head' ? [0.14, 0.14, 0.14] :
+      [0.25, Math.max(0.1, bodyHeight(snap.c) / 4 - 0.14), 0.25];
+    const direction = center.map((value, axis) => value - origin[axis]);
+    const length = Math.hypot(...direction);
+    let entry = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      if (Math.abs(direction[axis]) < 1e-9) continue;
+      const near = center[axis] - Math.sign(direction[axis]) * half[axis];
+      entry = Math.max(entry, (near - origin[axis]) / direction[axis]);
+    }
+    if (entry > 0 && entry < 1 && length > 0.06) {
+      const depth = Math.min(1, entry + 0.06 / length);
+      const point = origin.map((value, axis) => value + direction[axis] * depth);
+      if (hasLineOfSight(world, origin, point)) return { point, visibility: 'front-partial' };
+    }
     return null;
   }
 
@@ -411,7 +429,7 @@
         if (!clear && adaptive) {
           aimPart = preferred === 'chest' ? 'head' : 'chest';
           clear = clearAimPoint(world, hasLineOfSight, origin, snap, aimPart);
-          if (clear) clear.visibility = clear.visibility === 'partial' ? 'fallback-partial' : 'fallback';
+          if (clear) clear.visibility = clear.visibility === 'clear' ? 'fallback' : `fallback-${clear.visibility}`;
         }
         if (!clear) {
           if (scan && (!scan.coverCandidate || distance < scan.coverCandidate.distance))
