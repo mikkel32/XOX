@@ -1115,6 +1115,64 @@ test('combat agent replenishes a low reserve before it is empty without abandoni
   h.api.destroy();
 });
 
+test('combat agent uses observed recovery supplies only while safe and preserves manual recovery', () => {
+  const h = harness();
+  const fake = rageClient();
+  let buttons = 0;
+  fake.client.input.sample = () => frame({ s: 824, buttons, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { mode: 'ground', grounded: true });
+  Object.assign(fake.client.predictor,
+    { health: 45, armor: 50, plates: 2, medkits: 1, healing: 0, plating: 0 });
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+
+  assert.equal(fake.client.predictorReady, true);
+  assert.equal(fake.client.predictor.ps.grounded, true);
+  assert.equal(fake.client.predictor.health, 45);
+  assert.equal(fake.client.predictor.medkits, 1);
+
+  const heal = fake.client.input.sample();
+  assert.equal(heal.buttons & 512, 512);
+  assert.equal(heal.buttons & 1, 0, 'recovery does not fire');
+  assert.equal(send(fake, [heal])[0].buttons & 512, 512, 'Heal reaches outgoing frames');
+  assert.equal(h.api.inspect().agent.action, 'heal');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.api.trace().agentDecisions.at(-1).route)),
+    { source: 'normal-input', health: 45, armor: 50, plates: 2, medkits: 1 });
+  assert.equal(fake.client.input.sample().buttons & 512, 0,
+    'the agent does not hold Heal while waiting for prediction');
+
+  fake.client.predictor.healing = 3.5;
+  assert.equal(fake.client.input.sample().buttons & (1 | 256 | 512), 0,
+    'the healing channel keeps firing and other recovery actions off');
+  assert.equal(h.api.inspect().agent.action, 'recovering');
+  fake.client.predictor.healing = 0;
+  fake.client.predictor.health = 100;
+  h.api.runtime.agent.nextRecoveryAt = 0;
+  const plate = fake.client.input.sample();
+  assert.equal(plate.buttons & 256, 256);
+  assert.equal(send(fake, [plate])[0].buttons & 256, 256, 'Plate reaches outgoing frames');
+  assert.equal(h.api.inspect().agent.action, 'plate');
+
+  fake.client.predictor.plating = 0.7;
+  assert.equal(fake.client.input.sample().buttons & (1 | 256 | 512), 0);
+  fake.client.predictor.plating = 0;
+  h.api.runtime.agent.nextRecoveryAt = 0;
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20] }) }];
+  assert.equal(fake.client.input.sample().buttons & (256 | 512), 0,
+    'a nearby opponent preempts automatic recovery');
+  fake.client.remoteFrames = [];
+  fake.client.latest.storm = { state: 'holding', center: [100, 0], radius: 10 };
+  assert.equal(fake.client.input.sample().buttons & (256 | 512), 0,
+    'leaving the storm takes priority over recovery');
+  delete fake.client.latest.storm;
+  buttons = 512;
+  const manual = fake.client.input.sample();
+  assert.equal(manual.buttons & 512, 512, 'manual Heal is preserved');
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  h.api.destroy();
+});
+
 test('combat agent picks a nearby weapon with outgoing aim and equips the second slot', () => {
   const h = harness();
   const fake = rageClient();
@@ -1793,14 +1851,14 @@ test('automatic clear-point targeting falls back from blocked head to chest', ()
   });
   const input = frame();
   const output = send(fake, [input])[0];
-  assert.equal(points.length, 15);
+  assert.equal(points.length, 19);
   close(points[0][1], 1.66);
-  close(points[14][1], 1.21);
+  close(points[18][1], 1.21);
   close(output.pitch, Math.atan2(1.21 - 1.62, Math.hypot(2, 10)));
   h.api.setOptions({ point: 'head' });
   points.length = 0;
   const blockedHead = send(fake, [frame({ s: 24 })])[0];
-  assert.equal(points.length, 14, 'explicit Head searches inside the head but never tries the chest');
+  assert.equal(points.length, 18, 'explicit Head searches inside the head but never tries the chest');
   assert.equal(blockedHead.buttons & 1, 0, 'a covered head is not replaced by a chest shot');
   h.api.setOptions({ point: 'chest' });
   points.length = 0;
@@ -1909,6 +1967,59 @@ test('an exposed near-face corner is selectable after covered center and interio
   for (let axis = 0; axis < 3; axis++)
     assert.ok(Math.abs(target.point[axis] - target.hitboxCenter[axis]) < 0.14,
       'the selected point stays strictly inside the captured head box');
+  h.api.destroy();
+});
+
+test('an exposed near-face edge midpoint can be selected through a narrow top opening', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      return point[1] > 1.74 && point[2] > -9.95 && Math.abs(point[0] - 2) < 0.03;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 15, 'the first near-face edge follows blocked corners');
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'front-edge-partial');
+  assert.ok(Math.abs(target.point[1] - target.hitboxCenter[1]) > 0.09);
+  h.api.destroy();
+});
+
+test('exact player and world ray distances reject the line-of-sight endpoint gap', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const world = { blocksShots: true };
+  let approximateCalls = 0, playerCasts = 0, worldCasts = 0;
+  h.register(54145, {
+    getCollisionWorld: () => world,
+    hasLineOfSight() { approximateCalls++; return true; },
+    raycastPlayer(origin, direction, position, crouch, maxDistance) {
+      playerCasts++;
+      assert.ok(maxDistance > 9.86);
+      return { dist: 9.86, zone: 'head' };
+    },
+    raycastWorld(currentWorld, origin, direction, maxDistance) {
+      worldCasts++;
+      assert.equal(currentWorld, world);
+      return world.blocksShots ? { dist: 9.84 } : null;
+    }
+  });
+  const blocked = send(fake, [frame({ s: 410 })])[0];
+  assert.equal(blocked.buttons & 1, 0, 'a surface before the player ray blocks Fire');
+  assert.ok(playerCasts > 0 && worldCasts > 0);
+  assert.equal(approximateCalls, 0, 'exact ray tests supersede the shortened visibility ray');
+  world.blocksShots = false;
+  const clear = send(fake, [frame({ s: 411 })])[0];
+  assert.equal(clear.buttons & 1, 1, 'a nonblocking surface leaves the player ray clear');
+  assert.equal(h.api.trace().aimDecisions.at(-1).target.visibility, 'clear');
   h.api.destroy();
 });
 
@@ -2429,6 +2540,8 @@ test('calibrated spread replay matches the captured kernel at varied elevation a
     attach(h, fake);
     h.api.runtime.physics.shotSeed = shotSeed;
     h.api.runtime.physics.mulberry32 = mulberry32;
+    h.api.runtime.physics.shotDirections = directions;
+    h.api.runtime.physics.spreadDegrees = spreadDegrees;
     h.api.setOptions({ rage: true, point: 'head', range: 600 });
     let caseIndex = 0;
     const conditions = [
@@ -2437,7 +2550,8 @@ test('calibrated spread replay matches the captured kernel at varied elevation a
       { ads: 1, bloom: 0.2, vel: [0, 0, 0], grounded: true, crouch: 1 },
       { ads: 0.2, bloom: 0.5, vel: [3, 0, 0], grounded: false, crouch: 0 }
     ];
-    for (const condition of conditions) for (const elevation of [0, 4, 10])
+    for (const distance of pellets === 1 ? [100, 599.5] : [100])
+      for (const condition of conditions) for (const elevation of [0, 4, 10])
       for (const seed of [...Array.from({ length: 12 }, (_, index) => index + 1), 102]) {
       predictor.seed = seed;
       predictor.ws.shots = 0;
@@ -2445,11 +2559,12 @@ test('calibrated spread replay matches the captured kernel at varied elevation a
       predictor.ws.bloom = condition.bloom;
       Object.assign(predictor.ps, { vel: condition.vel,
         grounded: condition.grounded, crouch: condition.crouch });
-      fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, elevation, -100] }) }];
+      fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, elevation, -distance] }) }];
       const input = frame({ s: 5200 + ++caseIndex, yaw: 0, pitch: 0, buttons: 1 });
       predictor.predict(input);
       assert.equal(h.api.trace().localShots.at(-1).spreadReplayCalibrated, true,
-        `kernel replay calibrates for ${pellets} pellets, elevation ${elevation}, seed ${seed}`);
+        `kernel replay calibrates for ${pellets} pellets, ${distance} m, ` +
+          `elevation ${elevation}, seed ${seed}`);
       const output = send(fake, [input])[0];
       const decision = h.api.trace().aimDecisions.at(-1);
       const center = decision.target.hitboxCenter;
@@ -2460,9 +2575,12 @@ test('calibrated spread replay matches the captured kernel at varied elevation a
         rayHitsBox([0, 1.62, 0], ray, center, [0.14, 0.14, 0.14])).length;
       assert.equal(decision.geometry.projectedPelletHitsOutgoing, hits,
         `replayed intersections match the captured kernel for ${pellets} pellets, ` +
-          `elevation ${elevation}, seed ${seed}`);
+          `${distance} m, elevation ${elevation}, seed ${seed}`);
       if (pellets === 1) assert.equal(hits, 1,
-        `single-projectile correction lands inside the sampled head at elevation ${elevation}, seed ${seed}`);
+        `single-projectile correction lands inside the sampled head at ${distance} m, ` +
+          `elevation ${elevation}, seed ${seed}`);
+      if (pellets === 8 && elevation <= 4) assert.ok(hits >= 1,
+        `a replay-refined pellet lands in the low-elevation head box for seed ${seed}`);
     }
     h.api.destroy();
   }
@@ -2557,7 +2675,8 @@ test('captured Turbopack runtime preserves grouped exports and array-to-object l
   vm.runInContext(`
     TURBOPACK.push(['synthetic.js', 54145, 97294, 42, context => {
       context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true,
-        'raycastWorld', 0, () => null], 54145);
+        'raycastWorld', 0, () => null, 'raycastPlayer', 0, () => ({ dist: 9, zone: 'head' }),
+        'shotDirections', 0, () => [], 'spreadDegrees', 0, () => 0], 54145);
       context.s(['createZoneClient', 0, params => params], 97294);
       context.s(['getter', () => 7, 'direct', 0, 8, 'setter', () => 9, () => {}], 42);
     }]);
@@ -2577,6 +2696,9 @@ test('captured Turbopack runtime preserves grouped exports and array-to-object l
   assert.equal(sandbox.__runtimeResult.setter, 9);
   assert.equal(api.runtime.client, fake.client);
   assert.equal(api.runtime.physics.hasLineOfSight, sandbox.__runtimeResult.physics.hasLineOfSight);
+  assert.equal(api.runtime.physics.raycastPlayer, sandbox.__runtimeResult.physics.raycastPlayer);
+  assert.equal(api.runtime.physics.shotDirections, sandbox.__runtimeResult.physics.shotDirections);
+  assert.equal(api.runtime.physics.spreadDegrees, sandbox.__runtimeResult.physics.spreadDegrees);
   api.setOptions({ silent: true, rage: false, visibleOnly: true, point: 'head' });
   const inputs = [frame()];
   assert.notEqual(send(fake, inputs), inputs);
@@ -2668,7 +2790,10 @@ test('late recovery imports an already initialized physics module through the re
   vm.runInContext(`
     TURBOPACK.push(['existing-kernel.js', 54145, context => {
       window.__physicsInitializations++;
-      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true], 54145);
+      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true,
+        'raycastPlayer', 0, () => ({ dist: 9, zone: 'head' }),
+        'shotDirections', 0, () => [],
+        'spreadDegrees', 0, () => 0], 54145);
     }]);
     TURBOPACK.push(['existing-entry.js', 101, context => {
       window.__existingPhysics = context.i(54145);
@@ -2693,6 +2818,9 @@ test('late recovery imports an already initialized physics module through the re
   assert.equal(api.runtime.physics.getCollisionWorld, sandbox.__existingPhysics.getCollisionWorld);
   assert.equal(api.runtime.physics.hasLineOfSight, sandbox.__existingPhysics.hasLineOfSight);
   assert.equal(api.runtime.physics.raycastWorld, sandbox.__existingPhysics.raycastWorld);
+  assert.equal(api.runtime.physics.raycastPlayer, sandbox.__existingPhysics.raycastPlayer);
+  assert.equal(api.runtime.physics.shotDirections, sandbox.__existingPhysics.shotDirections);
+  assert.equal(api.runtime.physics.spreadDegrees, sandbox.__existingPhysics.spreadDegrees);
   assert.equal(api.runtime.error, '');
   assert.equal(sandbox.__physicsInitializations, 1, 'cached physics module executes only once');
   assert.equal(networkRequests, 0);
@@ -3065,7 +3193,8 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   fake.client.ingestEvents({ t: 100, me: { ack: 41, active: 0,
     slots: [{ weapon: 'vanguard', mag: 29 }], ads: 0.9,
     ammo: { light: 150, heavy: 20 },
-    pos: [0, 0, 0], vel: [1, 0, 0], health: 100 }, events: [
+    pos: [0, 0, 0], vel: [1, 0, 0], health: 100, armor: 50,
+    plates: 2, medkits: 1, plating: 0.7, healing: 0 }, events: [
     { t: 100, by: 0, type: 'shot' },
     { t: 100, by: 0, type: 'hit', damage: 12 }
   ] });
@@ -3087,6 +3216,8 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.deepEqual(JSON.parse(JSON.stringify(trace.serverSnapshots.at(-1).server.slots)),
     [{ weapon: 'vanguard', rarity: null, magazine: 29 }]);
   assert.deepEqual({ ...trace.serverSnapshots.at(-1).server.ammo }, { light: 150, heavy: 20 });
+  assert.deepEqual(Array.from(['health', 'armor', 'plates', 'medkits', 'plating', 'healing'],
+    key => trace.serverSnapshots.at(-1).server[key]), [100, 50, 2, 1, 0.7, 0]);
   assert.equal(trace.serverSnapshots.at(-1).ackLatencyMs, 100);
   assert.equal(trace.counters.serverSnapshotsSeen, 1);
   assert.equal(trace.counters.highestAckByMatch[1], 41);
@@ -3100,7 +3231,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.28');
+  assert.equal(exported.scriptVersion, '1.5.29');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -3133,7 +3264,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.28');
+  assert.equal(payload.scriptVersion, '1.5.29');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -3179,7 +3310,7 @@ test('a terminal match downloads one trace even when IndexedDB is unavailable', 
     assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
     assert.ok(h.api.inspect().archive.downloadRequestedAt);
     const payload = JSON.parse(await h.createdBlobs[0].text());
-    assert.equal(payload.scriptVersion, '1.5.28');
+    assert.equal(payload.scriptVersion, '1.5.29');
     assert.equal(payload.trace.frames.at(-1).sequence, 199);
     h.tick();
     assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
@@ -3200,7 +3331,7 @@ test('detaching an eliminated client exports the trace before the next timer tic
   assert.equal(h.downloads.length, 1);
   const payload = JSON.parse(await h.createdBlobs[0].text());
   assert.equal(payload.trace.frames.at(-1).sequence, 200);
-  assert.equal(payload.scriptVersion, '1.5.28');
+  assert.equal(payload.scriptVersion, '1.5.29');
 });
 
 test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {

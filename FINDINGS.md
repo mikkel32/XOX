@@ -605,6 +605,39 @@ and `94e60212916d8b767ffa7df350c496c14eb7a0a0787028f6a207761bb27d9b11`.
 This checks the current public client chunks, not the private server code or
 its hit validation. No live XOX 1.5.28 match trace exists yet.
 
+### Version 1.5.29: exact replay, cover order, and recovery inputs
+
+The aim correction now calls the captured game's exported `shotDirections` and
+`spreadDegrees` functions instead of maintaining a second spread formula. It
+still enables replay only when those functions reproduce the predictor's
+original shot rays within numerical tolerance. Candidate correction now
+iteratively refines each pellet, not only single-projectile shots. The expanded
+captured-kernel test covers 468 combinations of distance, elevation, shot
+seed, ADS, movement, crouch, airborne state, and pellet count; projected
+intersections match the captured kernel, and every tested single-projectile
+ray intersects the sampled head box. These are local predictor results, not
+server hits or proof of zero server spread.
+
+Requested-zone cover probes now use the exported `raycastPlayer` and
+`raycastWorld` functions when both are present. A point is accepted only when
+the first player hit is in the requested zone and no world hit precedes it.
+Four extra front-face edge midpoints can find a narrow clear opening after
+center, interior, and corner probes fail. A local test rejects a blocker in
+the short endpoint gap left by `hasLineOfSight`, and another selects an exposed
+edge midpoint. Neither path penetrates solid world geometry.
+
+The captured input constants assign Plate to bit 256 and Heal to bit 512.
+The predictor exposes health, armor, carried plates and medkits, and timed
+plating and healing channels. The default combat agent now pulses those normal
+inputs when grounded, supplies are predicted available, no opponent is nearby,
+and the storm move is not urgent. It pauses during a predicted recovery
+channel and yields to manual input. The trace records both predicted and
+server-reported recovery state; the analyzer counts agent requests separately
+from observed server health, armor, stock, and channel transitions. Health
+can also regenerate, so an increase is not attributed to a particular Heal
+request. Local tests cover outgoing inputs and priorities, but no live XOX
+1.5.29 match trace exists yet.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

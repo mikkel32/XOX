@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.28
+// @version      1.5.29
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.28';
+  const VERSION = '1.5.29';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -23,6 +23,8 @@
   const OUTGOING_AIM_TOLERANCE = 0.008;
   const INTERACT_BUTTON = 64;
   const SWAP_BUTTON = 128;
+  const PLATE_BUTTON = 256;
+  const HEAL_BUTTON = 512;
   const PLANE_DOOR_TICKS = 120; // Captured client: 4 seconds at 30 ticks/second.
   const AMMO_TYPES = ['light', 'heavy', 'shells', 'sniper'];
   const AMMO_CAPS = { light: 240, heavy: 180, shells: 48, sniper: 40 };
@@ -43,6 +45,7 @@
   runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
     lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0, nextSwapAt: 0,
     navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
+    nextRecoveryAt: 0,
     dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
     dropTerrainChecked: false,
     lastDropPulseAt: -Infinity };
@@ -245,6 +248,7 @@
     runtime.agent.lastGoalDistance = null;
     runtime.agent.detourUntil = 0;
     runtime.agent.nextSwapAt = 0;
+    runtime.agent.nextRecoveryAt = 0;
     runtime.agent.dropRouteKey = null;
     runtime.agent.dropTarget = null;
     runtime.agent.dropFraction = null;
@@ -321,7 +325,25 @@
 
   function clearAimPoint(world, hasLineOfSight, origin, snap, part) {
     const center = aimPoint(snap, part);
-    if (hasLineOfSight(world, origin, center)) return { point: center, visibility: 'clear' };
+    const canHit = point => {
+      const { raycastWorld, raycastPlayer } = runtime.physics;
+      if (typeof raycastWorld !== 'function' || typeof raycastPlayer !== 'function')
+        return hasLineOfSight(world, origin, point);
+      const offset = point.map((value, axis) => value - origin[axis]);
+      const length = Math.hypot(...offset);
+      if (!(length > 0) || length > 600) return false;
+      const direction = offset.map(value => value / length);
+      try {
+        const playerHit = raycastPlayer(origin, direction, snap.p,
+          Number.isFinite(snap.c) ? snap.c : 0, Math.min(600, length + 0.25));
+        if (!playerHit || playerHit.zone !== (part === 'chest' ? 'torso' : 'head') ||
+            !Number.isFinite(playerHit.dist) || playerHit.dist > length + 0.01) return false;
+        const worldHit = raycastWorld(world, origin, direction, playerHit.dist + 0.01);
+        return !worldHit || Number.isFinite(worldHit.dist) &&
+          worldHit.dist > playerHit.dist + 0.005;
+      } catch { return false; }
+    };
+    if (canHit(center)) return { point: center, visibility: 'clear' };
     // Probe points safely inside the captured hitbox when cover blocks its
     // center. A visible edge can still be a valid shot at the requested part.
     const inset = part === 'head' ? 0.07 : 0.12;
@@ -345,7 +367,7 @@
       }
     }
     for (const point of candidates) {
-      if (hasLineOfSight(world, origin, point)) return { point, visibility: 'partial' };
+      if (canHit(point)) return { point, visibility: 'partial' };
     }
     // The server ray tests the front of the captured AABB before its center.
     // Center and lateral samples can be covered even when the near face is
@@ -363,7 +385,7 @@
     if (entry > 0 && entry < 1 && length > 0.06) {
       const depth = Math.min(1, entry + 0.06 / length);
       const point = origin.map((value, axis) => value + direction[axis] * depth);
-      if (hasLineOfSight(world, origin, point)) return { point, visibility: 'front-partial' };
+      if (canHit(point)) return { point, visibility: 'front-partial' };
       if (horizontal > 0.01) {
         // Four more rays cover near-face corner openings that the center ray
         // misses. Keep every endpoint inside the captured hitbox; the world
@@ -378,8 +400,19 @@
           if (!corner.every((value, axis) =>
             value >= center[axis] - half[axis] + 0.015 &&
             value <= center[axis] + half[axis] - 0.015)) continue;
-          if (hasLineOfSight(world, origin, corner))
+          if (canHit(corner))
             return { point: corner, visibility: 'front-corner-partial' };
+        }
+        const edgeLateral = part === 'head' ? 0.1 : 0.2;
+        const edgeVertical = part === 'head' ? 0.1 : 0.2;
+        for (const [side, height] of [[0, 1], [1, 0], [-1, 0], [0, -1]]) {
+          const edge = [point[0] + sideX * edgeLateral * side,
+            point[1] + edgeVertical * height,
+            point[2] + sideZ * edgeLateral * side];
+          if (!edge.every((value, axis) =>
+            value >= center[axis] - half[axis] + 0.015 &&
+            value <= center[axis] + half[axis] - 0.015)) continue;
+          if (canHit(edge)) return { point: edge, visibility: 'front-edge-partial' };
         }
       }
     }
@@ -583,38 +616,30 @@
     const up = [Math.sin(y) * Math.sin(p), Math.cos(p), Math.cos(y) * Math.sin(p)];
     const dot = (a, b) => a.reduce((sum, value, i) => sum + value * b[i], 0);
     let best = null, bestHits = -1, bestMiss = Infinity;
-    for (const direction of directions.length === 1 ? directions : [average, ...directions]) {
+    const candidates = directions.length === 1
+      ? [{ direction: directions[0], pellet: 0 }]
+      : [{ direction: average, pellet: null },
+        ...directions.map((direction, pellet) => ({ direction, pellet }))];
+    for (const { direction, pellet } of candidates) {
       const denom = dot(direction, forward);
       if (denom <= 0 || !Number.isFinite(denom)) continue;
       const u = dot(direction, right) / denom, m = dot(direction, up) / denom;
       const arg = Math.hypot(1, u, m) * target.direction[1] / Math.hypot(1, m);
       if (!Number.isFinite(arg) || Math.abs(arg) > 1) continue;
-      const pitch = Math.asin(arg) - Math.atan(m);
+      let pitch = Math.asin(arg) - Math.atan(m);
       if (Math.abs(pitch) > 1.54) continue;
       const a = -Math.cos(pitch) + m * Math.sin(pitch);
       const rawYaw = target.yaw + Math.atan2(u, -a);
-      const yaw = Math.atan2(Math.sin(rawYaw), Math.cos(rawYaw));
+      let yaw = Math.atan2(Math.sin(rawYaw), Math.cos(rawYaw));
+      if (shot.replay && pellet !== null) {
+        const refined = refineReplayedRay(shot, target, yaw, pitch, pellet);
+        if (!refined) continue;
+        yaw = refined.yaw;
+        pitch = refined.pitch;
+      }
       if (turnFrom && (Math.abs(normalizedDelta(turnFrom.yaw, yaw)) > MAX_OUTGOING_TURN ||
           Math.abs(pitch - turnFrom.pitch) > MAX_OUTGOING_TURN)) continue;
-      if (directions.length === 1) {
-        if (!shot.replay) return { yaw, pitch };
-        let exactYaw = yaw, exactPitch = pitch;
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const ray = replayShotDirections(shot, exactYaw, exactPitch)?.[0];
-          if (!ray) break;
-          const rayYaw = Math.atan2(-ray[0], -ray[2]);
-          const rayPitch = Math.asin(Math.max(-1, Math.min(1, ray[1])));
-          const yawError = normalizedDelta(rayYaw, target.yaw);
-          const pitchError = target.pitch - rayPitch;
-          if (Math.max(Math.abs(yawError), Math.abs(pitchError)) < 1e-9) break;
-          exactYaw = Math.atan2(Math.sin(exactYaw + yawError), Math.cos(exactYaw + yawError));
-          exactPitch += pitchError;
-          if (Math.abs(exactPitch) > 1.54 || turnFrom &&
-              (Math.abs(normalizedDelta(turnFrom.yaw, exactYaw)) > MAX_OUTGOING_TURN ||
-                Math.abs(exactPitch - turnFrom.pitch) > MAX_OUTGOING_TURN)) return null;
-        }
-        return { yaw: exactYaw, pitch: exactPitch };
-      }
+      if (directions.length === 1) return { yaw, pitch };
       const hits = projectedPelletHits(shot, target, yaw, pitch) ?? 0;
       const miss = predictedMiss(shot, target, yaw, pitch)?.meanMeters ?? Infinity;
       if (hits > bestHits || (hits === bestHits && miss < bestMiss)) {
@@ -733,7 +758,12 @@
         crouch: Number.isFinite(me.crouch) ? me.crouch : null,
         grounded: typeof me.grounded === 'boolean' ? me.grounded : null,
         sprinting: typeof me.sprinting === 'boolean' ? me.sprinting : null,
-        health: Number.isFinite(me.health) ? me.health : null },
+        health: Number.isFinite(me.health) ? me.health : null,
+        armor: Number.isFinite(me.armor) ? me.armor : null,
+        plates: Number.isFinite(me.plates) ? me.plates : null,
+        medkits: Number.isFinite(me.medkits) ? me.medkits : null,
+        plating: Number.isFinite(me.plating) ? me.plating : null,
+        healing: Number.isFinite(me.healing) ? me.healing : null },
       predictorBeforeReconcile: predicted ? {
         ads: Number.isFinite(predicted.ws?.ads) ? predicted.ws.ads : null,
         yaw: Number.isFinite(predicted.ps?.yaw) ? predicted.ps.yaw : null,
@@ -742,6 +772,12 @@
         shots: Number.isSafeInteger(predicted.ws?.shots) ? predicted.ws.shots : null,
         magazine: Number.isFinite(predictedSlot?.mag) ? predictedSlot.mag : null,
         ammo: ammoSnapshot(predicted.ammo),
+        health: Number.isFinite(predicted.health) ? predicted.health : null,
+        armor: Number.isFinite(predicted.armor) ? predicted.armor : null,
+        plates: Number.isFinite(predicted.plates) ? predicted.plates : null,
+        medkits: Number.isFinite(predicted.medkits) ? predicted.medkits : null,
+        plating: Number.isFinite(predicted.plating) ? predicted.plating : null,
+        healing: Number.isFinite(predicted.healing) ? predicted.healing : null,
         position: vector3(predicted.ps?.pos)
       } : null,
       selfCombatEvents: combat,
@@ -772,35 +808,33 @@
     return { forward: [-sy * cp, sp, -cy * cp], right: [cy, 0, -sy], up: [sy * sp, cp, cy * sp] };
   }
 
-  function spreadRay(direction, degrees, random) {
-    if (degrees <= 0) return direction;
-    const radius = Math.sqrt(random()) * degrees * Math.PI / 180;
-    const angle = 2 * random() * Math.PI;
-    const pitch = Math.asin(Math.max(-1, Math.min(1, direction[1])));
-    const yaw = Math.atan2(-direction[0], -direction[2]);
-    const sy = Math.sin(yaw), cy = Math.cos(yaw);
-    const sp = Math.sin(pitch), cp = Math.cos(pitch);
-    const tangent = Math.tan(radius);
-    const across = tangent * Math.cos(angle), above = tangent * Math.sin(angle);
-    const x = direction[0] + cy * across + sy * sp * above;
-    const y = direction[1] + cp * above;
-    const z = direction[2] - sy * across + cy * sp * above;
-    const length = Math.hypot(x, y, z);
-    return [x / length, y / length, z / length];
-  }
-
   function replayShotDirections(shot, yaw, pitch) {
     const replay = shot?.replay;
-    const random = runtime.physics.mulberry32;
-    if (!replay || typeof random !== 'function' ||
+    const makeDirections = runtime.physics.shotDirections;
+    if (!replay || typeof makeDirections !== 'function' ||
         !Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;
-    const next = random(replay.seed);
-    const base = spreadRay(aimBasis(yaw, pitch).forward, replay.spreadDegrees, next);
-    if (replay.pellets <= 1) return [base];
-    const directions = [];
-    for (let index = 0; index < replay.pellets; index++)
-      directions.push(spreadRay(base, replay.pelletSpread, next));
-    return directions;
+    try {
+      const directions = makeDirections({ pellets: replay.pellets,
+        pelletSpread: replay.pelletSpread }, yaw, pitch, replay.spreadDegrees, replay.seed);
+      return Array.isArray(directions) && directions.length === replay.pellets &&
+        directions.every(vector3) ? directions : null;
+    } catch { return null; }
+  }
+
+  function refineReplayedRay(shot, target, yaw, pitch, pellet) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const ray = replayShotDirections(shot, yaw, pitch)?.[pellet];
+      if (!ray) return null;
+      const rayYaw = Math.atan2(-ray[0], -ray[2]);
+      const rayPitch = Math.asin(Math.max(-1, Math.min(1, ray[1])));
+      const yawError = normalizedDelta(rayYaw, target.yaw);
+      const pitchError = target.pitch - rayPitch;
+      if (Math.max(Math.abs(yawError), Math.abs(pitchError)) < 1e-9) break;
+      yaw = Math.atan2(Math.sin(yaw + yawError), Math.cos(yaw + yawError));
+      pitch += pitchError;
+      if (!Number.isFinite(pitch) || Math.abs(pitch) > 1.54) return null;
+    }
+    return { yaw, pitch };
   }
 
   function shotDirectionsAt(shot, yaw, pitch) {
@@ -1223,21 +1257,17 @@
         };
         const ws = predictor.ws, player = predictor.ps, weapon = predictor.activeStats;
         const velocity = vector3(player?.vel);
-        if (Number.isSafeInteger(replaySeed) && typeof runtime.physics.mulberry32 === 'function' &&
-            velocity && Number.isFinite(bloomBefore) && Number.isFinite(ws?.ads) &&
+        if (Number.isSafeInteger(replaySeed) &&
+            typeof runtime.physics.shotDirections === 'function' &&
+            typeof runtime.physics.spreadDegrees === 'function' && velocity &&
+            Number.isFinite(bloomBefore) && Number.isFinite(ws?.ads) &&
             [weapon?.hipSpread, weapon?.adsSpread, weapon?.moveSpread,
               weapon?.pellets].every(Number.isFinite) &&
             (weapon.pellets <= 1 || Number.isFinite(weapon.pelletSpread)) &&
             weapon.pellets === shot.directions.length && weapon.pellets <= 32) {
           try {
-            const ads = ws.ads;
-            const motion = Math.min(1, Math.hypot(velocity[0], velocity[2]) / 5);
-            let spreadDegrees = weapon.hipSpread * (1 - ads) + weapon.adsSpread * ads +
-              weapon.moveSpread * motion * (1 - 0.6 * ads) +
-              bloomBefore * (1 - 0.7 * ads);
-            if (player.grounded) {
-              if (player.crouch > 0.5) spreadDegrees *= 0.85;
-            } else spreadDegrees += 2.5 * (1 - 0.5 * ads);
+            const spreadDegrees = runtime.physics.spreadDegrees(
+              { ...ws, bloom: bloomBefore }, weapon, player);
             const replay = { seed: replaySeed, spreadDegrees,
               pelletSpread: weapon.pelletSpread || 0, pellets: weapon.pellets };
             const reconstructed = replayShotDirections({ replay }, frame.yaw, frame.pitch);
@@ -1652,6 +1682,34 @@
     const stormDistance = storm ? Math.hypot(me.pos[0] - storm.center[0], me.pos[2] - storm.center[1]) : 0;
     const stormMargin = storm ? Math.min(8, Math.max(0, storm.radius) * 0.25) : 0;
     const stormUrgent = storm && stormDistance > Math.max(0, storm.radius - stormMargin);
+    const predictor = client.predictorReady ? client.predictor : null;
+    const nearbyThreat = (client.remoteFrames || []).some(({ snap }) =>
+      enemy(client, snap, true) &&
+      Math.hypot(snap.p[0] - me.pos[0], snap.p[2] - me.pos[2]) < 45);
+    const recovering = predictor && (predictor.plating > 0 || predictor.healing > 0);
+    if (recovering) {
+      agentNote('recovering', { kind: predictor.healing > 0 ? 'health' : 'armor' }, null,
+        { source: 'predictor-channel', remainingSeconds: Math.round(
+          Math.max(predictor.healing || 0, predictor.plating || 0) * 10) / 10 });
+      return frame;
+    }
+    const safeToRecover = !stormUrgent && !nearbyThreat &&
+      (!target || target.distance > 70) && me.mode === 'ground' && me.grounded === true;
+    const recoveryNow = performance.now();
+    if (safeToRecover && recoveryNow >= agent.nextRecoveryAt && predictor &&
+        [predictor.health, predictor.armor, predictor.plates, predictor.medkits].every(Number.isFinite)) {
+      const heal = predictor.health <= 60 && predictor.medkits > 0;
+      const plate = !heal && predictor.armor <= 100 && predictor.plates > 0;
+      if (heal || plate) {
+        // The captured client starts a timed channel on these ordinary input
+        // bits. Wait for the predictor to acknowledge it before another pulse.
+        agent.nextRecoveryAt = recoveryNow + (heal ? 4300 : 1400);
+        agentNote(heal ? 'heal' : 'plate', { kind: heal ? 'health' : 'armor' }, null,
+          { source: 'normal-input', health: predictor.health, armor: predictor.armor,
+            plates: predictor.plates, medkits: predictor.medkits });
+        return { ...frame, buttons: frame.buttons | (heal ? HEAL_BUTTON : PLATE_BUTTON) };
+      }
+    }
     const reserve = client.predictor?.ammo?.[weapon?.ammo];
     const outOfAmmo = !!slot && slot.mag <= 0 && !(reserve > 0);
     const otherSlot = client.predictor?.slots?.[1 - (client.predictor?.active ?? 0)];
@@ -1671,9 +1729,6 @@
     const weaponItem = !stormUrgent && !shouldSwap && weakWeapon &&
       (!target || target.distance > 30 || !weapon || outOfAmmo)
       ? agentWeaponLoot(client, me, slot) : null;
-    const nearbyThreat = (client.remoteFrames || []).some(({ snap }) =>
-      enemy(client, snap, true) &&
-      Math.hypot(snap.p[0] - me.pos[0], snap.p[2] - me.pos[2]) < 45);
     const ammoItem = !stormUrgent && !shouldSwap && !weaponItem && slot &&
       (outOfAmmo || (Number.isFinite(reserve) &&
         reserve < Math.max(1, weapon?.magSize || 0) &&
@@ -1859,7 +1914,7 @@
       ? runtime.agent.target : selectTarget(client, { ...frame, vt: tick }, null, scan);
     if (options.agent && runtime.agent.scan) Object.assign(scan, runtime.agent.scan);
     if (options.agent && ['approach', 'search', 'storm', 'loot-travel', 'loot-aim', 'loot-detour',
-      'equip', 'detour', 'blocked'].includes(runtime.agent.action)) {
+      'equip', 'detour', 'blocked', 'plate', 'heal', 'recovering'].includes(runtime.agent.action)) {
       runtime.sampleGate = { reason: 'agent-' + runtime.agent.action, target, scan };
       return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
@@ -2019,6 +2074,7 @@
     runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
       lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0, nextSwapAt: 0,
       navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
+      nextRecoveryAt: 0,
       dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
       dropTerrainChecked: false,
       lastDropPulseAt: -Infinity };
@@ -2198,7 +2254,8 @@
     const path = 'static/chunks/' + id + '.js';
     window.TURBOPACK.push([path, id, context => {
       const physics = context.i(54145);
-      for (const name of ['getCollisionWorld', 'hasLineOfSight', 'raycastWorld', 'shotSeed', 'mulberry32'])
+      for (const name of ['getCollisionWorld', 'hasLineOfSight', 'raycastWorld',
+        'raycastPlayer', 'shotSeed', 'mulberry32', 'shotDirections', 'spreadDegrees'])
         runtime.physics[name] = physics[name];
       physicsImportStarted = false;
       if (runtime.error.startsWith('Physics hook:')) runtime.error = '';
@@ -2241,7 +2298,8 @@
               if (entries[i + 1] !== 0) continue;
               const key = entries[i], value = entries[i + 2];
               if (moduleId === 54145 &&
-                  ['getCollisionWorld', 'hasLineOfSight', 'raycastWorld', 'shotSeed', 'mulberry32'].includes(key))
+                  ['getCollisionWorld', 'hasLineOfSight', 'raycastWorld', 'raycastPlayer',
+                    'shotSeed', 'mulberry32', 'shotDirections', 'spreadDegrees'].includes(key))
                 runtime.physics[key] = value;
               if (moduleId === 97294 && key === 'createZoneClient' && typeof value === 'function') {
                 runtime.hookReady = true;
@@ -2642,7 +2700,8 @@
     version: VERSION, options, runtime, setOptions,
     attachClient(client, physics) {
       if (physics) {
-        for (const name of ['getCollisionWorld', 'hasLineOfSight', 'raycastWorld', 'shotSeed', 'mulberry32'])
+        for (const name of ['getCollisionWorld', 'hasLineOfSight', 'raycastWorld',
+          'raycastPlayer', 'shotSeed', 'mulberry32', 'shotDirections', 'spreadDegrees'])
           runtime.physics[name] = physics[name];
       }
       runtime.hookReady = true;

@@ -149,9 +149,33 @@ test('multi-pellet report keeps local hit projections separate from server hits'
   assert.deepEqual(report.pelletProjection, {
     retainedMultiPelletShots: 2, measured: 2,
     noProjectedHitsBefore: 1, noProjectedHitsAfter: 0,
-    projectedHitsBefore: 2, projectedHitsAfter: 4
+    projectedHitsBefore: 2, projectedHitsAfter: 4,
+    measuredByReplay: { calibrated: 0, uncalibrated: 0, unrecorded: 2 },
+    noProjectedHitsAfterByReplay: { calibrated: 0, uncalibrated: 0, unrecorded: 0 }
   });
   assert.equal(report.serverEvents.hits, 0);
+});
+
+test('multi-pellet diagnostics distinguish calibrated replay from fallback geometry', async () => {
+  const { analyzeTrace } = await analyzer;
+  const decision = (match, sequence, hits) => ({
+    match, sequence, fireSent: true, localShotPredicted: true,
+    weapon: { stats: { pellets: 8 } }, geometry: {
+      projectedPelletHitsInput: 0, projectedPelletHitsOutgoing: hits }
+  });
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    localShots: [
+      { match: 1, sequence: 1, spreadReplayCalibrated: true },
+      { match: 1, sequence: 2, spreadReplayCalibrated: false },
+      { match: 2, sequence: 1, spreadReplayCalibrated: false }
+    ],
+    aimDecisions: [decision(1, 1, 1), decision(1, 2, 0), decision(2, 1, 0),
+      decision(2, 2, 0)]
+  } });
+  assert.deepEqual(report.pelletProjection.measuredByReplay,
+    { calibrated: 1, uncalibrated: 2, unrecorded: 1 });
+  assert.deepEqual(report.pelletProjection.noProjectedHitsAfterByReplay,
+    { calibrated: 0, uncalibrated: 2, unrecorded: 1 });
 });
 
 test('early ADS shots are counted without treating corrected ramp fire as a failure', async () => {
@@ -476,6 +500,30 @@ test('agent item and equip requests stay separate from observed server weapon ch
     ] });
   assert.match(formatReport(report), /Combat agent inventory/);
   assert.match(formatReport(report), /cannot be attributed to a particular request/);
+});
+
+test('recovery requests and observed server resource changes remain separate evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1,
+    agentDecisions: [{ action: 'heal' }, { action: 'plate' }],
+    serverSnapshots: [
+      { match: 1, tick: 100, server: { health: 40, armor: 50,
+        plates: 2, medkits: 1, healing: 0, plating: 0 } },
+      { match: 1, tick: 101, server: { health: 40, armor: 50,
+        plates: 2, medkits: 1, healing: 3.9, plating: 0 } },
+      { match: 1, tick: 220, server: { health: 100, armor: 50,
+        plates: 2, medkits: 0, healing: 0, plating: 1.1 } },
+      { match: 1, tick: 260, server: { health: 100, armor: 100,
+        plates: 1, medkits: 0, healing: 0, plating: 0 } }
+    ]
+  } });
+  assert.deepEqual(report.recoveryEvidence, { agentHealRequests: 1, agentPlateRequests: 1,
+    observedServerStates: 4, healthIncreases: 1, armorIncreases: 1,
+    plateStockDecreases: 1, medkitStockDecreases: 1,
+    healingStarts: 1, platingStarts: 1 });
+  assert.match(formatReport(report), /Combat agent recovery/);
+  assert.match(formatReport(report), /Health can also rise through regeneration/);
 });
 
 test('no-fire report distinguishes sampled gates, outbound frames, and server evidence', async () => {

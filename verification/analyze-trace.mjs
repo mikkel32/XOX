@@ -758,6 +758,19 @@ export function analyzeTrace(document) {
   const measuredPellets = multiPellet.filter(item =>
     finite(item.geometry?.projectedPelletHitsInput) &&
     finite(item.geometry?.projectedPelletHitsOutgoing));
+  const replayBySequence = new Map(localShots.filter(shot =>
+    Number.isSafeInteger(shot?.match) && Number.isSafeInteger(shot?.sequence))
+    .map(shot => [`${shot.match}:${shot.sequence}`, shot.spreadReplayCalibrated]));
+  const measuredByReplay = { calibrated: 0, uncalibrated: 0, unrecorded: 0 };
+  const noProjectedHitsAfterByReplay = { calibrated: 0, uncalibrated: 0, unrecorded: 0 };
+  for (const decision of measuredPellets) {
+    const flag = replayBySequence.get(`${decision.match}:${decision.sequence}`);
+    const status = flag === true ? 'calibrated' :
+      flag === false ? 'uncalibrated' : 'unrecorded';
+    measuredByReplay[status]++;
+    if (decision.geometry.projectedPelletHitsOutgoing === 0)
+      noProjectedHitsAfterByReplay[status]++;
+  }
   const pelletProjection = { retainedMultiPelletShots: multiPellet.length,
     measured: measuredPellets.length,
     noProjectedHitsBefore: measuredPellets.filter(item =>
@@ -767,7 +780,8 @@ export function analyzeTrace(document) {
     projectedHitsBefore: measuredPellets.reduce((sum, item) =>
       sum + item.geometry.projectedPelletHitsInput, 0),
     projectedHitsAfter: measuredPellets.reduce((sum, item) =>
-      sum + item.geometry.projectedPelletHitsOutgoing, 0) };
+      sum + item.geometry.projectedPelletHitsOutgoing, 0),
+    measuredByReplay, noProjectedHitsAfterByReplay };
 
   const server = { shots: 0, hits: 0, kills: 0, damage: 0, headshots: 0 };
   for (const event of events) {
@@ -857,6 +871,39 @@ export function analyzeTrace(document) {
     }
     previousInventoryByMatch.set(snapshot.match,
       { slots, activeSlot: snapshot.server.activeSlot });
+  }
+  const recoveryEvidence = { agentHealRequests: 0, agentPlateRequests: 0,
+    observedServerStates: 0, healthIncreases: 0, armorIncreases: 0,
+    plateStockDecreases: 0, medkitStockDecreases: 0,
+    healingStarts: 0, platingStarts: 0 };
+  for (const decision of list(trace.agentDecisions)) {
+    if (decision?.action === 'heal') recoveryEvidence.agentHealRequests++;
+    if (decision?.action === 'plate') recoveryEvidence.agentPlateRequests++;
+  }
+  const previousRecoveryByMatch = new Map();
+  for (const snapshot of snapshots) {
+    const state = snapshot?.server;
+    if (!state || !['health', 'armor', 'plates', 'medkits', 'healing', 'plating']
+      .some(key => finite(state[key]))) continue;
+    recoveryEvidence.observedServerStates++;
+    const previous = previousRecoveryByMatch.get(snapshot.match);
+    if (previous) {
+      if (finite(state.health) && finite(previous.health) && state.health > previous.health)
+        recoveryEvidence.healthIncreases++;
+      if (finite(state.armor) && finite(previous.armor) && state.armor > previous.armor)
+        recoveryEvidence.armorIncreases++;
+      if (finite(state.plates) && finite(previous.plates) && state.plates < previous.plates)
+        recoveryEvidence.plateStockDecreases++;
+      if (finite(state.medkits) && finite(previous.medkits) && state.medkits < previous.medkits)
+        recoveryEvidence.medkitStockDecreases++;
+      if (finite(state.healing) && finite(previous.healing) &&
+          state.healing > 0 && previous.healing <= 0)
+        recoveryEvidence.healingStarts++;
+      if (finite(state.plating) && finite(previous.plating) &&
+          state.plating > 0 && previous.plating <= 0)
+        recoveryEvidence.platingStarts++;
+    }
+    previousRecoveryByMatch.set(snapshot.match, state);
   }
 
   const retained = Object.fromEntries(['frames', 'localShots', 'aimDecisions', 'fireGates',
@@ -1032,6 +1079,7 @@ export function analyzeTrace(document) {
     inputButtons, firingEvidence, hipFireEvidence, predictedFireSync,
     spreadReplayEvidence, correlatedShots,
     agentActions, agentRoutes, interactionEvidence, ammoAssist, inventoryEvidence,
+    recoveryEvidence,
     predictionConsistency,
     pelletProjection,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
@@ -1061,11 +1109,13 @@ export function analyzeTrace(document) {
       'A Fire input held during recorded weapon cooldown may have no local shot prediction; this is normal for automatic fire.',
       'A locally predicted shot whose Fire bit is removed before send can desynchronize shot seed, bloom, and cooldown until reconciliation.',
       'Projected pellet hits use the captured client hitboxes and locally predicted spread; they are not server-confirmed hits.',
+      'Calibrated multi-pellet projections replay the local shot kernel; uncalibrated projections use rigid ray rotation and can overpredict intersections.',
       'Adaptive hip-fire decisions use local shot-seed and spread estimates; only server events can establish actual hits.',
       'The seedSyncStatus field records a shot-count comparison, not verified seed equality. Neither an ACK shot-count match nor a mismatch identifies a server ray or proves which shot hit.',
       'Spread replay calibration checks whether the local captured-kernel model reproduces the client predictor rays; it does not verify the private server seed or ray.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Agent Interact and Swap requests and later server inventory changes are separate observations; they cannot be attributed to a particular request without a server receipt.',
+      'Agent Heal and Plate requests and later server health, armor, stock, or channel changes are separate observations. Health can also rise through regeneration; these changes cannot be attributed to a particular request without a server receipt.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
       'Acknowledged aim compares a retained outgoing input with the server snapshot for its ACK. A mismatch suggests server clamping or state drift, but does not by itself establish which rule caused it.',
       'Cover blockers are first intersections along the preferred hitbox-center ray in the captured client world. They do not establish server penetration rules.',
@@ -1138,6 +1188,7 @@ export function formatReport(report) {
     `Combat agent decisions (retained): ${JSON.stringify(report.agentActions)}`,
     `Combat agent routes (retained decisions): ${JSON.stringify(report.agentRoutes)}`,
     `Combat agent inventory (retained observations): ${JSON.stringify(report.inventoryEvidence)}`,
+    `Combat agent recovery (retained observations): ${JSON.stringify(report.recoveryEvidence)}`,
     `Prediction/send overlap: ${report.predictionConsistency.overlappingFrames} retained frames with local shots; ` +
       `${report.predictionConsistency.predictedFireRemovedOnWire} had Fire removed before send`,
     `Local multi-pellet projection: ${JSON.stringify(report.pelletProjection)}`,
