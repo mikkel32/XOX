@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.32
+// @version      1.5.33
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.32';
+  const VERSION = '1.5.33';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -916,6 +916,8 @@
     correctionSkipReason = null) {
     const weapon = weaponSnapshot(client);
     const player = playerSnapshot(client);
+    const outgoingReplayDirections = (buttons & 1) && shot?.replay
+      ? replayShotDirections(shot, yaw, pitch) : null;
     const sampled = runtime.sampleContexts.get(frame.s);
     runtime.sampleContexts.delete(frame.s);
     const targetNow = targetSnapshot(target);
@@ -942,6 +944,11 @@
         target: sampled.target, delayMs: Math.max(0, performance.now() - sampled.at),
         selectionDriftMeters } : null,
       correction: correction ? { yaw: correction.yaw, pitch: correction.pitch } : null,
+      outgoingReplay: outgoingReplayDirections ? {
+        calibrated: true, spreadDegrees: shot.replay.spreadDegrees,
+        pelletSpread: shot.replay.pelletSpread, pellets: shot.replay.pellets,
+        directions: outgoingReplayDirections.map(direction => [...direction])
+      } : null,
       geometry: target ? {
         inputAim: angularMiss(target, frame.yaw, frame.pitch),
         outgoingAim: angularMiss(target, yaw, pitch),

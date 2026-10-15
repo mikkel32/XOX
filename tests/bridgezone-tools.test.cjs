@@ -2707,6 +2707,12 @@ test('calibrated spread replay matches the captured kernel at varied elevation a
       const actual = directions(weapon, output.yaw, output.pitch,
         spreadDegrees(predictor.ws, weapon, predictor.ps),
         shotSeed(seed, predictor.index, 1));
+      assert.equal(decision.outgoingReplay?.calibrated, true);
+      assert.equal(decision.outgoingReplay.directions.length, actual.length);
+      assert.ok(Math.max(...actual.flatMap((ray, index) =>
+        ray.map((value, axis) => Math.abs(value -
+          decision.outgoingReplay.directions[index][axis])))) < 1e-12,
+      'the trace keeps the calibrated outgoing rays without exporting the seed');
       const hits = actual.filter(ray =>
         rayHitsBox([0, 1.62, 0], ray, center, [0.14, 0.14, 0.14])).length;
       assert.equal(decision.geometry.projectedPelletHitsOutgoing, hits,
@@ -3367,7 +3373,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.32');
+  assert.equal(exported.scriptVersion, '1.5.33');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -3400,7 +3406,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.32');
+  assert.equal(payload.scriptVersion, '1.5.33');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -3446,7 +3452,7 @@ test('a terminal match downloads one trace even when IndexedDB is unavailable', 
     assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
     assert.ok(h.api.inspect().archive.downloadRequestedAt);
     const payload = JSON.parse(await h.createdBlobs[0].text());
-    assert.equal(payload.scriptVersion, '1.5.32');
+    assert.equal(payload.scriptVersion, '1.5.33');
     assert.equal(payload.trace.frames.at(-1).sequence, 199);
     h.tick();
     assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
@@ -3467,7 +3473,7 @@ test('detaching an eliminated client exports the trace before the next timer tic
   assert.equal(h.downloads.length, 1);
   const payload = JSON.parse(await h.createdBlobs[0].text());
   assert.equal(payload.trace.frames.at(-1).sequence, 200);
-  assert.equal(payload.scriptVersion, '1.5.32');
+  assert.equal(payload.scriptVersion, '1.5.33');
 });
 
 test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {

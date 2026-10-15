@@ -730,6 +730,21 @@ pairs and the angular differences reported above, without treating same-tick
 hit events as proof of individual shot causation. All 149 local tests pass with
 the hash-matched captured physics and runtime bundles.
 
+### Version 1.5.33: exact outgoing-ray replay evidence
+
+The short 1.5.31 trace shows a 0.12–0.65 degree difference between reported
+server rays and rotated local predictions. Matching acknowledged shot counts
+do not prove matching shot seeds. Version 1.5.33 therefore records the exact
+outgoing directions produced by a locally calibrated replay for each sent
+predicted shot, plus the spread magnitude and pellet parameters used for that
+replay. It does not export the seed. The analyzer compares these outgoing
+rays with provisionally paired reported rays separately from its existing
+rotated-prediction comparison. Captured-kernel tests verify that the exported
+directions match the local outgoing replay across varied conditions; all 150
+local tests pass. No 1.5.33 server trace exists, so the new comparison cannot
+yet determine whether the earlier residual came from replay approximation,
+seed or state drift, or an invalid provisional pairing.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

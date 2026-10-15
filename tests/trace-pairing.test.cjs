@@ -110,6 +110,26 @@ test('a unanimous short trace permits labeled provisional ray comparisons', asyn
   assert.equal(duplicate.correlatedShots.rayEvidence.comparedRays, 0);
 });
 
+test('direct outgoing replay is compared separately from rotated prediction', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const local = Array.from({ length: 6 }, (_, index) => localShot(index));
+  const reportedRay = [-Math.sin(Math.PI / 180), 0, -Math.cos(Math.PI / 180)];
+  const server = local.map(shot => serverShot(shot, 180,
+    { shot: { weaponId: 'rifle', origin: [0, 1.66, 0],
+      directions: [reportedRay], impacts: [] } }));
+  const aimDecisions = local.map(shot => ({ match: 1, sequence: shot.sequence,
+    fireSent: true, outgoingReplay: { calibrated: true,
+      spreadDegrees: 1, pellets: 1, directions: [reportedRay] } }));
+  const report = traceReport(analyzeTrace, local, server, { aimDecisions });
+  assert.equal(report.correlatedShots.byMatch[1].offsetStatus, 'supportedShortTrace');
+  assert.equal(report.correlatedShots.rayEvidence.medianLocalToServerDegrees, 1);
+  assert.equal(report.correlatedShots.rayEvidence.directReplayPairs, 6);
+  assert.equal(report.correlatedShots.rayEvidence.directReplayComparedRays, 6);
+  assert.equal(report.correlatedShots.rayEvidence.medianDirectReplayDifferenceDegrees, 0);
+  assert.match(formatReport(report), /Exact outgoing replay versus reported rays.*6 rays in 6 pairs, median 0 deg/);
+  assert.match(formatReport(report), /Direct replay-to-server differences still depend on provisional pairing/);
+});
+
 test('missing metadata and incompatible pellet counts cannot manufacture ray comparisons', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const local = Array.from({ length: 16 }, (_, index) => localShot(index));

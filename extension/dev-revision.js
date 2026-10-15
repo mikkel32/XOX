@@ -1,2 +1,2 @@
 'use strict';
-globalThis.__xoxBuildRevision = 'aa518aed5f9a437763b8f5e0b26eb8c6bff222da73edd9f6221907cccf28165d';
+globalThis.__xoxBuildRevision = 'f59b434dc5db27326323b56045161ba2d7c64f89a00ff9fe5f29623a43bb559d';

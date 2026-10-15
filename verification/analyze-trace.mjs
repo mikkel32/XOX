@@ -285,7 +285,8 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
   const outgoing = new Map(frames.filter(frame => Number.isSafeInteger(frame?.match) &&
     Number.isSafeInteger(frame?.sequence) && Array.isArray(frame?.after))
     .map(frame => [`${frame.match}:${frame.sequence}`, frame]));
-  const rayDifferences = [], reportedSpread = [], targetMiss = [], originOffsets = [];
+  const rayDifferences = [], directReplayDifferences = [], reportedSpread = [],
+    targetMiss = [], originOffsets = [];
   const rayExamples = [];
   const comparableRayGroups = new Map();
   const rayEvidence = { serverShotEventsWithDirections: serverShots.filter(event =>
@@ -297,6 +298,9 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     missingSampledAim: 0, missingOutgoingAim: 0, invalidRayVectors: 0,
     weaponAgreement: { same: 0, different: 0, unknown: 0 },
     differencesOverHalfDegree: 0, targetPointSamples: 0,
+    directReplayPairs: 0, directReplayComparedRays: 0,
+    directReplayDifferencesOverHalfDegree: 0, invalidDirectReplayPairs: 0,
+    directReplayExamples: [],
     pairedShotsWithImpacts: 0, impactsCloserThanSelectedPoint: 0, examples: [] };
   const pairing = { localRows: localShots.length, eligibleLocalShots: local.length,
     ineligibleLocalShots: localShots.length - local.length,
@@ -462,6 +466,25 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
       if (!predicted.length) rayEvidence.missingLocalDirections++;
       if (directions.length) {
         rayEvidence.pairedShotsWithDirections++;
+        const directReplay = decision?.outgoingReplay;
+        if (!weaponMismatch && directReplay?.calibrated === true &&
+            Array.isArray(directReplay.directions)) {
+          if (directions.length <= 32 &&
+              directReplay.directions.length === directions.length) {
+            const differences = directions.map((ray, index) =>
+              angleDegrees(ray, directReplay.directions[index]));
+            if (differences.every(finite)) {
+              rayEvidence.directReplayPairs++;
+              rayEvidence.directReplayComparedRays += differences.length;
+              rayEvidence.directReplayDifferencesOverHalfDegree +=
+                differences.filter(value => value > 0.5).length;
+              directReplayDifferences.push(...differences);
+              rayEvidence.directReplayExamples.push({ match, sequence: shot.sequence,
+                weapon: reported.weaponId || shot.weapon?.id || null,
+                maxDifferenceDegrees: rounded(Math.max(...differences)) });
+            } else rayEvidence.invalidDirectReplayPairs++;
+          } else rayEvidence.invalidDirectReplayPairs++;
+        }
         if (validVector(reported?.origin) && validVector(decision?.target?.position) &&
             finite(decision.target.bodyHeight) && ['head', 'chest'].includes(decision.target.aimPart)) {
           let rays = 0, intersections = 0;
@@ -630,6 +653,12 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     examples: fanExamples };
   rayEvidence.medianLocalToServerDegrees = median(rayDifferences);
   rayEvidence.maxLocalToServerDegrees = rayDifferences.length ? rounded(Math.max(...rayDifferences)) : null;
+  rayEvidence.medianDirectReplayDifferenceDegrees = median(directReplayDifferences);
+  rayEvidence.maxDirectReplayDifferenceDegrees = directReplayDifferences.length
+    ? rounded(Math.max(...directReplayDifferences)) : null;
+  rayEvidence.directReplayExamples.sort((a, b) =>
+    b.maxDifferenceDegrees - a.maxDifferenceDegrees);
+  rayEvidence.directReplayExamples.length = Math.min(10, rayEvidence.directReplayExamples.length);
   rayEvidence.medianServerRayFromOutgoingAimDegrees = median(reportedSpread);
   rayEvidence.medianTargetPointMissMeters = median(targetMiss);
   rayEvidence.medianOriginOffsetMeters = median(originOffsets);
@@ -1134,6 +1163,7 @@ export function analyzeTrace(document) {
       'Pairing requires one compatible local shot and one compatible server shot within the selected tick offset and delay window. Unsupported offsets, missing fields, and ambiguous candidates remain unmatched.',
       'A paired shot at a unique server-shot hit tick is only a same-tick observation. Multiple own-player server shots at one hit tick are excluded from paired-hit groups; neither case proves which ray hit.',
       'Server-reported shot directions are visual event data from the game. Their difference from a rotated local prediction can diagnose spread-seed or aim-state drift only when provisional pairing is correct.',
+      'An exact outgoing replay is reconstructed from locally calibrated shot inputs without exporting its seed. Direct replay-to-server differences still depend on provisional pairing and do not prove the private server spread rule.',
       'Within-shot ray separation uses directions in one server shot event and does not require local/server pairing. It describes a reported ray fan, not a server spread parameter or per-shot aim error; single-ray events provide no separation measurement.',
       'Ray-fan pairing labels and ambiguous-candidate angular ranges use the provisional pairing window. Candidate ranges compare rays by array index after rotating the local prediction to outgoing aim; they do not choose a server shot or establish spread or aim as the cause.',
       'Reported-ray intersections use the locally sampled target hitbox; they do not prove the target occupied that box on the server or that cover allowed the shot.',
@@ -1214,6 +1244,12 @@ export function formatReport(report) {
     `Server-reported rays through sampled hitboxes by visibility (provisional): ` +
       `${JSON.stringify(report.correlatedShots.reportedHitboxByVisibility)}`,
     `Server-reported ray comparison (provisional pairs): ${JSON.stringify(report.correlatedShots.rayEvidence)}`,
+    `Exact outgoing replay versus reported rays (provisional pairs): ` +
+      `${report.correlatedShots.rayEvidence.directReplayComparedRays} rays in ` +
+      `${report.correlatedShots.rayEvidence.directReplayPairs} pairs, median ` +
+      `${report.correlatedShots.rayEvidence.medianDirectReplayDifferenceDegrees ?? 'unavailable'} deg, ` +
+      `max ${report.correlatedShots.rayEvidence.maxDirectReplayDifferenceDegrees ?? 'unavailable'} deg, ` +
+      `>0.5 deg ${report.correlatedShots.rayEvidence.directReplayDifferencesOverHalfDegree}`,
     `Within-shot server-reported ray separation (pairing independent): ` +
       `${JSON.stringify(report.correlatedShots.reportedRayFan)}`,
     'Comparable ray angular differences by weapon / selected distance / local fire mode (provisional):',
