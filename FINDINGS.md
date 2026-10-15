@@ -214,13 +214,49 @@ An optional test executes the captured `stepWeapon` function with ADS below 1
 and observes a shot. A second optional test sends 64 captured-kernel spread
 samples through XOX's bounded correction and projects each corrected ray
 through the captured standing torso box at 10 m. These tests establish the
-local mechanics, not current server timing or hit rate. No 1.5.14 server match
-has been recorded.
+local mechanics, not current server timing or hit rate. The user-supplied
+1.5.14 match below did not retain an early-ADS firing decision: its retained
+selected targets were 72–226 m away, outside the guarded close-shot path.
 
 The captured shared `startSwitch` helper clears cooldown, but the actual
 client predictor's swap path sets switching time without calling that helper
 or clearing cooldown. That code does not support claiming a quick-swap firing
 rate exploit, so 1.5.14 does not automate weapon swapping.
+
+### Version 1.5.15 partial-head targeting
+
+The user-supplied 1.5.14 export from 2026-10-15 19:57 UTC has SHA-256
+`450160431fc8239dc5bd3c4cc299386860ecc06caa838058d13e34c985df34db`.
+It covers one match with 188 server shot events, 83 hit events, 53 head hits,
+24 kills, no recorded kick, and no retained errors. All 353 retained outgoing
+Fire decisions requested and selected Head. The 189 retained local shot
+predictions all projected into the selected head box after correction, but
+those projections are local geometry, not a measured server hit rate. The
+trace counted 55,781 candidate rejections for blocked center sight lines;
+it did not record whether any other point inside those hitboxes was visible.
+
+The trace also suggests a moving-fire problem. In a conservative offline
+association, a local prediction and server shot were paired only when they
+were the sole candidates for each other in the same match, 7–12 ticks and
+100–350 ms apart. This yielded 47 unambiguous pairs: the Sidearm had 1 hit
+in 11 pairs at own speed of at least 3 m/s versus 2 in 4 slower pairs; the
+Longbow had 0 in 3 faster pairs versus 28 in 29 slower pairs. These groups
+are small, and server events carry no input sequence, so even these pairings
+are provisional. The trace cannot distinguish spread-state differences,
+rewind error, cover, or another cause. No movement compensation was changed
+on this evidence alone.
+
+Version 1.5.15 probes the upper, lower, and two lateral interior points of
+the selected head or chest when its center is behind world cover. A clear
+center still takes one visibility ray and scores ahead of a comparable
+partial exposure. Explicit Head never falls back to
+Chest; Auto may still use its existing opposite-part fallback. The target
+snapshot records the selected point and true hitbox center separately, so
+multi-pellet projections continue to use the captured box geometry. New
+trace reports count `partial` and `fallback-partial` firing decisions. Local
+tests cover exposed upper and side head points, a fully covered head, and
+selection preference for a fully visible target.
+Server hit-rate improvement awaits a 1.5.15 match.
 
 ## What changed and what was observed
 

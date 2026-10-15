@@ -80,6 +80,20 @@ test('aim report exposes explicit point overrides in old and new trace rows', as
   assert.match(formatReport(report), /Requested vs selected aim points/);
 });
 
+test('aim report counts partially visible head selections without treating them as hits', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.15', trace: {
+    aimDecisions: [
+      { fireSent: true, target: { aimPart: 'head', visibility: 'partial' } },
+      { fireSent: true, target: { aimPart: 'head', visibility: 'clear' } }
+    ],
+    serverEvents: [{ type: 'shot' }]
+  } });
+  assert.deepEqual(report.aimVisibility, { partial: 1, clear: 1 });
+  assert.equal(report.serverEvents.hits, 0);
+  assert.match(formatReport(report), /Selected point visibility.*"partial":1/);
+});
+
 test('multi-pellet report keeps local hit projections separate from server hits', async () => {
   const { analyzeTrace } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.13', trace: {

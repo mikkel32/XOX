@@ -1183,20 +1183,91 @@ test('automatic clear-point targeting falls back from blocked head to chest', ()
   });
   const input = frame();
   const output = send(fake, [input])[0];
-  assert.equal(points.length, 2);
+  assert.equal(points.length, 6);
   close(points[0][1], 1.66);
-  close(points[1][1], 1.21);
+  close(points[5][1], 1.21);
   close(output.pitch, Math.atan2(1.21 - 1.62, Math.hypot(2, 10)));
   h.api.setOptions({ point: 'head' });
   points.length = 0;
   const blockedHead = send(fake, [frame({ s: 24 })])[0];
-  assert.equal(points.length, 1, 'explicit Head does not try the chest fallback');
+  assert.equal(points.length, 5, 'explicit Head searches inside the head but never tries the chest');
   assert.equal(blockedHead.buttons & 1, 0, 'a covered head is not replaced by a chest shot');
   h.api.setOptions({ point: 'chest' });
   points.length = 0;
   const clearChest = send(fake, [frame({ s: 25 })])[0];
   assert.equal(points.length, 1);
   assert.equal(clearChest.buttons & 1, 1);
+});
+
+test('a visible part of the requested head remains selectable behind cover', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      return point[1] > 1.7;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 2, 'a partially exposed head needs one extra visibility ray');
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'partial');
+  close(target.point[1], 1.73);
+  close(target.hitboxCenter[1], 1.66);
+  close(output.pitch, Math.atan2(1.73 - 1.62, Math.hypot(2, 10)));
+  assert.ok(target.point[1] < target.position[1] + target.bodyHeight,
+    'the selected point stays inside the captured head hitbox');
+  h.api.destroy();
+});
+
+test('a side opening selects an interior head point without changing the requested part', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      return point[0] > 2.05;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 3);
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'partial');
+  assert.ok(target.point[0] > 2.05 && target.point[0] < 2.14);
+  assert.ok(Math.abs(target.point[2] + 10) < 0.14);
+  h.api.destroy();
+});
+
+test('a fully visible head wins over a similarly placed partial opening', () => {
+  const h = harness();
+  const fake = attach(h);
+  fake.client.remoteFrames = [
+    { snap: opponent(1, { p: [2, 0, -10] }) },
+    { snap: opponent(2, { p: [3, 0, -10] }) }
+  ];
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      return point[0] > 2.9 || point[1] > 1.7;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.index, 2);
+  assert.equal(target.visibility, 'clear');
+  h.api.destroy();
 });
 
 const physicsPath = process.env.XOX_CLIENT_PHYSICS ||
@@ -1450,7 +1521,8 @@ test('multiple projectile correction keeps the average when it lands more pellet
   assert.equal(decision.target.aimPart, 'head');
 });
 
-const runtimePath = path.join(__dirname, '..', 'research', 'turbopack-37jd2rjmtu1y9.js');
+const runtimePath = process.env.XOX_CLIENT_RUNTIME ||
+  path.join(__dirname, '..', 'research', 'turbopack-37jd2rjmtu1y9.js');
 
 test('captured Turbopack runtime preserves grouped exports and array-to-object loader handoff', {
   skip: !fs.existsSync(runtimePath) && 'Captured runtime is optional for portable tests'
@@ -1996,7 +2068,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.14');
+  assert.equal(exported.scriptVersion, '1.5.15');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2028,7 +2100,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.14');
+  assert.equal(payload.scriptVersion, '1.5.15');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

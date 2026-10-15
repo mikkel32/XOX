@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.14
+// @version      1.5.15
 // @description  Xray, adaptive Rage aim, auto fire, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.14';
+  const VERSION = '1.5.15';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const OUTGOING_AIM_TOLERANCE = 0.008;
@@ -180,6 +180,27 @@
     return [snap.p[0], snap.p[1] + (point === 'head' || point === 'auto' ? h - 0.14 : h * 0.75 - 0.14), snap.p[2]];
   }
 
+  function clearAimPoint(world, hasLineOfSight, origin, snap, part) {
+    const center = aimPoint(snap, part);
+    if (hasLineOfSight(world, origin, center)) return { point: center, visibility: 'clear' };
+    // Probe points safely inside the captured hitbox when cover blocks its
+    // center. A visible edge can still be a valid shot at the requested part.
+    const inset = part === 'head' ? 0.07 : 0.12;
+    const dx = center[0] - origin[0], dz = center[2] - origin[2];
+    const horizontal = Math.hypot(dx, dz);
+    const candidates = [[center[0], center[1] + inset, center[2]]];
+    if (horizontal > 0.01) {
+      const sideX = -dz / horizontal * inset, sideZ = dx / horizontal * inset;
+      candidates.push([center[0] + sideX, center[1], center[2] + sideZ],
+        [center[0] - sideX, center[1], center[2] - sideZ]);
+    }
+    candidates.push([center[0], center[1] - inset, center[2]]);
+    for (const point of candidates) {
+      if (hasLineOfSight(world, origin, point)) return { point, visibility: 'partial' };
+    }
+    return null;
+  }
+
   function vector3(value) {
     return Array.isArray(value) && value.length === 3 && value.every(Number.isFinite) ? [...value] : null;
   }
@@ -250,17 +271,17 @@
         : options.point === 'chest' ? 'chest' : 'head';
       let point = aimPoint(snap, preferred);
       const delta = point.map((value, i) => value - origin[i]);
-      const distance = Math.hypot(...delta);
+      let distance = Math.hypot(...delta);
       if (distance < 0.01 || distance > maxRange) {
         noteScan(scan, snap, distance, 'range');
         continue;
       }
-      const dot = delta.reduce((sum, value, i) => sum + value * forward[i], 0) / distance;
+      let dot = delta.reduce((sum, value, i) => sum + value * forward[i], 0) / distance;
       if (dot < minDot) {
         noteScan(scan, snap, distance, 'fov');
         continue;
       }
-      let visibility = options.visibleOnly ? 'clear' : 'unchecked';
+      let aimPart = preferred, visibility = options.visibleOnly ? 'clear' : 'unchecked';
       if (options.visibleOnly) {
         const { getCollisionWorld, hasLineOfSight } = runtime.physics;
         // If collision hooks are unavailable, don't select a target through unknown cover.
@@ -269,20 +290,30 @@
           continue;
         }
         const world = getCollisionWorld();
-        if (!hasLineOfSight(world, origin, point)) {
-          if (!adaptive) {
-            noteScan(scan, snap, distance, 'cover');
-            continue;
-          }
-          point = aimPoint(snap, preferred === 'chest' ? 'head' : 'chest');
-          if (!hasLineOfSight(world, origin, point)) {
-            noteScan(scan, snap, distance, 'cover');
-            continue;
-          }
-          visibility = 'fallback';
+        let clear = clearAimPoint(world, hasLineOfSight, origin, snap, preferred);
+        if (!clear && adaptive) {
+          aimPart = preferred === 'chest' ? 'head' : 'chest';
+          clear = clearAimPoint(world, hasLineOfSight, origin, snap, aimPart);
+          if (clear) clear.visibility = clear.visibility === 'partial' ? 'fallback-partial' : 'fallback';
         }
+        if (!clear) {
+          noteScan(scan, snap, distance, 'cover');
+          continue;
+        }
+        point = clear.point;
+        visibility = clear.visibility;
       }
       const aimDelta = point.map((value, i) => value - origin[i]);
+      distance = Math.hypot(...aimDelta);
+      if (distance > maxRange) {
+        noteScan(scan, snap, distance, 'range');
+        continue;
+      }
+      dot = aimDelta.reduce((sum, value, i) => sum + value * forward[i], 0) / distance;
+      if (dot < minDot) {
+        noteScan(scan, snap, distance, 'fov');
+        continue;
+      }
       const pitch = Math.atan2(aimDelta[1], Math.hypot(aimDelta[0], aimDelta[2]));
       if (Math.abs(pitch) > 1.54) {
         noteScan(scan, snap, distance, 'pitch');
@@ -292,21 +323,23 @@
       noteScan(scan, snap, distance, 'eligible');
       // The captured hitbox narrows with distance. Favor targets inside the
       // active weapon's damage range without imposing an artificial cutoff.
+      // Prefer a fully visible center when another target is comparably good.
+      const partialPenalty = visibility.endsWith('partial') ? (options.rage ? 0.12 : 0.005) : 0;
       const score = options.rage
         ? 0.45 * Math.max(Math.abs(normalizedDelta(approachYaw, yaw)), Math.abs(approachPitch - pitch)) +
           0.9 * Math.log1p(distance / effectiveRange) +
           (ownSpeed > 1 ? 0.2 * Math.min(3, distance / effectiveRange) : 0) +
           0.02 * Math.min(speed, 20) -
-          (snap.i === runtime.outgoingAim.targetIndex ? 0.15 : 0)
-        : 1 - dot;
+          (snap.i === runtime.outgoingAim.targetIndex ? 0.15 : 0) + partialPenalty
+        : 1 - dot + partialPenalty;
       if (score >= bestScore) continue;
       bestScore = score;
       best = {
-        index: snap.i, distance, direction: aimDelta.map(value => value / Math.hypot(...aimDelta)),
-        yaw, pitch, origin: [...origin], point: [...point], position: [...snap.p],
+        index: snap.i, distance, direction: aimDelta.map(value => value / distance),
+        yaw, pitch, origin: [...origin], point: [...point],
+        hitboxCenter: aimPoint(snap, aimPart), position: [...snap.p],
         velocity: vector3(snap.v), bodyHeight: bodyHeight(snap.c),
-        aimPart: visibility === 'fallback'
-          ? (preferred === 'chest' ? 'head' : 'chest') : (preferred === 'chest' ? 'chest' : 'head'),
+        aimPart,
         visibility, sampled
       };
     }
@@ -463,6 +496,7 @@
   function targetSnapshot(target) {
     return target ? { index: target.index, distance: target.distance,
       origin: vector3(target.origin), point: vector3(target.point),
+      hitboxCenter: vector3(target.hitboxCenter),
       position: vector3(target.position), velocity: vector3(target.velocity),
       bodyHeight: Number.isFinite(target.bodyHeight) ? target.bodyHeight : null,
       aimPart: target.aimPart, visibility: target.visibility, sampled: target.sampled } : null;
@@ -508,7 +542,7 @@
   }
 
   function projectedPelletHits(shot, target, yaw, pitch) {
-    const eye = vector3(shot?.eye), center = vector3(target?.point);
+    const eye = vector3(shot?.eye), center = vector3(target?.hitboxCenter || target?.point);
     if (!eye || !center || !Array.isArray(shot.directions) ||
         !Number.isFinite(shot.yaw) || !Number.isFinite(shot.pitch) ||
         !Number.isFinite(yaw) || !Number.isFinite(pitch)) return null;

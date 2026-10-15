@@ -163,6 +163,12 @@ export function analyzeTrace(document) {
   const settings = list(trace.settings);
   const settingsHistory = summarizeSettings(settings);
   const aimPointChoices = summarizeAimPointChoices(sent, settings);
+  const aimVisibility = {};
+  for (const decision of sent) {
+    const status = typeof decision?.target?.visibility === 'string'
+      ? decision.target.visibility : 'unknown';
+    aimVisibility[status] = (aimVisibility[status] || 0) + 1;
+  }
   const gateAimState = summarizeGateAim(gates);
   const highestAckByMatch = { ...(trace.counters?.highestAckByMatch || {}) };
   for (const snapshot of snapshots) {
@@ -389,6 +395,7 @@ export function analyzeTrace(document) {
     formatVersion: document.formatVersion, scriptVersion: document.scriptVersion || 'unknown',
     capturedAt: document.capturedAt || null, matchesObserved: trace.match || 0,
     latestSettings: settingsHistory.latest, settingsHistory, aimPointChoices,
+    aimVisibility,
     retention: { retained, dropped: trace.retention?.dropped || null },
     rageSamples: trace.counters?.rageSamples ?? null,
     gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
@@ -437,6 +444,7 @@ export function formatReport(report) {
     `Recorded setting changes (${report.settingsHistory.retained} rows): ${JSON.stringify(report.settingsHistory.transitions)}`,
     `Requested vs selected aim points (retained Fire): ${JSON.stringify(report.aimPointChoices.byRequested)}`,
     `Aim points by weapon: ${JSON.stringify(report.aimPointChoices.byWeapon)}`,
+    `Selected point visibility (retained Fire): ${JSON.stringify(report.aimVisibility)}`,
     `Fire path evidence (retained rows): original game samples ${report.firingEvidence.originalFireGateRows}, ` +
       `prepared samples ${report.firingEvidence.preparedFireGateRows}, pre-send frames ` +
       `${report.firingEvidence.sampledFireFrames ?? 'unavailable'}, outgoing frames ` +
