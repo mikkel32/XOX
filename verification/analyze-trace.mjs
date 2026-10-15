@@ -213,6 +213,7 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
     .map(frame => [`${frame.match}:${frame.sequence}`, frame]));
   const rayDifferences = [], reportedSpread = [], targetMiss = [], originOffsets = [];
   const rayExamples = [];
+  const comparableRayGroups = new Map();
   const rayEvidence = { serverShotEventsWithDirections: serverShots.filter(event =>
     Array.isArray(event.shot?.directions) && event.shot.directions.length > 0).length,
     serverShotEventsWithImpacts: serverShots.filter(event => list(event.shot?.impacts).length).length,
@@ -275,6 +276,15 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
         const frame = outgoing.get(`${match}:${shot.sequence}`);
         const source = directionBasis(shot.yaw, shot.pitch);
         const destination = directionBasis(frame?.after?.[0], frame?.after?.[1]);
+        const weapon = [reported?.weaponId, shot.weapon?.id]
+          .find(value => typeof value === 'string' && value) || 'unknown';
+        const selectedDistance = finite(decision?.target?.distance)
+          ? decision.target.distance : decision?.targetDistance;
+        const distance = distanceBand(selectedDistance);
+        const localFireMode = decision?.sampled?.hipFire === true && decision.adsRequested === false
+          ? 'hip-selected' : decision?.adsRequested === true && decision.sampled?.hipFire !== true
+            ? 'ads-requested' : 'unknown';
+        const groupKey = JSON.stringify([weapon, distance, localFireMode]);
         let pairDifference = null;
         for (let index = 0; !weaponMismatch && predicted.length === directions.length &&
             index < directions.length; index++) {
@@ -285,6 +295,9 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
           rayDifferences.push(difference);
           rayEvidence.comparedRays++;
           if (difference > 0.5) rayEvidence.differencesOverHalfDegree++;
+          if (!comparableRayGroups.has(groupKey)) comparableRayGroups.set(groupKey,
+            { weapon, distance, localFireMode, angles: [] });
+          comparableRayGroups.get(groupKey).angles.push(difference);
           pairDifference = Math.max(pairDifference ?? 0, difference);
           const spread = angleDegrees(actual, destination?.forward);
           if (finite(spread)) reportedSpread.push(spread);
@@ -337,7 +350,10 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
   }
   const median = values => {
     const ordered = values.filter(finite).sort((a, b) => a - b);
-    return ordered.length ? rounded(ordered[Math.floor((ordered.length - 1) / 2)]) : null;
+    if (!ordered.length) return null;
+    const middle = Math.floor(ordered.length / 2);
+    return rounded(ordered.length % 2 ? ordered[middle] :
+      (ordered[middle - 1] + ordered[middle]) / 2);
   };
   rayEvidence.medianLocalToServerDegrees = median(rayDifferences);
   rayEvidence.maxLocalToServerDegrees = rayDifferences.length ? rounded(Math.max(...rayDifferences)) : null;
@@ -346,8 +362,18 @@ function correlateServerShots(localShots, events, decisions, frames, ackLatencyM
   rayEvidence.medianOriginOffsetMeters = median(originOffsets);
   rayEvidence.examples = rayExamples.sort((a, b) =>
     b.maxDifferenceDegrees - a.maxDifferenceDegrees).slice(0, 10);
+  const comparableRaysByWeaponDistanceMode = [...comparableRayGroups.values()]
+    .map(({ angles, ...dimensions }) => {
+      angles.sort((a, b) => a - b);
+      return { ...dimensions, count: angles.length,
+        medianDegrees: median(angles),
+        p90Degrees: rounded(angles[Math.ceil(angles.length * 0.9) - 1]),
+        differencesOverHalfDegree: angles.filter(value => value > 0.5).length };
+    }).sort((a, b) => a.weapon.localeCompare(b.weapon) ||
+      a.distance.localeCompare(b.distance) || a.localFireMode.localeCompare(b.localFireMode));
   return { method: 'provisional same-match tick and arrival-time alignment',
     paired, pairedWithDecision, pairedHits, byMatch, rayEvidence,
+    comparableRaysByWeaponDistanceMode,
     byModeDistanceMovement: Object.values(byModeDistanceMovement).sort((a, b) =>
       a.mode.localeCompare(b.mode) || a.distance.localeCompare(b.distance) ||
       a.movement.localeCompare(b.movement)) };
@@ -629,9 +655,25 @@ export function analyzeTrace(document) {
   const correlatedShots = correlateServerShots(localShots, events, decisions, frames,
     authoritative.medianAckLatencyMs);
   const agentActions = {};
+  const agentRoutes = { observed: 0, bySource: {}, full: 0, partial: 0, blocked: 0,
+    maxStuckCount: 0, maxAbsSteerDegrees: 0 };
   for (const item of list(trace.agentDecisions)) {
     const action = typeof item?.action === 'string' ? item.action : 'unknown';
     agentActions[action] = (agentActions[action] || 0) + 1;
+    if (finite(item?.stuckCount)) agentRoutes.maxStuckCount = Math.max(
+      agentRoutes.maxStuckCount, item.stuckCount);
+    const route = item?.route;
+    if (!route || typeof route !== 'object') continue;
+    agentRoutes.observed++;
+    const source = typeof route.source === 'string' ? route.source : 'unknown';
+    agentRoutes.bySource[source] = (agentRoutes.bySource[source] || 0) + 1;
+    if (finite(route.clearanceMeters)) {
+      if (route.clearanceMeters >= 4) agentRoutes.full++;
+      else if (route.clearanceMeters >= 0.75) agentRoutes.partial++;
+      else agentRoutes.blocked++;
+    }
+    if (finite(route.steerDegrees)) agentRoutes.maxAbsSteerDegrees = Math.max(
+      agentRoutes.maxAbsSteerDegrees, Math.abs(route.steerDegrees));
   }
   const firingEvidence = { originalFireGateRows: originalGateButtons.byButton.fire,
     preparedFireGateRows: sampledGateButtons.byButton.fire,
@@ -653,7 +695,7 @@ export function analyzeTrace(document) {
     gateReasons: gateCounts, gateSamples, coverEvidence,
     targetRejects: trace.counters?.targetRejects || null,
     inputButtons, firingEvidence, hipFireEvidence, correlatedShots,
-    agentActions, interactionEvidence, ammoAssist, predictionConsistency,
+    agentActions, agentRoutes, interactionEvidence, ammoAssist, predictionConsistency,
     pelletProjection,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
       ackCoverage, missingWeapon, missingDistance,
@@ -667,6 +709,7 @@ export function analyzeTrace(document) {
       'Server events have no guaranteed input sequence, so server hits cannot be assigned to a weapon, target, or distance.',
       'Tick-aligned shot pairs are provisional. A shared tick and plausible arrival delay do not prove which input caused a server hit.',
       'Server-reported shot directions are visual event data from the game. Their difference from a rotated local prediction can diagnose spread-seed or aim-state drift only when provisional pairing is correct.',
+      'Comparable-ray groups use locally selected distance and recorded local fire-mode flags. ADS requested or hip selected does not establish the server scope state.',
       'Server ray versus outgoing aim is an observed angular difference, not a direct server spread parameter. A small selected-point miss does not prove the target occupied that point on the server.',
       'Server-reported impacts are grouped with the preceding own-player shot by event order. An impact closer than the locally selected target point suggests an obstruction, but neither ordering nor provisional input pairing proves the hit path.',
       'Fire-gate rows are coalesced samples; gate counters cover every Rage sample when present.',
@@ -726,7 +769,15 @@ export function formatReport(report) {
     `Paired shot modes by distance and movement (provisional): ` +
       `${JSON.stringify(report.correlatedShots.byModeDistanceMovement)}`,
     `Server-reported ray comparison (provisional pairs): ${JSON.stringify(report.correlatedShots.rayEvidence)}`,
+    'Comparable ray angular differences by weapon / selected distance / local fire mode (provisional):',
+    ...(report.correlatedShots.comparableRaysByWeaponDistanceMode.length
+      ? report.correlatedShots.comparableRaysByWeaponDistanceMode.map(group =>
+        `  ${group.weapon} | ${group.distance} | ${group.localFireMode}: ${group.count} rays, ` +
+          `median ${group.medianDegrees} deg, P90 ${group.p90Degrees} deg, ` +
+          `>0.5 deg ${group.differencesOverHalfDegree}`)
+      : ['  No comparable rays.']),
     `Combat agent decisions (retained): ${JSON.stringify(report.agentActions)}`,
+    `Combat agent routes (retained decisions): ${JSON.stringify(report.agentRoutes)}`,
     `Prediction/send overlap: ${report.predictionConsistency.overlappingFrames} retained frames with local shots; ` +
       `${report.predictionConsistency.predictedFireRemovedOnWire} had Fire removed before send`,
     `Local multi-pellet projection: ${JSON.stringify(report.pelletProjection)}`,

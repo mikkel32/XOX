@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.20
+// @version      1.5.21
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,13 +15,14 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.20';
+  const VERSION = '1.5.21';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const HIP_RANGE_LIMIT = 40;
   const OUTGOING_AIM_TOLERANCE = 0.008;
   const INTERACT_BUTTON = 64;
+  const PLANE_DOOR_TICKS = 120; // Captured client: 4 seconds at 30 ticks/second.
   const AMMO_TYPES = ['light', 'heavy', 'shells', 'sniper'];
   const AMMO_CAPS = { light: 240, heavy: 180, shells: 48, sniper: 40 };
   const TRACE_LIMITS = Object.freeze({ frames: 4096, localShots: 512, aimDecisions: 512,
@@ -40,7 +41,10 @@
   runtime.ammoPickup = { id: null, nextAt: 0 };
   runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
     lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0,
-    navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0 };
+    navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
+    dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
+    dropTerrainChecked: false,
+    lastDropPulseAt: -Infinity };
   runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
   runtime.seedSync = { status: 'unknown', aligned: 0, diverged: 0 };
   const seenServerEvents = new Set();
@@ -207,6 +211,12 @@
     runtime.agent.navigationGoalKey = null;
     runtime.agent.lastGoalDistance = null;
     runtime.agent.detourUntil = 0;
+    runtime.agent.dropRouteKey = null;
+    runtime.agent.dropTarget = null;
+    runtime.agent.dropFraction = null;
+    runtime.agent.dropTerrain = null;
+    runtime.agent.dropTerrainChecked = false;
+    runtime.agent.lastDropPulseAt = -Infinity;
     lootCacheClient = null;
     lootCache = [];
   }
@@ -841,6 +851,11 @@
         runtime.stealth.heldShots++;
         return { ...frame, buttons: frame.buttons & ~1 };
       }
+      if (!spreadTurnReady(client, frame, target, state)) {
+        runtime.sampleHoldReason = 'spread-align';
+        runtime.stealth.heldShots++;
+        return { ...frame, buttons: frame.buttons & ~1 };
+      }
       return frame;
     }
     if (state.pendingManualUntil && now > state.pendingManualUntil) state.pendingManualUntil = 0;
@@ -888,8 +903,8 @@
     }
   }
 
-  function applyStealth(frame, angles) {
-    if (options.rage && options.rapidFire) return {
+  function applyStealth(frame, angles, exact = false) {
+    if (options.rage || exact) return {
       yaw: angles.yaw, pitch: angles.pitch,
       original: { yaw: frame.yaw, pitch: frame.pitch }
     };
@@ -933,7 +948,7 @@
       if (target && (frame.buttons & 1)) {
         // Do not defer a predicted shot to chase an unreachable correction.
         correction = compensateSpread(shot, target, state);
-        desired = applyStealth(frame, correction || target);
+        desired = applyStealth(frame, correction || target, !!correction);
       }
       const yawStep = Math.max(-MAX_OUTGOING_TURN, Math.min(MAX_OUTGOING_TURN,
         normalizedDelta(state.yaw, desired.yaw)));
@@ -1112,6 +1127,33 @@
     return { scale: 1, seeded: false };
   }
 
+  function spreadTurnReady(client, frame, target, aim) {
+    const player = ownState(client);
+    const weapon = client.predictor?.activeStats;
+    const ws = client.predictor?.ws;
+    if (weapon?.pellets !== 1 || ![weapon.hipSpread, weapon.adsSpread,
+      weapon.moveSpread, ws?.ads, ws?.bloom].every(Number.isFinite)) return true;
+    const ads = Math.max(0, Math.min(1, ws.ads));
+    const adsStep = Number.isFinite(weapon.adsSeconds)
+      ? (1 / 30) / Math.max(0.05, weapon.adsSeconds) : 0;
+    const nextAds = frame.buttons & 2 ? Math.min(1, ads + adsStep) :
+      Math.max(0, ads - 1.4 * adsStep);
+    const moving = Math.hypot(frame.mx, frame.mz) > 0.1 ||
+      Math.hypot(player?.vel?.[0] || 0, player?.vel?.[2] || 0) > 0.5;
+    const spreadAt = value => Math.max(0,
+      weapon.hipSpread * (1 - value) + weapon.adsSpread * value +
+      Math.max(0, weapon.moveSpread) * (moving ? 1 : 0) * (1 - 0.6 * value) +
+      Math.max(0, ws.bloom) * (1 - 0.7 * value) +
+      (player?.grounded === false ? 2.5 * (1 - 0.5 * value) : 0));
+    const sample = runtime.seedSync.status === 'diverged'
+      ? { scale: 1 } : nextShotSpreadScale(client, ws);
+    const radius = Math.max(spreadAt(ads), spreadAt(nextAds)) * sample.scale * Math.PI / 180;
+    const yawRadius = radius / Math.cos(Math.min(1.54, Math.abs(target.pitch) + radius));
+    const reserve = 0.25 * Math.PI / 180;
+    return Math.abs(normalizedDelta(aim.yaw, target.yaw)) + yawRadius + reserve <= MAX_OUTGOING_TURN &&
+      Math.abs(aim.pitch - target.pitch) + radius + reserve <= MAX_OUTGOING_TURN;
+  }
+
   function hipShotPlan(client, frame, target, weapon, ws) {
     const player = ownState(client);
     if (weapon.pellets !== 1 || target.distance > Math.min(options.hipRange, HIP_RANGE_LIMIT) ||
@@ -1149,19 +1191,20 @@
     };
   }
 
-  function agentNote(action, goal = null, distance = null) {
+  function agentNote(action, goal = null, distance = null, route = null) {
     const agent = runtime.agent;
     agent.action = action;
     agent.goal = goal;
     const now = performance.now();
-    const key = [action, goal?.kind, goal?.index ?? '-', Math.round((distance || 0) / 10)].join(':');
+    const key = [action, goal?.kind, goal?.index ?? '-', Math.round((distance || 0) / 10),
+      route?.source ?? '-', route?.steerDegrees ?? '-'].join(':');
     if (agent.lastTraceKey === key && now - agent.lastTraceAt < 750) return;
     agent.lastTraceKey = key;
     agent.lastTraceAt = now;
     recordTrace('agentDecisions', { at: now, match: runtime.trace.match, action,
       goal: goal ? { kind: goal.kind, index: goal.index ?? null } : null,
       distanceMeters: Number.isFinite(distance) ? Math.round(distance * 10) / 10 : null,
-      stuckCount: agent.stuckCount });
+      stuckCount: agent.stuckCount, route });
   }
 
   function stormCircle(storm, tick) {
@@ -1249,25 +1292,133 @@
       [0, side * 0.6, -side * 0.6, side * 1.2, -side * 1.2];
     const rotated = angle => [direction[0] * Math.cos(angle) - direction[1] * Math.sin(angle),
       direction[0] * Math.sin(angle) + direction[1] * Math.cos(angle)];
+    const choice = (angle, clearance, source, tested) => ({ direction: rotated(angle),
+      route: { source, steerDegrees: Math.round(angle * 1800 / Math.PI) / 10,
+        clearanceMeters: Number.isFinite(clearance) ? clearance : null, tested } });
     if (typeof getCollisionWorld !== 'function' || typeof hasLineOfSight !== 'function')
-      return rotated(angles[0]);
+      return choice(angles[0], null, 'physics-unavailable', 0);
     const world = getCollisionWorld();
-    if (!world) return rotated(angles[0]);
-    let best = null, bestClearance = 0;
+    if (!world) return choice(angles[0], null, 'world-unavailable', 0);
+    const source = typeof world.grid?.get === 'function' && Array.isArray(world.boxes)
+      ? 'movement-grid' : 'shot-ray';
+    let bestAngle = null, bestClearance = 0, tested = 0;
     for (const angle of angles) {
       const [x, z] = rotated(angle);
       const clearance = agentRouteClearance(world, me, [x, z], hasLineOfSight);
-      if (clearance === 4) return [x, z];
-      if (clearance > bestClearance) { best = [x, z]; bestClearance = clearance; }
+      tested++;
+      if (clearance === 4) return choice(angle, clearance, source, tested);
+      if (clearance > bestClearance) { bestAngle = angle; bestClearance = clearance; }
     }
-    return bestClearance >= 0.75 ? best : null;
+    if (bestClearance >= 0.75) return choice(bestAngle, bestClearance, source, tested);
+    return { direction: null, route: { source, steerDegrees: null,
+      clearanceMeters: bestClearance, tested } };
+  }
+
+  function agentDeploymentInput(client, frame, me) {
+    const agent = runtime.agent;
+    if (Math.hypot(frame.mx, frame.mz) > 0.1 ||
+        frame.buttons & (1 | 2 | 4 | 8 | 16 | 64 | 128 | 256 | 512)) {
+      agentNote('manual-override');
+      return frame;
+    }
+    if (!vector3(me.pos)) {
+      agentNote('air-state-unavailable');
+      return frame;
+    }
+    if (me.mode === 'plane') {
+      const plane = client.latest?.plane || client.start?.plane;
+      if (!Array.isArray(plane?.start) || !Array.isArray(plane?.end) ||
+          ![...plane.start.slice(0, 2), ...plane.end.slice(0, 2), plane.departTick]
+            .every(Number.isFinite)) {
+        agentNote('plane-route-unavailable');
+        return frame;
+      }
+      const deltaX = plane.end[0] - plane.start[0];
+      const deltaZ = plane.end[1] - plane.start[1];
+      const lengthSquared = deltaX * deltaX + deltaZ * deltaZ;
+      if (lengthSquared < 1) {
+        agentNote('plane-route-unavailable');
+        return frame;
+      }
+      const routeKey = [plane.start[0], plane.start[1], plane.end[0],
+        plane.end[1], plane.departTick].join(':');
+      if (agent.dropRouteKey !== routeKey || !agent.dropTerrainChecked &&
+          typeof runtime.physics.getCollisionWorld === 'function') {
+        agent.dropRouteKey = routeKey;
+        agent.dropFraction = 0.5;
+        agent.dropTerrain = null;
+        let terrain = null;
+        try { terrain = runtime.physics.getCollisionWorld?.()?.terrain; }
+        catch { /* A missing local world leaves a central route drop. */ }
+        agent.dropTerrainChecked = !!(terrain?.heights?.length >= 385 * 385);
+        let bestScore = -Infinity;
+        for (let step = 6; step <= 14; step++) {
+          const fraction = step / 20;
+          const x = plane.start[0] + deltaX * fraction;
+          const z = plane.start[1] + deltaZ * fraction;
+          const height = agentTerrainHeight(terrain, x, z);
+          if (height === null || height < 0.1) continue;
+          const score = -Math.abs(fraction - 0.5) * 100 + Math.min(height, 20) * 0.2;
+          if (score > bestScore) {
+            bestScore = score;
+            agent.dropFraction = fraction;
+            agent.dropTerrain = Math.round(height * 10) / 10;
+          }
+        }
+        agent.dropTarget = [plane.start[0] + deltaX * agent.dropFraction,
+          plane.start[1] + deltaZ * agent.dropFraction];
+      }
+      const progress = Math.max(0, Math.min(1,
+        ((me.pos[0] - plane.start[0]) * deltaX +
+          (me.pos[2] - plane.start[1]) * deltaZ) / lengthSquared));
+      const tick = Number.isFinite(client.latest?.t) ? client.latest.t : frame.vt;
+      const route = { source: 'plane-path', planeFraction: Math.round(progress * 100) / 100,
+        dropFraction: agent.dropFraction, terrainHeight: agent.dropTerrain };
+      if (client.latest?.phase === 'plane' && Number.isFinite(tick) &&
+          tick >= plane.departTick + PLANE_DOOR_TICKS &&
+          progress >= agent.dropFraction - 0.005 && !me.jumpHeld &&
+          performance.now() - agent.lastDropPulseAt >= 900) {
+        agent.lastDropPulseAt = performance.now();
+        agentNote('drop', { kind: 'land' }, 0, route);
+        return { ...frame, buttons: frame.buttons | 4 };
+      }
+      agentNote('plane-wait', { kind: 'land' },
+        Math.max(0, (agent.dropFraction - progress) * Math.sqrt(lengthSquared)), route);
+      return frame;
+    }
+    const target = agent.dropTarget;
+    if (!Array.isArray(target)) {
+      agentNote('air-target-unavailable');
+      return frame;
+    }
+    const dx = target[0] - me.pos[0], dz = target[1] - me.pos[2];
+    const distance = Math.hypot(dx, dz);
+    agentNote('air-steer', { kind: 'land' }, distance,
+      { source: 'drop-target', terrainHeight: agent.dropTerrain });
+    if (distance < 4) return frame;
+    const dirX = dx / distance, dirZ = dz / distance;
+    return { ...frame,
+      mx: Math.cos(frame.yaw) * dirX - Math.sin(frame.yaw) * dirZ,
+      mz: -Math.sin(frame.yaw) * dirX - Math.cos(frame.yaw) * dirZ };
   }
 
   function agentInput(client, frame) {
     const agent = runtime.agent;
     agent.target = null;
     agent.scan = null;
-    if (!options.agent || !playable(client) || ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) {
+    const me = ownState(client);
+    if (!options.agent || runtime.aimRejected || runtime.stopped || client.disposed ||
+        client.paused || client.cinema?.active || client.you == null ||
+        client.input?.enabled === false || client.latest?.phase === 'finished' ||
+        me?.spectating != null || me?.downed || me?.health <= 0 ||
+        client.localDead?.() || client.localDowned?.() ||
+        ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) {
+      if (agent.action !== 'off') agentNote('off');
+      return frame;
+    }
+    if (['plane', 'freefall', 'parachute'].includes(me?.mode))
+      return agentDeploymentInput(client, frame, me);
+    if (!playable(client)) {
       if (agent.action !== 'off') agentNote('off');
       return frame;
     }
@@ -1279,7 +1430,6 @@
       agentNote('manual-override');
       return frame;
     }
-    const me = ownState(client);
     if (!vector3(me?.pos)) return frame;
     const weapon = client.predictor?.activeStats;
     const slot = client.predictor?.slots?.[client.predictor.active];
@@ -1403,9 +1553,10 @@
       agent.lastGoalDistance = distance;
     }
     const detouring = now < agent.detourUntil;
-    agentNote(detouring ? 'detour' : action, goal, distance);
-    const direction = agentWaypoint(client, me, [dx / distance, dz / distance], detouring);
-    if (!direction) { agentNote('blocked', goal, distance); return frame; }
+    const waypoint = agentWaypoint(client, me, [dx / distance, dz / distance], detouring);
+    if (!waypoint.direction) { agentNote('blocked', goal, distance, waypoint.route); return frame; }
+    agentNote(detouring ? 'detour' : action, goal, distance, waypoint.route);
+    const direction = waypoint.direction;
     // The captured movement kernel maps camera-relative mx/mz into world x/z.
     const mx = Math.cos(frame.yaw) * direction[0] - Math.sin(frame.yaw) * direction[1];
     const mz = -Math.sin(frame.yaw) * direction[0] - Math.cos(frame.yaw) * direction[1];
@@ -1595,7 +1746,10 @@
     runtime.ammoPickup = { id: null, nextAt: 0 };
     runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
       lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0,
-      navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0 };
+      navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
+      dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
+      dropTerrainChecked: false,
+      lastDropPulseAt: -Infinity };
     runtime.sampleGate = null;
     runtime.lastGateTrace = null;
     runtime.lastServerSnapshot = null;

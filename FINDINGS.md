@@ -403,6 +403,46 @@ obstacle, a low step, a short corridor, a stationary stall, and an unsuccessful
 flank. These are client-side navigation predictions. No 1.5.20 live trace
 exists yet to confirm navigation or server hits.
 
+### Version 1.5.21: deployment, route, and ray diagnostics
+
+Agent decision rows now include the source of each short route probe, chosen
+steering angle, tested candidates, and clear distance. The analyzer summarizes
+full, partial, and blocked routes from retained rows, along with the largest
+reported stall count. For unambiguously comparable provisional shot pairs, it
+groups server/local ray angle differences by weapon, locally selected distance
+band, and recorded local hip/ADS choice. Each group reports ray count, median,
+P90, and a count over 0.5 degrees; these local flags do not establish server
+scope state or per-weapon hit rates.
+
+A read-only audit found an assisted single-projectile Fire path that could reach
+local prediction when the target center fit an eight-degree outgoing turn but
+the predicted spread correction did not. Once predicted, Fire must stay on the
+wire to keep shot seed, bloom, and cooldown synchronized. Version 1.5.21 now
+uses the captured spread formula and available shot seed before prediction to
+wait for more turn room. It also sends exact corrected angles when Fast fire is
+off; the previous post-correction jitter could move a 550 m ray beyond a head
+hitbox. Local tests cover the pre-prediction hold and an exact long-range ray
+using the hash-matched captured spread function. A server trace is still needed
+to check whether the server accepts the same ray and records a hit.
+
+A hands-off baseline in the in-app browser stayed in the plane until the game
+ejected the player offshore. The captured client requires a fresh Jump press
+after the four-second plane-door delay. Version 1.5.21 chooses a land sample
+near the center of the observed flight path when terrain is available, pulses
+Jump only after the door opens and the plane reaches that point, and steers
+toward it during freefall and parachuting. Tests cover the door timing, a
+land sample beside central water, release of Jump, air steering, and manual
+override. The baseline browser did not have XOX installed, so this deployment
+behavior still needs a live XOX match trace.
+
+On 2026-10-15, the public BridgeZone page served the same physics and Turbopack
+runtime chunk hashes as the [capture manifest](research/manifest.json). A
+private ten-player bot lobby was created and entered in the in-app browser,
+but that browser did not have XOX installed. A separate isolated Edge profile
+loaded XOX 1.5.20 with the agent enabled, but the site blocked that automated
+profile before lobby creation. No XOX live shot trace resulted from either
+test, and neither proves server-side zero spread or live agent navigation.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

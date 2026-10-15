@@ -337,26 +337,43 @@ test('a single manual click fires once after the outgoing aim aligns', () => {
   h.api.destroy();
 });
 
-test('an unreachable spread correction does not discard a locally predicted shot', () => {
+test('a spread correction outside the turn budget is held before prediction', () => {
   const h = harness();
   const fake = rageClient();
-  const spread = 8 * Math.PI / 180;
-  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
-    weapon: { fired: true, dirs: [[Math.sin(spread), 0, -Math.cos(spread)]] } });
+  let spread = 8 * Math.PI / 180;
+  let predictions = 0;
+  fake.client.predictor.predict = input => {
+    predictions++;
+    return { eye: [0, 1.62, 0], weapon: { fired: !!(input.buttons & 1),
+      dirs: [[Math.sin(spread), 0, -Math.cos(spread)]] } };
+  };
+  Object.assign(fake.client.predictor.ps, { grounded: true, vel: [0, 0, 0] });
+  Object.assign(fake.client.predictor.ws, { ads: 1, bloom: 0 });
+  Object.assign(fake.client.predictor.activeStats,
+    { hipSpread: 8, adsSpread: 8, moveSpread: 0, adsSeconds: 0.2 });
   attach(h, fake);
-  h.api.setOptions({ rage: true, stealth: true });
+  h.api.setOptions({ rage: true, stealth: true, hipFire: false });
   fake.client.remoteFrames = [{ snap: opponent(1, { p: [-20, 0, -34.641] }) }];
   for (let tick = 0; tick < 12; tick++) send(fake, [frame({ s: 700 + tick, buttons: 0 })]);
   assert.equal(h.api.runtime.outgoingAim.ready, true);
-  const previousYaw = h.api.runtime.outgoingAim.yaw;
   const sampled = fake.client.input.sample('sample-argument');
-  assert.equal(sampled.buttons & 1, 1);
+  assert.equal(sampled.buttons & 1, 0, 'the impossible correction waits before prediction');
+  assert.equal(h.api.runtime.sampleGate.reason, 'fire-request');
+  assert.equal(h.api.runtime.sampleHoldReason, 'spread-align');
+  assert.equal(predictions, 0);
   fake.client.predictor.predict(sampled);
   const output = send(fake, [sampled])[0];
-  assert.equal(output.buttons & 1, 1, 'the server and local predictor both see this shot');
-  assert.equal(h.api.runtime.compensated, 0, 'the excessive correction is omitted');
+  assert.equal(output.buttons & 1, 0);
+  spread = 0.1 * Math.PI / 180;
+  fake.client.predictor.activeStats.adsSpread = 0.1;
+  const ready = fake.client.input.sample('sample-argument');
+  assert.equal(ready.buttons & 1, 1, 'Fire resumes after the spread fits the turn budget');
+  fake.client.predictor.predict(ready);
+  const sent = send(fake, [ready])[0];
+  assert.equal(sent.buttons & 1, 1, 'a locally predicted shot stays on the wire');
+  assert.equal(h.api.runtime.compensated, 1);
   assert.equal(h.api.runtime.predictions.size, 0);
-  const turn = Math.atan2(Math.sin(output.yaw - previousYaw), Math.cos(output.yaw - previousYaw));
+  const turn = Math.atan2(Math.sin(sent.yaw - output.yaw), Math.cos(sent.yaw - output.yaw));
   assert.ok(Math.abs(turn) <= 8 * Math.PI / 180 + 1e-9);
   h.api.destroy();
 });
@@ -845,10 +862,13 @@ test('combat agent respects movement boxes that let shots through and steps over
   const around = fake.client.input.sample();
   assert.ok(Math.abs(around.mx) > 0.4 && around.mz > 0.5,
     'collision box changes the route even when the shot ray is clear');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'movement-grid');
+  assert.ok(Math.abs(h.api.trace().agentDecisions.at(-1).route.steerDegrees) > 30);
   box.max[1] = 0.4;
   const over = fake.client.input.sample();
   assert.ok(Math.abs(over.mx) < 0.01 && over.mz > 0.9,
     'the movement kernel can step over a low box');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.steerDegrees, 0);
   h.api.destroy();
 });
 
@@ -868,12 +888,16 @@ test('combat agent uses the longest safe short corridor when every full route is
   const partial = fake.client.input.sample();
   assert.ok(Math.abs(partial.mx) > 0.7 && partial.mz > 0.3,
     'a safe lateral corridor moves the agent instead of stopping at a distant wall');
+  const route = h.api.trace().agentDecisions.at(-1).route;
+  assert.ok(route.clearanceMeters >= 0.75 && route.clearanceMeters < 4);
+  assert.equal(route.source, 'movement-grid');
   box.min[2] = -0.5;
   box.max[2] = -0.3;
   const blocked = fake.client.input.sample();
   assert.equal(blocked.mx, 0);
   assert.equal(blocked.mz, 0);
   assert.equal(h.api.inspect().agent.action, 'blocked');
+  assert.ok(h.api.trace().agentDecisions.at(-1).route.clearanceMeters < 0.75);
   h.api.destroy();
 });
 
@@ -917,6 +941,59 @@ test('combat agent moves toward the observed safe zone and does not fire while t
   assert.equal(move.buttons & 3, 0);
   assert.equal(h.api.inspect().agent.action, 'storm');
   assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'storm');
+  h.api.destroy();
+});
+
+test('combat agent drops over observed land and steers after exiting the plane', () => {
+  let now = 1000;
+  let manual = false;
+  const h = harness([], undefined, { now: () => now });
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 817, vt: 230, buttons: 0,
+    mx: manual ? 1 : 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 219,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 },
+    me: { mode: 'plane', pos: [0, 300, 0], health: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [60, 300, 0], jumpHeld: false });
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  assert.equal(fake.client.input.sample().buttons & 4, 0);
+  assert.equal(h.api.runtime.agent.dropFraction, 0.5,
+    'the route midpoint is a fallback until terrain loads');
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [192, 193]) for (const col of [207, 208])
+    heights[row * 385 + col] = 2;
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  const beforeDoor = fake.client.input.sample();
+  assert.equal(beforeDoor.buttons & 4, 0, 'Jump waits for the door to open');
+  assert.equal(h.api.runtime.agent.dropFraction, 0.55, 'land beats the central water sample');
+  fake.client.latest.t = 230;
+  const dropped = fake.client.input.sample();
+  assert.equal(dropped.buttons & 4, 4, 'the agent sends a fresh Jump press');
+  assert.equal(dropped.buttons & 1, 0, 'deployment never blind-fires');
+  assert.equal(send(fake, [dropped])[0].buttons & 4, 4,
+    'the deployment pulse survives outgoing frame handling');
+  assert.equal(h.api.trace().agentDecisions.at(-1).action, 'drop');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'plane-path');
+  assert.equal(fake.client.input.sample().buttons & 4, 0, 'Jump is released next frame');
+  fake.client.predictor.ps.mode = 'freefall';
+  fake.client.predictor.ps.pos = [120, 200, 0];
+  const steering = fake.client.input.sample();
+  assert.ok(steering.mx < -0.9 && Math.abs(steering.mz) < 1e-9);
+  assert.equal(h.api.inspect().agent.action, 'air-steer');
+  fake.client.predictor.ps.mode = 'parachute';
+  manual = true;
+  const overridden = fake.client.input.sample();
+  assert.equal(overridden.mx, 1, 'manual air movement takes priority');
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  now += 1000;
+  manual = false;
+  fake.client.predictor.ps.mode = 'plane';
+  fake.client.predictor.ps.jumpHeld = true;
+  assert.equal(fake.client.input.sample().buttons & 4, 0,
+    'a held Jump cannot create a second rising edge');
   h.api.destroy();
 });
 
@@ -1879,6 +1956,49 @@ test('captured single-projectile spread is inverted against the actual game func
   assert.equal(fake.client.input.sample, fake.originalSample);
 });
 
+test('corrected long-range Rage shot stays exact with Fast fire disabled', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const start = kernel.indexOf('function tW('), end = kernel.indexOf('function tU(', start);
+  assert.ok(start >= 0 && end > start);
+  const spread = vm.runInNewContext(kernel.slice(start, end) + ';tW', {
+    tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value))
+  });
+  const ray = (yaw, pitch) => {
+    const direction = [-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch),
+      -Math.cos(yaw) * Math.cos(pitch)];
+    let index = 0;
+    return spread(direction, 0.5, () => [0.61, 0.17][index++]);
+  };
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -550] }) }];
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: !!(input.buttons & 1), dirs: [ray(input.yaw, input.pitch)] } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: false,
+    hipFire: false, point: 'head', range: 600 });
+  send(fake, [frame({ buttons: 0, mx: 0, mz: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 1);
+  fake.client.predictor.predict(sampled);
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 1, 1);
+  const actualRay = ray(outgoing.yaw, outgoing.pitch);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  const toPoint = decision.target.point.map((value, axis) =>
+    value - decision.target.origin[axis]);
+  const travel = toPoint.reduce((sum, value, axis) => sum + value * actualRay[axis], 0);
+  const miss = Math.hypot(...toPoint.map((value, axis) => value - travel * actualRay[axis]));
+  assert.ok(miss < 0.001, `Fast fire off added ${miss.toFixed(3)} m of miss at 550 m`);
+  h.api.destroy();
+});
+
 test('captured eight-pellet spread lands a chest ray after outgoing correction', {
   skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
 }, () => {
@@ -2544,7 +2664,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.20');
+  assert.equal(exported.scriptVersion, '1.5.21');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2576,7 +2696,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.20');
+  assert.equal(payload.scriptVersion, '1.5.21');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

@@ -29,7 +29,15 @@ test('trace analysis groups sent inputs while keeping server hits unattributed',
       { match: 1, sequence: 12, fireSent: false, weaponId: 'smg', targetDistance: 120,
         movingInput: false, localShotPredicted: false, reason: 'aligning' }
     ],
-    serverEvents: [{ type: 'shot' }, { type: 'shot' }, { type: 'hit', damage: 21 }, { type: 'kill' }]
+    serverEvents: [{ type: 'shot' }, { type: 'shot' }, { type: 'hit', damage: 21 }, { type: 'kill' }],
+    agentDecisions: [
+      { action: 'approach', stuckCount: 0,
+        route: { source: 'movement-grid', steerDegrees: 0, clearanceMeters: 4 } },
+      { action: 'detour', stuckCount: 2,
+        route: { source: 'movement-grid', steerDegrees: 68.8, clearanceMeters: 2.25 } },
+      { action: 'blocked', stuckCount: 3,
+        route: { source: 'movement-grid', steerDegrees: null, clearanceMeters: 0.5 } }
+    ]
   } });
   assert.equal(report.outgoingFire.retained, 2);
   assert.deepEqual(report.outgoingFire.heldReasons, { aligning: 1 });
@@ -47,6 +55,9 @@ test('trace analysis groups sent inputs while keeping server hits unattributed',
   assert.equal(report.authoritative.magazineDisagreementSamples, 1);
   assert.equal(report.authoritative.acknowledgedAim.yawOverHalfDegree, 1);
   assert.equal(report.authoritative.acknowledgedAim.pitchOverHalfDegree, 0);
+  assert.deepEqual(report.agentRoutes, { observed: 3, bySource: { 'movement-grid': 3 },
+    full: 1, partial: 1, blocked: 1, maxStuckCount: 3, maxAbsSteerDegrees: 68.8 });
+  assert.match(formatReport(report), /Combat agent routes/);
   assert.match(formatReport(report), /Acknowledged aim angles/);
   assert.equal(report.investigate[0].sequence, 11);
   assert.match(formatReport(report), /cannot be assigned to a weapon/);
@@ -59,6 +70,7 @@ test('older trace format remains readable without inventing weapon or range deta
   } });
   assert.equal(report.outgoingFire.retained, 0);
   assert.equal(report.serverEvents.hits, 1);
+  assert.deepEqual(report.correlatedShots.comparableRaysByWeaponDistanceMode, []);
   assert.equal(report.retention.dropped, null);
   assert.throws(() => analyzeTrace({ formatVersion: 7, trace: {} }), /formatVersion 1 or 2/);
 });
@@ -235,6 +247,59 @@ test('tick-aligned server shots expose provisional hip and ADS hit counts', asyn
   assert.equal(report.correlatedShots.rayEvidence.impactsCloserThanSelectedPoint, 1);
   assert.match(formatReport(report), /Provisional server-shot pairs: 12 paired/);
   assert.match(formatReport(report), /Server-reported ray comparison/);
+});
+
+test('comparable ray angles break down by weapon, selected distance, and recorded local mode', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const direction = degrees => {
+    const radians = degrees * Math.PI / 180;
+    return [-Math.sin(radians), 0, -Math.cos(radians)];
+  };
+  const localShots = Array.from({ length: 17 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, tick: 100 + index * 30,
+    sequence: index + 1, yaw: 0, pitch: 0,
+    directions: index === 15 ? undefined : index === 5
+      ? [[0, 0, -1], [0, 0, -1]] : [[0, 0, -1]],
+    weapon: { id: index >= 6 && index < 12 ? 'sniper' : 'rifle' }
+  }));
+  const rifleAngles = [0, 0.1, 0.2, 0.3, 0.4, 1];
+  const sniperAngles = [0, 0.2, 0.4, 0.6, 0.8, 1.2];
+  const serverEvents = localShots.flatMap((shot, index) => {
+    const angles = index < 6 ? index === 5 ? [1, 1.5] : [rifleAngles[index]]
+      : index < 12 ? [sniperAngles[index - 6]] : [0.75];
+    const event = { at: shot.at + 210, match: 1, tick: shot.tick + 9, type: 'shot',
+      shot: { weaponId: index === 13 ? 'other' : shot.weapon.id,
+        directions: index === 12 ? undefined : angles.map(direction) } };
+    return index === 14 ? [event, { ...event, at: event.at + 10 }] : [event];
+  });
+  const aimDecisions = localShots.slice(0, 16).map((shot, index) => ({
+    match: 1, sequence: shot.sequence, fireSent: true,
+    ...(index < 6 ? { target: { distance: 80 }, targetDistance: 500,
+      adsRequested: false, sampled: { hipFire: true } } :
+      index < 12 ? { targetDistance: 240, adsRequested: true,
+        sampled: { hipFire: false } } : {})
+  }));
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, localShots, serverEvents, aimDecisions,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0, 0, 0, 0] }))
+  } });
+  assert.equal(report.correlatedShots.paired, 15);
+  assert.equal(report.correlatedShots.rayEvidence.incompatibleUniqueCandidates, 1);
+  assert.equal(report.correlatedShots.rayEvidence.pelletCountDisagreements, 1);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 14);
+  assert.equal(report.correlatedShots.rayEvidence.differencesOverHalfDegree, 6);
+  assert.deepEqual(report.correlatedShots.comparableRaysByWeaponDistanceMode, [
+    { weapon: 'rifle', distance: '0-149 m', localFireMode: 'hip-selected',
+      count: 7, medianDegrees: 0.3, p90Degrees: 1.5, differencesOverHalfDegree: 2 },
+    { weapon: 'rifle', distance: 'unknown', localFireMode: 'unknown',
+      count: 1, medianDegrees: 0.75, p90Degrees: 0.75, differencesOverHalfDegree: 1 },
+    { weapon: 'sniper', distance: '150-299 m', localFireMode: 'ads-requested',
+      count: 6, medianDegrees: 0.5, p90Degrees: 1.2, differencesOverHalfDegree: 3 }
+  ]);
+  assert.match(formatReport(report), /Comparable ray angular differences by weapon \/ selected distance \/ local fire mode/);
+  assert.match(formatReport(report), /rifle \| 0-149 m \| hip-selected: 7 rays, median 0\.3 deg, P90 1\.5 deg, >0\.5 deg 2/);
+  assert.match(formatReport(report), /does not establish the server scope state/);
 });
 
 test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
