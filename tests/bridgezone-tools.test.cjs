@@ -802,6 +802,106 @@ test('combat agent approaches an enemy, stops to fire, and yields to manual move
   h.api.destroy();
 });
 
+test('combat agent takes a real side detour after stalling and resumes direct travel on progress', () => {
+  let now = 1000;
+  const h = harness([], undefined, { now: () => now });
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 813, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  h.api.setOptions({ agent: true, hipFire: false });
+  const direct = fake.client.input.sample();
+  assert.ok(Math.abs(direct.mx) < 0.01 && direct.mz > 0.9);
+  now += 700;
+  const detour = fake.client.input.sample();
+  assert.ok(Math.abs(detour.mx) > 0.7, 'stall changes the actual movement vector');
+  assert.equal(h.api.inspect().agent.action, 'detour');
+  assert.equal(h.api.runtime.sampleGate.reason, 'agent-detour');
+  assert.equal(detour.buttons & 1, 0);
+  assert.equal(h.api.trace().agentDecisions.at(-1).stuckCount, 1);
+  fake.client.predictor.ps.pos = [1, 0, -2];
+  now += 700;
+  const resumed = fake.client.input.sample();
+  assert.ok(Math.abs(resumed.mx) < 0.1 && resumed.mz > 0.9);
+  assert.equal(h.api.inspect().agent.action, 'approach');
+  assert.equal(h.api.runtime.agent.stuckCount, 0);
+  h.api.destroy();
+});
+
+test('combat agent respects movement boxes that let shots through and steps over low cover', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 814, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  const box = { min: [-0.5, 0, -2.2], max: [0.5, 1.6, -1.8], blocksShots: false };
+  const columns = 193, grid = new Map();
+  for (const col of [95, 96]) grid.set(95 * columns + col, [0]);
+  const world = { cellSize: 8, boxes: [box], grid };
+  h.register(54145, { getCollisionWorld: () => world, hasLineOfSight: () => true });
+  h.api.setOptions({ agent: true });
+  const around = fake.client.input.sample();
+  assert.ok(Math.abs(around.mx) > 0.4 && around.mz > 0.5,
+    'collision box changes the route even when the shot ray is clear');
+  box.max[1] = 0.4;
+  const over = fake.client.input.sample();
+  assert.ok(Math.abs(over.mx) < 0.01 && over.mz > 0.9,
+    'the movement kernel can step over a low box');
+  h.api.destroy();
+});
+
+test('combat agent uses the longest safe short corridor when every full route is blocked', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 816, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  const box = { min: [-10, 0, -1.1], max: [10, 2, -0.9] };
+  const grid = new Map(), columns = 193;
+  for (const col of [94, 95, 96, 97]) grid.set(95 * columns + col, [0]);
+  const world = { cellSize: 8, boxes: [box], grid };
+  h.register(54145, { getCollisionWorld: () => world, hasLineOfSight: () => true });
+  h.api.setOptions({ agent: true });
+  const partial = fake.client.input.sample();
+  assert.ok(Math.abs(partial.mx) > 0.7 && partial.mz > 0.3,
+    'a safe lateral corridor moves the agent instead of stopping at a distant wall');
+  box.min[2] = -0.5;
+  box.max[2] = -0.3;
+  const blocked = fake.client.input.sample();
+  assert.equal(blocked.mx, 0);
+  assert.equal(blocked.mz, 0);
+  assert.equal(h.api.inspect().agent.action, 'blocked');
+  h.api.destroy();
+});
+
+test('combat agent holds a detour side until the full window or actual goal progress', () => {
+  let now = 1000;
+  const h = harness([], undefined, { now: () => now });
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 815, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  fake.client.input.sample();
+  now += 700;
+  const initial = fake.client.input.sample();
+  fake.client.predictor.ps.pos = [1, 0, 0];
+  now += 700;
+  const held = fake.client.input.sample();
+  assert.ok(initial.mx * held.mx > 0, 'sideways motion without goal progress keeps the same flank');
+  assert.equal(h.api.inspect().agent.action, 'detour');
+  fake.client.predictor.ps.pos = [2, 0, 0];
+  now += 900;
+  const switched = fake.client.input.sample();
+  assert.ok(initial.mx * switched.mx < 0, 'the flank changes after its unsuccessful window');
+  assert.equal(h.api.runtime.agent.stuckCount, 2);
+  h.api.destroy();
+});
+
 test('combat agent moves toward the observed safe zone and does not fire while travelling', () => {
   const h = harness();
   const fake = rageClient();
@@ -2444,7 +2544,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.19');
+  assert.equal(exported.scriptVersion, '1.5.20');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2476,7 +2576,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.19');
+  assert.equal(payload.scriptVersion, '1.5.20');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

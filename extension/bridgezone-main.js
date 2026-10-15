@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.19
+// @version      1.5.20
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.19';
+  const VERSION = '1.5.20';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -39,7 +39,8 @@
   runtime.outgoingAim = { yaw: null, pitch: null, targetIndex: null, ready: false, pendingManualUntil: 0 };
   runtime.ammoPickup = { id: null, nextAt: 0 };
   runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
-    lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0 };
+    lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0,
+    navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0 };
   runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
   runtime.seedSync = { status: 'unknown', aligned: 0, diverged: 0 };
   const seenServerEvents = new Set();
@@ -203,6 +204,9 @@
     runtime.agent.action = 'off';
     runtime.agent.goal = null;
     runtime.agent.lastPosition = null;
+    runtime.agent.navigationGoalKey = null;
+    runtime.agent.lastGoalDistance = null;
+    runtime.agent.detourUntil = 0;
     lootCacheClient = null;
     lootCache = [];
   }
@@ -1156,7 +1160,8 @@
     agent.lastTraceAt = now;
     recordTrace('agentDecisions', { at: now, match: runtime.trace.match, action,
       goal: goal ? { kind: goal.kind, index: goal.index ?? null } : null,
-      distanceMeters: Number.isFinite(distance) ? Math.round(distance * 10) / 10 : null });
+      distanceMeters: Number.isFinite(distance) ? Math.round(distance * 10) / 10 : null,
+      stuckCount: agent.stuckCount });
   }
 
   function stormCircle(storm, tick) {
@@ -1174,20 +1179,88 @@
       radius: storm.radius + (storm.nextRadius - storm.radius) * t };
   }
 
-  function agentWaypoint(client, me, direction) {
-    const { getCollisionWorld, hasLineOfSight } = runtime.physics;
-    if (typeof getCollisionWorld !== 'function' || typeof hasLineOfSight !== 'function') return direction;
-    const origin = [me.pos[0], me.pos[1] + 1, me.pos[2]];
-    const world = getCollisionWorld();
-    if (!world) return direction;
-    const side = runtime.agent.sidestep;
-    for (const angle of [0, side * 0.6, -side * 0.6, side * 1.2, -side * 1.2]) {
-      const x = direction[0] * Math.cos(angle) - direction[1] * Math.sin(angle);
-      const z = direction[0] * Math.sin(angle) + direction[1] * Math.cos(angle);
-      if (hasLineOfSight(world, origin, [origin[0] + 4 * x, origin[1], origin[2] + 4 * z]))
-        return [x, z];
+  function agentTerrainHeight(terrain, x, z) {
+    const heights = terrain?.heights;
+    if (!heights || heights.length < 385 * 385) return null;
+    const u = Math.max(0, Math.min(383.999999, (x + 768) / 4));
+    const v = Math.max(0, Math.min(383.999999, (z + 768) / 4));
+    const col = Math.floor(u), row = Math.floor(v), blendX = u - col, blendZ = v - row;
+    const index = row * 385 + col;
+    const near = heights[index] + (heights[index + 1] - heights[index]) * blendX;
+    const far = heights[index + 385] + (heights[index + 386] - heights[index + 385]) * blendX;
+    return Math.max(-1.3, near + (far - near) * blendZ);
+  }
+
+  function agentRouteClearance(world, me, direction, hasLineOfSight) {
+    const origin = me.pos, length = 4, radius = 0.32;
+    if (typeof world?.grid?.get !== 'function' || !Array.isArray(world.boxes) ||
+        !(world.cellSize > 0)) {
+      const eye = [origin[0], origin[1] + 0.55, origin[2]];
+      return hasLineOfSight(world, eye,
+        [eye[0] + length * direction[0], eye[1], eye[2] + length * direction[1]]) ? length : 0;
     }
-    return null;
+    const endX = origin[0] + length * direction[0], endZ = origin[2] + length * direction[1];
+    if (Math.abs(endX) > 767.5 || Math.abs(endZ) > 767.5) return 0;
+    const cell = world.cellSize, columns = Math.ceil(1536 / cell) + 1;
+    const gridIndex = value => Math.max(0, Math.min(columns - 1, Math.floor((value + 768) / cell)));
+    const minX = gridIndex(Math.min(origin[0], endX) - radius);
+    const maxX = gridIndex(Math.max(origin[0], endX) + radius);
+    const minZ = gridIndex(Math.min(origin[2], endZ) - radius);
+    const maxZ = gridIndex(Math.max(origin[2], endZ) + radius);
+    const nearby = new Set();
+    for (let row = minZ; row <= maxZ; row++) for (let col = minX; col <= maxX; col++)
+      for (const index of world.grid.get(row * columns + col) || []) nearby.add(index);
+    const boxes = [...nearby].map(index => world.boxes[index]).filter(box =>
+      box && Array.isArray(box.min) && Array.isArray(box.max));
+    let foot = origin[1];
+    for (let step = 1; step <= 16; step++) {
+      const x = origin[0] + direction[0] * step / 4;
+      const z = origin[2] + direction[1] * step / 4;
+      const ground = agentTerrainHeight(world.terrain, x, z);
+      if (ground !== null) {
+        if (ground > foot + 0.5) return (step - 1) / 4;
+        if (ground > foot + 0.01) {
+          const slope = Math.hypot(
+            (agentTerrainHeight(world.terrain, x + 1, z) -
+              agentTerrainHeight(world.terrain, x - 1, z)) / 2,
+            (agentTerrainHeight(world.terrain, x, z + 1) -
+              agentTerrainHeight(world.terrain, x, z - 1)) / 2);
+          if (slope > 1.25) return (step - 1) / 4;
+        }
+        foot = ground;
+      }
+      const overlapping = boxes.filter(box => x + radius > box.min[0] &&
+        x - radius < box.max[0] && z + radius > box.min[2] && z - radius < box.max[2]);
+      let nextFoot = foot;
+      for (const box of overlapping)
+        if (box.max[1] > nextFoot && box.max[1] <= foot + 0.5 &&
+            box.min[1] < foot + 1.8) nextFoot = box.max[1];
+      if (overlapping.some(box => box.min[1] < nextFoot + 1.8 &&
+          box.max[1] > nextFoot + 0.0001)) return (step - 1) / 4;
+      foot = nextFoot;
+    }
+    return length;
+  }
+
+  function agentWaypoint(client, me, direction, detouring = false) {
+    const { getCollisionWorld, hasLineOfSight } = runtime.physics;
+    const side = runtime.agent.sidestep;
+    const angles = detouring ? [side * 1.2, -side * 1.2, side * 0.7, -side * 0.7] :
+      [0, side * 0.6, -side * 0.6, side * 1.2, -side * 1.2];
+    const rotated = angle => [direction[0] * Math.cos(angle) - direction[1] * Math.sin(angle),
+      direction[0] * Math.sin(angle) + direction[1] * Math.cos(angle)];
+    if (typeof getCollisionWorld !== 'function' || typeof hasLineOfSight !== 'function')
+      return rotated(angles[0]);
+    const world = getCollisionWorld();
+    if (!world) return rotated(angles[0]);
+    let best = null, bestClearance = 0;
+    for (const angle of angles) {
+      const [x, z] = rotated(angle);
+      const clearance = agentRouteClearance(world, me, [x, z], hasLineOfSight);
+      if (clearance === 4) return [x, z];
+      if (clearance > bestClearance) { best = [x, z]; bestClearance = clearance; }
+    }
+    return bestClearance >= 0.75 ? best : null;
   }
 
   function agentInput(client, frame) {
@@ -1199,6 +1272,10 @@
       return frame;
     }
     if (Math.hypot(frame.mx, frame.mz) > 0.1 || frame.buttons & (1 | 2 | 4 | 8 | 16 | 64 | 128 | 256 | 512)) {
+      agent.lastPosition = null;
+      agent.navigationGoalKey = null;
+      agent.lastGoalDistance = null;
+      agent.detourUntil = 0;
       agentNote('manual-override');
       return frame;
     }
@@ -1263,15 +1340,28 @@
       }
     }
     if (!goal) {
+      agent.lastPosition = null;
+      agent.navigationGoalKey = null;
+      agent.lastGoalDistance = null;
+      agent.detourUntil = 0;
       agentNote(target ? 'engage' : 'idle', target ? { kind: 'opponent', index: target.index } : null,
         target?.distance ?? null);
       return frame;
     }
     const dx = goal.position[0] - me.pos[0], dz = goal.position[1] - me.pos[2];
     const distance = Math.hypot(dx, dz);
-    agentNote(action, goal, distance);
-    if (distance < 0.001) return frame;
+    const goalKey = [goal.kind, goal.index ?? goal.id ?? '-',
+      Math.round(goal.position[0] / 10), Math.round(goal.position[1] / 10)].join(':');
+    if (agent.navigationGoalKey !== goalKey) {
+      agent.navigationGoalKey = goalKey;
+      agent.lastPosition = null;
+      agent.lastGoalDistance = null;
+      agent.detourUntil = 0;
+      agent.stuckCount = 0;
+    }
+    if (distance < 0.001) { agentNote(action, goal, distance); return frame; }
     if (action === 'loot-aim') {
+      agentNote(action, goal, distance);
       const eye = [me.pos[0], me.pos[1] + 1.62, me.pos[2]];
       const pitch = Math.atan2(goal.height + 0.15 - eye[1], distance);
       const yaw = Math.atan2(-dx, -dz);
@@ -1288,18 +1378,33 @@
         buttons: interact ? frame.buttons | INTERACT_BUTTON : frame.buttons };
     }
     agent.lootYaw = agent.lootPitch = null;
-    if (distance <= stopAt + 1) return frame;
+    if (distance <= stopAt + 1) { agentNote(action, goal, distance); return frame; }
     const now = performance.now();
     if (agent.lastPosition && now - agent.lastPositionAt > 650) {
-      if (Math.hypot(me.pos[0] - agent.lastPosition[0], me.pos[2] - agent.lastPosition[1]) < 0.25)
+      const progress = Math.hypot(me.pos[0] - agent.lastPosition[0], me.pos[2] - agent.lastPosition[1]);
+      const goalProgress = agent.lastGoalDistance - distance;
+      if (goalProgress > 0.9) {
+        agent.detourUntil = 0;
+        agent.stuckCount = 0;
+      } else if (now >= agent.detourUntil &&
+          (progress < 0.25 || agent.detourUntil > 0 && goalProgress < 0.1)) {
         agent.sidestep *= -1;
+        agent.detourUntil = now + 1600;
+        agent.stuckCount++;
+      } else if (now >= agent.detourUntil) {
+        agent.detourUntil = 0;
+      }
       agent.lastPosition = [me.pos[0], me.pos[2]];
       agent.lastPositionAt = now;
+      agent.lastGoalDistance = distance;
     } else if (!agent.lastPosition) {
       agent.lastPosition = [me.pos[0], me.pos[2]];
       agent.lastPositionAt = now;
+      agent.lastGoalDistance = distance;
     }
-    const direction = agentWaypoint(client, me, [dx / distance, dz / distance]);
+    const detouring = now < agent.detourUntil;
+    agentNote(detouring ? 'detour' : action, goal, distance);
+    const direction = agentWaypoint(client, me, [dx / distance, dz / distance], detouring);
     if (!direction) { agentNote('blocked', goal, distance); return frame; }
     // The captured movement kernel maps camera-relative mx/mz into world x/z.
     const mx = Math.cos(frame.yaw) * direction[0] - Math.sin(frame.yaw) * direction[1];
@@ -1332,7 +1437,7 @@
     const target = options.agent && runtime.agent.scan
       ? runtime.agent.target : selectTarget(client, { ...frame, vt: tick }, null, scan);
     if (options.agent && runtime.agent.scan) Object.assign(scan, runtime.agent.scan);
-    if (options.agent && ['approach', 'search', 'storm', 'loot-travel', 'loot-aim', 'blocked'].includes(runtime.agent.action)) {
+    if (options.agent && ['approach', 'search', 'storm', 'loot-travel', 'loot-aim', 'detour', 'blocked'].includes(runtime.agent.action)) {
       runtime.sampleGate = { reason: 'agent-' + runtime.agent.action, target, scan };
       return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
@@ -1489,7 +1594,8 @@
     runtime.target = null;
     runtime.ammoPickup = { id: null, nextAt: 0 };
     runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
-      lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0 };
+      lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0,
+      navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0 };
     runtime.sampleGate = null;
     runtime.lastGateTrace = null;
     runtime.lastServerSnapshot = null;

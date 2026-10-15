@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.19.** All 105 local tests pass with the captured client bundles. Checks cover combat-agent input, trace archiving, and server-reported ray comparison on provisional shot pairs. The agent has not yet been tested in a live match. Server-side zero spread is not established by client-side correction.
+> **Current version: 1.5.20.** All 109 local tests pass with the captured client bundles. Checks cover combat-agent input, trace archiving, and server-reported ray comparison on provisional shot pairs. The agent has not yet been tested in a live match. Server-side zero spread is not established by client-side correction.
 
 ## Explore
 
@@ -26,7 +26,7 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. When a hitbox center is covered, it checks interior edge and diagonal points for a clear shot within the requested hitbox. |
 | Rage | Selects a clear target across 360 degrees up to the range slider and fires after aim alignment. Hip fire is limited to stationary single-projectile shots within 40 m; moving, wider, and distant shots use ADS. Explicit Head and Chest choices remain exact. Auto can adapt between head and chest. A predicted shot keeps Fire on the wire to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
-| Combat agent | On by default with Silent AIM and Rage. It uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the safe zone, and seek compatible ammo when empty. Your movement or action keys override its movement. Its simple obstacle steering is not a full navigation system; it does not start matches or guarantee a win. |
+| Combat agent | On by default with Silent AIM and Rage. It uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the safe zone, and seek compatible ammo when empty. Its short route probe checks the captured movement collision grid, body clearance, low steps, and terrain slopes; when every full route is blocked, it can take a shorter clear corridor. A stalled route takes a timed flank and checks actual goal progress. Your movement or action keys override its movement. It does not start matches or guarantee a win. |
 | Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It can request a close single-projectile shot during ADS ramp when a conservative spread bound fits inside the existing 8-degree outgoing turn. It still follows local aim alignment, weapon cooldown, and server ammunition. |
 | Adaptive hip fire | Enabled for Rage by default up to 40 m. It requires a grounded, nearly stationary player and a bounded single-projectile correction. If the server's acknowledged shot count differs from the predicted count, it falls back to ADS. The 40 m limit follows the new live trace: longer unscoped shots missed in the paired sample. This does not zero server spread. |
 | Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation. For multi-pellet weapons, it tests the average and each pellet offset against the selected hitbox, then uses the angle predicted to intersect it with the most pellets. Server spread and visible camera recoil may remain. |
@@ -160,6 +160,7 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.17 | No live trace yet | Caps hip fire to stationary shots within 40 m, adds acknowledged shot-count diagnostics and an opt-in combat agent. Local tests pass; server hit rate and live agent behavior need a new trace. |
 | 1.5.18 | No live trace yet | Enables the combat agent by default, tests extra hitbox interior points near cover, archives traces locally during play, and records acknowledged aim and cover blockers. Local tests pass; live hit rate and navigation remain unverified. |
 | 1.5.19 | No live trace yet | Adds server-reported shot directions and ordered impacts to trace exports, plus provisional server/local ray comparison. Requires a new live trace to test actual ray agreement. |
+| 1.5.20 | No live trace yet | Routes around movement collision boxes that can pass bullets, handles low steps and slopes, uses shorter clear corridors, and holds a flank through stalls. Local tests cover blocker, step, partial route, and stall cases; live navigation and server shot results need a new trace. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

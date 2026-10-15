@@ -384,6 +384,25 @@ This makes seed divergence, rejected aim angles, and cover more observable.
 No 1.5.19 live trace exists yet, so ray agreement and true server-side zero
 spread remain unverified.
 
+### Version 1.5.20: movement-aware combat-agent routing
+
+The captured client movement kernel uses a 0.3 m body radius, 1.8 m standing
+height, and 0.5 m step height. Its collision grid includes boxes that the shot
+ray deliberately skips when `blocksShots` is false. The previous agent used
+only a shot ray at standing eye height to pick a walking direction, so a clear
+shot path could still leave it walking into a movement blocker. Its stall
+response changed the preferred side without removing the direct route.
+
+Version 1.5.20 probes the nearby movement grid across a four-metre corridor,
+checks body clearance, step height, and terrain ascent, and then picks a clear
+direction or the longest short corridor with enough clearance. On a stall it
+sends a side route for a bounded window and only
+resumes direct travel after meaningful progress toward the goal; lateral
+movement alone does not count. Local tests cover a `blocksShots:false`
+obstacle, a low step, a short corridor, a stationary stall, and an unsuccessful
+flank. These are client-side navigation predictions. No 1.5.20 live trace
+exists yet to confirm navigation or server hits.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior
