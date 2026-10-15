@@ -1028,6 +1028,80 @@ test('combat agent drops over observed land and steers after exiting the plane',
   h.api.destroy();
 });
 
+test('combat agent finds narrow land between coarse plane samples', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 818, vt: 230, buttons: 0, mx: 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 230,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [36, 300, 0], jumpHeld: false });
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [192, 193]) for (const col of [199, 200])
+    heights[row * 385 + col] = 2;
+  heights[192 * 385 + 282] = NaN;
+  attach(h, fake);
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  h.api.setOptions({ agent: true });
+  const drop = fake.client.input.sample();
+  assert.equal(drop.buttons & 4, 4);
+  assert.ok(h.api.runtime.agent.dropFraction > 0.51 &&
+    h.api.runtime.agent.dropFraction < 0.54);
+  assert.equal(h.api.runtime.agent.dropPlan, 'sampled-land');
+  assert.equal(h.api.runtime.agent.dropLateral, 0);
+  assert.ok(h.api.runtime.agent.dropTerrain > 0.1);
+  h.api.destroy();
+});
+
+test('combat agent steers to nearby land beside an all-water plane path', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 819, vt: 230, buttons: 0, mx: 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 230,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [0, 300, 0], jumpHeld: false });
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [200, 201]) for (const col of [192, 193])
+    heights[row * 385 + col] = 2;
+  attach(h, fake);
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  h.api.setOptions({ agent: true });
+  const drop = fake.client.input.sample();
+  assert.equal(drop.buttons & 4, 4);
+  assert.equal(h.api.runtime.agent.dropPlan, 'sampled-land');
+  assert.equal(h.api.runtime.agent.dropLateral, 32);
+  assert.ok(Math.abs(h.api.runtime.agent.dropTarget[0]) < 5);
+  assert.ok(Math.abs(h.api.runtime.agent.dropTarget[1] - 32) < 1);
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.lateralMeters, 32);
+  fake.client.predictor.ps.mode = 'freefall';
+  const steering = fake.client.input.sample();
+  assert.ok(Math.abs(steering.mx) < 0.1 && steering.mz < -0.9);
+  h.api.destroy();
+});
+
+test('combat agent favors reachable land ahead of the plane over distant land behind', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 820, vt: 230, buttons: 0, mx: 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 230,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [240, 300, 0], jumpHeld: false });
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [192, 193]) for (const col of [192, 193, 267, 268])
+    heights[row * 385 + col] = 2;
+  attach(h, fake);
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  h.api.setOptions({ agent: true });
+  const waiting = fake.client.input.sample();
+  assert.equal(waiting.buttons & 4, 0);
+  assert.ok(h.api.runtime.agent.dropFraction > 0.7,
+    'the drop plan stays ahead of the current plane position');
+  assert.ok(h.api.runtime.agent.dropTarget[0] > 280);
+  h.api.destroy();
+});
+
 test('combat agent leaves a manual F/E interaction on the wire', () => {
   const h = harness();
   const fake = rageClient();
@@ -3269,7 +3343,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.30');
+  assert.equal(exported.scriptVersion, '1.5.31');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -3302,7 +3376,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.30');
+  assert.equal(payload.scriptVersion, '1.5.31');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
@@ -3348,7 +3422,7 @@ test('a terminal match downloads one trace even when IndexedDB is unavailable', 
     assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
     assert.ok(h.api.inspect().archive.downloadRequestedAt);
     const payload = JSON.parse(await h.createdBlobs[0].text());
-    assert.equal(payload.scriptVersion, '1.5.30');
+    assert.equal(payload.scriptVersion, '1.5.31');
     assert.equal(payload.trace.frames.at(-1).sequence, 199);
     h.tick();
     assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
@@ -3369,7 +3443,7 @@ test('detaching an eliminated client exports the trace before the next timer tic
   assert.equal(h.downloads.length, 1);
   const payload = JSON.parse(await h.createdBlobs[0].text());
   assert.equal(payload.trace.frames.at(-1).sequence, 200);
-  assert.equal(payload.scriptVersion, '1.5.30');
+  assert.equal(payload.scriptVersion, '1.5.31');
 });
 
 test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {

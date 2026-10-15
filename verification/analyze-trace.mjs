@@ -1045,7 +1045,7 @@ export function analyzeTrace(document) {
     authoritative.medianAckLatencyMs);
   const agentActions = {};
   const agentRoutes = { observed: 0, bySource: {}, full: 0, partial: 0, blocked: 0,
-    maxStuckCount: 0, maxAbsSteerDegrees: 0 };
+    maxStuckCount: 0, maxAbsSteerDegrees: 0, dropPlans: {}, maxAbsLateralMeters: 0 };
   for (const item of list(trace.agentDecisions)) {
     const action = typeof item?.action === 'string' ? item.action : 'unknown';
     agentActions[action] = (agentActions[action] || 0) + 1;
@@ -1063,6 +1063,13 @@ export function analyzeTrace(document) {
     }
     if (finite(route.steerDegrees)) agentRoutes.maxAbsSteerDegrees = Math.max(
       agentRoutes.maxAbsSteerDegrees, Math.abs(route.steerDegrees));
+    if (typeof route.dropPlan === 'string') {
+      const plan = ['sampled-land', 'no-nearby-land', 'terrain-unavailable']
+        .includes(route.dropPlan) ? route.dropPlan : 'unknown';
+      agentRoutes.dropPlans[plan] = (agentRoutes.dropPlans[plan] || 0) + 1;
+    }
+    if (finite(route.lateralMeters)) agentRoutes.maxAbsLateralMeters = Math.max(
+      agentRoutes.maxAbsLateralMeters, Math.abs(route.lateralMeters));
   }
   const firingEvidence = { originalFireGateRows: originalGateButtons.byButton.fire,
     preparedFireGateRows: sampledGateButtons.byButton.fire,

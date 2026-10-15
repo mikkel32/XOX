@@ -56,11 +56,27 @@ test('trace analysis groups sent inputs while keeping server hits unattributed',
   assert.equal(report.authoritative.acknowledgedAim.yawOverHalfDegree, 1);
   assert.equal(report.authoritative.acknowledgedAim.pitchOverHalfDegree, 0);
   assert.deepEqual(report.agentRoutes, { observed: 3, bySource: { 'movement-grid': 3 },
-    full: 1, partial: 1, blocked: 1, maxStuckCount: 3, maxAbsSteerDegrees: 68.8 });
+    full: 1, partial: 1, blocked: 1, maxStuckCount: 3, maxAbsSteerDegrees: 68.8,
+    dropPlans: {}, maxAbsLateralMeters: 0 });
   assert.match(formatReport(report), /Combat agent routes/);
   assert.match(formatReport(report), /Acknowledged aim angles/);
   assert.equal(report.investigate[0].sequence, 11);
   assert.match(formatReport(report), /cannot be assigned to a weapon/);
+});
+
+test('drop diagnostics distinguish nearby land from terrain fallback', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: { agentDecisions: [
+    { action: 'plane-wait', route: { source: 'plane-path', dropPlan: 'terrain-unavailable',
+      lateralMeters: null } },
+    { action: 'drop', route: { source: 'plane-path', dropPlan: 'sampled-land',
+      lateralMeters: 32, terrainHeight: 2 } },
+    { action: 'plane-wait', route: { source: 'plane-path', dropPlan: 'no-nearby-land',
+      lateralMeters: null } }
+  ] } });
+  assert.deepEqual(report.agentRoutes.dropPlans,
+    { 'terrain-unavailable': 1, 'sampled-land': 1, 'no-nearby-land': 1 });
+  assert.equal(report.agentRoutes.maxAbsLateralMeters, 32);
 });
 
 test('older trace format remains readable without inventing weapon or range detail', async () => {

@@ -661,6 +661,24 @@ auto-ejected the player, who was later eliminated by the storm. The match
 does not measure XOX aim, movement, shots, or server spread. A live XOX trace
 is still needed.
 
+### Version 1.5.31: nearby-land drop planning
+
+The combat agent previously sampled nine points directly below the middle of
+the plane path. It could miss a narrow land strip between samples or a shore
+beside an all-water flight path, leaving the default drop target in water.
+It now samples the observed height grid at roughly 2 m intervals along the
+middle 60% of the path and checks fixed lateral offsets up to 256 m. Candidate
+scores favor land near the route center and penalize points far behind the
+plane's current position. A chosen off-route point becomes the descent
+steering target. When terrain is missing or no nearby land is found, the
+midpoint fallback remains and the trace labels that condition. The analyzer
+counts those labels and the largest selected lateral offset.
+
+Synthetic height-grid tests cover narrow on-route land, land beside a water
+path, and a choice between land ahead of and behind the plane. All 147 local
+tests pass with the captured public client bundles. These tests do not prove
+the landing succeeds in a live match; XOX still needs a fresh server trace.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

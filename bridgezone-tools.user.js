@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.30
+// @version      1.5.31
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.30';
+  const VERSION = '1.5.31';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -47,6 +47,7 @@
     navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
     nextRecoveryAt: 0, lastRecoverySignature: null,
     dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
+    dropLateral: null, dropPlan: null,
     dropTerrainChecked: false,
     lastDropPulseAt: -Infinity };
   runtime.server = { shots: 0, hits: 0, headshots: 0, kills: 0, damage: 0 };
@@ -254,6 +255,8 @@
     runtime.agent.dropTarget = null;
     runtime.agent.dropFraction = null;
     runtime.agent.dropTerrain = null;
+    runtime.agent.dropLateral = null;
+    runtime.agent.dropPlan = null;
     runtime.agent.dropTerrainChecked = false;
     runtime.agent.lastDropPulseAt = -Infinity;
     lootCacheClient = null;
@@ -1419,7 +1422,8 @@
     agent.goal = goal;
     const now = performance.now();
     const key = [action, goal?.kind, goal?.index ?? '-', Math.round((distance || 0) / 10),
-      route?.source ?? '-', route?.steerDegrees ?? '-'].join(':');
+      route?.source ?? '-', route?.steerDegrees ?? '-', route?.dropPlan ?? '-',
+      route?.lateralMeters ?? '-'].join(':');
     if (agent.lastTraceKey === key && now - agent.lastTraceAt < 750) return;
     agent.lastTraceKey = key;
     agent.lastTraceAt = now;
@@ -1562,6 +1566,9 @@
         agentNote('plane-route-unavailable');
         return frame;
       }
+      const progress = Math.max(0, Math.min(1,
+        ((me.pos[0] - plane.start[0]) * deltaX +
+          (me.pos[2] - plane.start[1]) * deltaZ) / lengthSquared));
       const routeKey = [plane.start[0], plane.start[1], plane.end[0],
         plane.end[1], plane.departTick].join(':');
       if (agent.dropRouteKey !== routeKey || !agent.dropTerrainChecked &&
@@ -1569,33 +1576,51 @@
         agent.dropRouteKey = routeKey;
         agent.dropFraction = 0.5;
         agent.dropTerrain = null;
+        agent.dropLateral = null;
+        agent.dropPlan = 'terrain-unavailable';
         let terrain = null;
         try { terrain = runtime.physics.getCollisionWorld?.()?.terrain; }
         catch { /* A missing local world leaves a central route drop. */ }
         agent.dropTerrainChecked = !!(terrain?.heights?.length >= 385 * 385);
-        let bestScore = -Infinity;
-        for (let step = 6; step <= 14; step++) {
-          const fraction = step / 20;
-          const x = plane.start[0] + deltaX * fraction;
-          const z = plane.start[1] + deltaZ * fraction;
-          const height = agentTerrainHeight(terrain, x, z);
-          if (height === null || height < 0.1) continue;
-          const score = -Math.abs(fraction - 0.5) * 100 + Math.min(height, 20) * 0.2;
-          if (score > bestScore) {
-            bestScore = score;
-            agent.dropFraction = fraction;
-            agent.dropTerrain = Math.round(height * 10) / 10;
+        if (agent.dropTerrainChecked) {
+          agent.dropPlan = 'no-nearby-land';
+          let bestScore = -Infinity;
+          const routeLength = Math.sqrt(lengthSquared);
+          const segments = Math.min(2048, Math.max(20, Math.ceil(routeLength / 2)));
+          const sideX = -deltaZ / routeLength, sideZ = deltaX / routeLength;
+          const offsets = [0, 8, -8, 16, -16, 32, -32, 64, -64, 128, -128, 256, -256];
+          for (let step = Math.ceil(segments * 0.2); step <= Math.floor(segments * 0.8); step++) {
+            const fraction = step / segments;
+            const routeX = plane.start[0] + deltaX * fraction;
+            const routeZ = plane.start[1] + deltaZ * fraction;
+            for (const lateral of offsets) {
+              const x = routeX + sideX * lateral, z = routeZ + sideZ * lateral;
+              if (Math.abs(x) >= 767.5 || Math.abs(z) >= 767.5) continue;
+              const height = agentTerrainHeight(terrain, x, z);
+              if (!Number.isFinite(height) || height < 0.1) continue;
+              // Avoid planning a long glide back to land the plane already passed.
+              const behindMeters = Math.max(0, (progress - fraction) * routeLength - 30);
+              const score = -Math.abs(fraction - 0.5) * 100 -
+                Math.abs(lateral) * 0.12 - behindMeters * 0.25 +
+                Math.min(height, 20) * 0.2;
+              if (score <= bestScore) continue;
+              bestScore = score;
+              agent.dropFraction = fraction;
+              agent.dropTarget = [x, z];
+              agent.dropTerrain = Math.round(height * 10) / 10;
+              agent.dropLateral = lateral;
+              agent.dropPlan = 'sampled-land';
+            }
           }
         }
-        agent.dropTarget = [plane.start[0] + deltaX * agent.dropFraction,
-          plane.start[1] + deltaZ * agent.dropFraction];
+        if (agent.dropPlan !== 'sampled-land')
+          agent.dropTarget = [plane.start[0] + deltaX * agent.dropFraction,
+            plane.start[1] + deltaZ * agent.dropFraction];
       }
-      const progress = Math.max(0, Math.min(1,
-        ((me.pos[0] - plane.start[0]) * deltaX +
-          (me.pos[2] - plane.start[1]) * deltaZ) / lengthSquared));
       const tick = Number.isFinite(client.latest?.t) ? client.latest.t : frame.vt;
       const route = { source: 'plane-path', planeFraction: Math.round(progress * 100) / 100,
-        dropFraction: agent.dropFraction, terrainHeight: agent.dropTerrain };
+        dropFraction: agent.dropFraction, terrainHeight: agent.dropTerrain,
+        lateralMeters: agent.dropLateral, dropPlan: agent.dropPlan };
       if (client.latest?.phase === 'plane' && Number.isFinite(tick) &&
           tick >= plane.departTick + PLANE_DOOR_TICKS &&
           progress >= agent.dropFraction - 0.005 && !me.jumpHeld &&
@@ -2092,6 +2117,7 @@
       navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
       nextRecoveryAt: 0, lastRecoverySignature: null,
       dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
+      dropLateral: null, dropPlan: null,
       dropTerrainChecked: false,
       lastDropPulseAt: -Infinity };
     runtime.sampleGate = null;
