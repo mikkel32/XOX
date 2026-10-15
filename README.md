@@ -5,9 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.17.** All 100 captured-client tests pass. Local checks cover the captured client kernel, combat-agent input, and
-> provisional shot matching. The new agent has not yet been tested in a live match. Server-side zero
-> spread is not established by client-side correction.
+> **Current version: 1.5.18.** All 105 local tests pass with the captured client bundles. Checks cover combat-agent input, trace archiving, and provisional shot matching. The agent has not yet been tested in a live match. Server-side zero spread is not established by client-side correction.
 
 ## Explore
 
@@ -26,20 +24,18 @@ extension built from the same source, local tests, and the saved JSON traces.
 | --- | --- |
 | Xray | Draws player boxes, names, and distances, including opponents behind cover when they are present in client snapshots. |
 | Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
-| Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. When a hitbox center is covered, it checks a few interior points for a clear shot at the requested part. |
+| Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. When a hitbox center is covered, it checks interior edge and diagonal points for a clear shot within the requested hitbox. |
 | Rage | Selects a clear target across 360 degrees up to the range slider and fires after aim alignment. Hip fire is limited to stationary single-projectile shots within 40 m; moving, wider, and distant shots use ADS. Explicit Head and Chest choices remain exact. Auto can adapt between head and chest. A predicted shot keeps Fire on the wire to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
-| Combat agent | Off by default. Enabling it turns on Silent AIM and Rage. It uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the safe zone, and seek compatible ammo when empty. Your movement or action keys override its movement. Its simple obstacle steering is not a full navigation system; it does not start matches or guarantee a win. |
+| Combat agent | On by default with Silent AIM and Rage. It uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the safe zone, and seek compatible ammo when empty. Your movement or action keys override its movement. Its simple obstacle steering is not a full navigation system; it does not start matches or guarantee a win. |
 | Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It can request a close single-projectile shot during ADS ramp when a conservative spread bound fits inside the existing 8-degree outgoing turn. It still follows local aim alignment, weapon cooldown, and server ammunition. |
 | Adaptive hip fire | Enabled for Rage by default up to 40 m. It requires a grounded, nearly stationary player and a bounded single-projectile correction. If the server's acknowledged shot count differs from the predicted count, it falls back to ADS. The 40 m limit follows the new live trace: longer unscoped shots missed in the paired sample. This does not zero server spread. |
 | Shot correction | Adjusts outgoing aim for a predicted single-projectile deviation. For multi-pellet weapons, it tests the average and each pellet offset against the selected hitbox, then uses the angle predicted to intersect it with the most pellets. Server spread and visible camera recoil may remain. |
 | Ammo assist | Requests a normal reload and pulses Interact when the game's own pickup target is compatible ammo below the observed reserve cap. It never changes the local or server ammo count directly. |
-| Trace export | Saves bounded per-shot target geometry, movement, weapon and ADS state, predicted ray deviation and pellet intersections, selected-point visibility, early-ADS and hip-fire status, agent actions, server shot-count comparison, settings, fire gates, F/E and pointer-lock state, button changes before send, input acknowledgements, and combat events. The analyzer pairs some local and server shots by tick and arrival time, marking those group counts provisional. |
+| Trace archive and export | Automatically saves bounded trace snapshots to browser IndexedDB every 15 seconds during a match, at match end, and on detach. Keeps the latest three local sessions; **Saved** downloads the latest archive even after a page reload. Traces include per-shot geometry, movement, weapon and ADS state, selected-point visibility, agent actions, server shot-count and acknowledged-angle comparisons, first blocking world surfaces for cover rejections, settings, fire gates, F/E state, button changes, acknowledgements, and combat events. The analyzer marks shot pairs provisional. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
-between tabs. In 1.5.13, Xray, loot vision, Silent AIM, Adaptive Auto point, and Stealth start enabled;
-Rage starts disabled unless saved settings override it. Fast fire and adaptive
-hip fire are enabled when Rage is turned on. Combat agent starts off. After an aim-related
+between tabs. Xray, loot vision, Silent AIM, Rage, combat agent, Adaptive Auto point, and Stealth start enabled. Existing ordinary settings receive a one-time migration to this default; a saved aim rejection remains off. Fast fire and adaptive hip fire are enabled. After an aim-related
 server removal, Silent AIM, Rage, and the combat agent are disabled and remain
 off across the next match.
 F/E interaction takes priority over automatic aim and fire. Use **Resume** in the
@@ -90,19 +86,19 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable suite passes 93 tests and skips 7 that need locally captured
+The portable suite passes 98 tests and skips 7 that need locally captured
 client bundles. Tests validate local behavior and fixtures, not a live server
 outcome.
 Set `XOX_CLIENT_PHYSICS` to a local copy of the captured
 `3ep-katvfqbjo.js` bundle to run the optional firing and spread checks, and
 `XOX_CLIENT_RUNTIME` to the captured `turbopack-37jd2rjmtu1y9.js` bundle to
-run the optional loader checks. With both bundles, all 100 tests pass.
+run the optional loader checks. With both bundles, all 105 tests pass.
 The physics tests require the bundle's SHA-256 to match the recorded
 [source manifest](research/manifest.json).
 
 ### Read a diagnostic trace
 
-Click **Save trace** before leaving the match, then run:
+Traces save automatically during play in browser storage. Click **Saved** to download the latest archive, including after a page reload; **Save** exports the current in-memory trace. Then run:
 
 ```sh
 node verification/analyze-trace.mjs "C:\path\to\bridgezone-trace.json"
@@ -115,7 +111,7 @@ settings changes, weapon and local player state, input and outgoing aim, and pre
 distance from the selected aim point before and after correction. Retention
 limits and dropped counts reveal when older observations have rolled out of the
 buffer. Server snapshots also record input ACK sequence, observed ACK latency,
-server ADS and magazine state, and predictor state before reconciliation. The
+server ADS and magazine state, acknowledged yaw and pitch differences, and predictor state before reconciliation. Cover rejections include the first client-world blocking surface along the preferred hitbox-center ray. The
 new interaction records show F/E key presses, pointer lock, and input-enabled
 state without storing unrelated keys. Frame records distinguish sampled buttons
 from the buttons finally sent to the server. The
@@ -155,6 +151,7 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.15 | 241 shots, 68 hits, 44 head hits, 12 kills | User-supplied mixed-weapon match; no recorded kick. 13 of 503 retained Fire decisions selected a partially visible point. All retained shots used ADS, so this trace cannot measure hip fire. Raw export is not mirrored; see [findings](FINDINGS.md). |
 | 1.5.16 | 382 shots, 70 hits, 36 head hits, 11 kills | User-supplied mixed-weapon trace. Tick-aligned provisional pairs with retained decisions show 0/47 long-range hip hits at 100–149 m, 1/21 moving hip hits under 40 m, 2/3 still hip hits under 40 m, and 37/121 ADS hits. Pairing uses an inferred nine-tick offset and cannot prove individual causation. Raw export is not mirrored. |
 | 1.5.17 | No live trace yet | Caps hip fire to stationary shots within 40 m, adds acknowledged shot-count diagnostics and an opt-in combat agent. Local tests pass; server hit rate and live agent behavior need a new trace. |
+| 1.5.18 | No live trace yet | Enables the combat agent by default, tests extra hitbox interior points near cover, archives traces locally during play, and records acknowledged aim and cover blockers. Local tests pass; live hit rate and navigation remain unverified. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

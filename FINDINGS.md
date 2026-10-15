@@ -332,6 +332,37 @@ deviation, but client code alone cannot set authoritative server spread to
 zero. The 1.5.16 live misses demonstrate why local zero-miss geometry must
 not be described as guaranteed server hits.
 
+### Version 1.5.18: default agent, cover openings, and persistent diagnostics
+
+Version 1.5.18 starts the combat agent, Silent AIM, and Rage on by default. A
+one-time settings migration enables them for ordinary older saved settings;
+previously rejected configurations with both aim modes off remain off. The
+agent still uses the game's normal input frames, yields to manual movement or
+action, and needs live match testing. It does not start a match on its own.
+
+The captured client raycast tests terrain and map boxes, skips boxes with
+`blocksShots === false`, and returns the nearest blocking hit. Its exported
+`raycastWorld(world, origin, unitDirection, maxDistance)` returns distance,
+point, normal, and material for that hit. The input frame has aim angles and
+button bits, not a penetration setting. There is no demonstrated client-side
+"magic bullet" path through solid world geometry. The targeting code now
+checks four additional diagonal points inside the captured head or torso box
+when its center is blocked. This can use a genuine narrow opening; server hit
+acceptance still requires a new trace. Coalesced fire gates record the first
+blocker along the preferred hitbox-center ray to diagnose misses near cover.
+
+Server snapshots now compare acknowledged outgoing yaw and pitch with the
+server's reported angles. The analyzer deduplicates by match and ACK sequence
+and reports angular differences separately from hits. These differences can
+suggest turn clamping or state drift, but cannot identify the server rule on
+their own. Traces are automatically archived every 15 seconds during play and
+at match end and detach; it also attempts to save on page hide. Browser IndexedDB retains the latest
+three local sessions; the panel can download the latest saved trace after a
+reload. Local tests cover archiving, export, settings migration, cover probes,
+acknowledged-angle math, and the diagonal point selection. There is no 1.5.18
+live match trace yet, so neither zero spread nor a higher server hit rate is
+verified.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

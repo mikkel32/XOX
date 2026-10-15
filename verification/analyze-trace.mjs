@@ -131,6 +131,31 @@ function summarizeGateAim(gates) {
     byReason };
 }
 
+function summarizeAcknowledgedAim(snapshots) {
+  const byFrame = new Map();
+  for (const snapshot of snapshots) {
+    const frame = snapshot?.acknowledgedFrame;
+    if (!Number.isSafeInteger(snapshot?.match) || !Number.isSafeInteger(frame?.sequence)) continue;
+    byFrame.set(`${snapshot.match}:${frame.sequence}`, frame);
+  }
+  const yaw = [], pitch = [];
+  for (const frame of byFrame.values()) {
+    if (finite(frame.serverYawDifferenceDegrees)) yaw.push(Math.abs(frame.serverYawDifferenceDegrees));
+    if (finite(frame.serverPitchDifferenceDegrees)) pitch.push(Math.abs(frame.serverPitchDifferenceDegrees));
+  }
+  const median = values => {
+    values.sort((a, b) => a - b);
+    return values.length ? rounded(values[Math.floor((values.length - 1) / 2)]) : null;
+  };
+  return { uniqueAcknowledgedFrames: byFrame.size,
+    yawSamples: yaw.length, pitchSamples: pitch.length,
+    yawOverHalfDegree: yaw.filter(value => value > 0.5).length,
+    pitchOverHalfDegree: pitch.filter(value => value > 0.5).length,
+    medianAbsoluteYawDegrees: median(yaw), medianAbsolutePitchDegrees: median(pitch),
+    maxAbsoluteYawDegrees: yaw.length ? rounded(yaw.at(-1)) : null,
+    maxAbsolutePitchDegrees: pitch.length ? rounded(pitch.at(-1)) : null };
+}
+
 function distanceBand(value) {
   if (!finite(value)) return 'unknown';
   if (value < 150) return '0-149 m';
@@ -350,6 +375,7 @@ export function analyzeTrace(document) {
   };
   const authoritative = { observed: trace.counters?.serverSnapshotsSeen ?? null,
     retained: snapshots.length, highestAckByMatch,
+    acknowledgedAim: summarizeAcknowledgedAim(snapshots),
     medianAckLatencyMs: median(snapshots.map(item => item.ackLatencyMs)),
     medianReportedRttMs: median(snapshots.map(item => item.reportedRttMs)),
     adsDisagreementSamples: snapshots.filter(item => finite(item.server?.ads) &&
@@ -406,6 +432,7 @@ export function analyzeTrace(document) {
   const byPlayerMode = {};
   const selectedDistances = [];
   const latestGateByReason = {};
+  const coverEvidence = { retainedGateRows: 0, blockerMeasured: 0, byMaterial: {}, latest: null };
   for (const gate of gates) {
     const reason = typeof gate?.reason === 'string' ? gate.reason : 'unspecified';
     const mode = typeof gate?.player?.mode === 'string' ? gate.player.mode : 'unknown';
@@ -413,6 +440,20 @@ export function analyzeTrace(document) {
     byPlayerMode[mode] ||= {};
     byPlayerMode[mode][reason] = (byPlayerMode[mode][reason] || 0) + 1;
     if (finite(gate?.target?.distance)) selectedDistances.push(gate.target.distance);
+    const cover = gate?.scan?.closestCover;
+    if (cover && typeof cover === 'object') {
+      coverEvidence.retainedGateRows++;
+      if (finite(cover.blocker?.distanceMeters)) {
+        coverEvidence.blockerMeasured++;
+        const material = typeof cover.blocker.material === 'string' ? cover.blocker.material : 'unknown';
+        coverEvidence.byMaterial[material] = (coverEvidence.byMaterial[material] || 0) + 1;
+      }
+      coverEvidence.latest = { match: gate.match ?? null, sequence: gate.sequence ?? null,
+        targetDistanceMeters: rounded(cover.distanceMeters),
+        preferredPart: cover.preferredPart ?? null,
+        blockerDistanceMeters: rounded(cover.blocker?.distanceMeters),
+        material: cover.blocker?.material ?? null };
+    }
     latestGateByReason[reason] = { at: gate?.at ?? null, match: gate?.match ?? null,
       sequence: gate?.sequence ?? null, playerMode: mode, weapon: gate?.weapon?.id ?? null,
       targetDistanceMeters: rounded(gate?.target?.distance), originalButtons: gate?.originalButtons ?? null,
@@ -494,7 +535,8 @@ export function analyzeTrace(document) {
     aimVisibility,
     retention: { retained, dropped: trace.retention?.dropped || null },
     rageSamples: trace.counters?.rageSamples ?? null,
-    gateReasons: gateCounts, gateSamples, targetRejects: trace.counters?.targetRejects || null,
+    gateReasons: gateCounts, gateSamples, coverEvidence,
+    targetRejects: trace.counters?.targetRejects || null,
     inputButtons, firingEvidence, hipFireEvidence, correlatedShots,
     agentActions, interactionEvidence, ammoAssist, predictionConsistency,
     pelletProjection,
@@ -519,6 +561,8 @@ export function analyzeTrace(document) {
       'Adaptive hip-fire decisions use local shot-seed and spread estimates; only server events can establish actual hits.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
+      'Acknowledged aim compares a retained outgoing input with the server snapshot for its ACK. A mismatch suggests server clamping or state drift, but does not by itself establish which rule caused it.',
+      'Cover blockers are first intersections along the preferred hitbox-center ray in the captured client world. They do not establish server penetration rules.',
       'Retained buffers may cover different time windows; inspect dropped counts before comparing totals.'
     ]
   };
@@ -539,6 +583,7 @@ export function formatReport(report) {
     `Recorded gate aim state: ${JSON.stringify(report.gateSamples.aimState)}`,
     `Latest gate row per reason: ${JSON.stringify(report.gateSamples.latestByReason)}`,
     `Target rejection checks: ${JSON.stringify(report.targetRejects || {})}`,
+    `Preferred-center cover blockers (coalesced gate rows): ${JSON.stringify(report.coverEvidence)}`,
     `Latest recorded settings: ${JSON.stringify(report.latestSettings || {})}`,
     `Recorded setting changes (${report.settingsHistory.retained} rows): ${JSON.stringify(report.settingsHistory.transitions)}`,
     `Requested vs selected aim points (retained Fire): ${JSON.stringify(report.aimPointChoices.byRequested)}`,
@@ -591,6 +636,7 @@ export function formatReport(report) {
     `Before-reconcile disagreements: ADS ${report.authoritative.adsDisagreementSamples}, ` +
       `magazine ${report.authoritative.magazineDisagreementSamples}; ` +
       `ACK-aligned shot counts ${JSON.stringify(report.authoritative.acknowledgedShotCount)}`,
+    `Acknowledged aim angles (unique retained frames): ${JSON.stringify(report.authoritative.acknowledgedAim)}`,
     `Server snapshots observed ${report.authoritative.observed ?? 'unknown'}, retained ${report.authoritative.retained}`,
     `Retained: ${JSON.stringify(report.retention.retained)}`,
     `Dropped: ${JSON.stringify(report.retention.dropped || {})}`,

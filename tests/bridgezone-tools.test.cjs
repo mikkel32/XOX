@@ -60,7 +60,7 @@ function documentHarness() {
   };
 }
 
-function harness(initialChunks = [], savedSettings) {
+function harness(initialChunks = [], savedSettings, features = {}) {
   const windowListeners = new Map();
   const dom = documentHarness();
   const documentListeners = dom.listeners;
@@ -72,6 +72,7 @@ function harness(initialChunks = [], savedSettings) {
   const queue = [...initialChunks];
   const window = {
     TURBOPACK: queue,
+    indexedDB: features.indexedDB,
     addEventListener(name, listener) { windowListeners.set(name, listener); },
     removeEventListener(name, listener) {
       if (windowListeners.get(name) === listener) windowListeners.delete(name);
@@ -83,7 +84,7 @@ function harness(initialChunks = [], savedSettings) {
       getItem(key) { return storage.get(key) ?? null; },
       setItem(key, value) { storage.set(key, value); }
     },
-    performance: { now: () => 1000 },
+    performance: { now: () => features.now?.() ?? 1000 },
     Blob,
     URL: {
       createObjectURL(blob) { createdBlobs.push(blob); return 'blob:trace'; },
@@ -122,6 +123,46 @@ function harness(initialChunks = [], savedSettings) {
     windowListeners, documentListeners, ...dom,
     api: window.__bridgeZoneTools
   };
+}
+
+function archiveDbHarness() {
+  const records = new Map();
+  let created = false;
+  const db = {
+    objectStoreNames: { contains: name => name === 'sessions' && created },
+    createObjectStore(name) { assert.equal(name, 'sessions'); created = true; },
+    transaction(name) {
+      assert.equal(name, 'sessions');
+      const tx = {
+        objectStore() {
+          return {
+            put(record) { records.set(record.id, record); },
+            delete(key) { records.delete(key); },
+            getAllKeys() {
+              const request = {};
+              queueMicrotask(() => {
+                request.result = [...records.keys()];
+                request.onsuccess?.();
+                queueMicrotask(() => tx.oncomplete?.());
+              });
+              return request;
+            },
+            getAll() {
+              const request = {};
+              queueMicrotask(() => { request.result = [...records.values()]; request.onsuccess?.(); });
+              return request;
+            }
+          };
+        }
+      };
+      return tx;
+    }
+  };
+  return { records, indexedDB: { open() {
+    const request = { result: db };
+    queueMicrotask(() => { if (!created) request.onupgradeneeded?.(); request.onsuccess?.(); });
+    return request;
+  } } };
 }
 
 function opponent(i = 1, patch = {}) {
@@ -168,7 +209,7 @@ function attach(h, fake = fakeClient()) {
   const exports = h.register(97294, { createZoneClient: originalFactory });
   assert.notEqual(exports.createZoneClient, originalFactory);
   assert.equal(exports.createZoneClient({ arbitrary: true }), fake.client);
-  // Existing behavior tests opt in explicitly; production defaults remain disabled.
+  // Most behavior tests isolate manual aim from the default combat agent.
   h.api.setOptions({ silent: true, visibleOnly: false, rage: false, range: 350, point: 'head' });
   h.api.setOptions({ stealth: false, smooth: 1 });
   return fake;
@@ -1381,20 +1422,47 @@ test('automatic clear-point targeting falls back from blocked head to chest', ()
   });
   const input = frame();
   const output = send(fake, [input])[0];
-  assert.equal(points.length, 6);
+  assert.equal(points.length, 10);
   close(points[0][1], 1.66);
-  close(points[5][1], 1.21);
+  close(points[9][1], 1.21);
   close(output.pitch, Math.atan2(1.21 - 1.62, Math.hypot(2, 10)));
   h.api.setOptions({ point: 'head' });
   points.length = 0;
   const blockedHead = send(fake, [frame({ s: 24 })])[0];
-  assert.equal(points.length, 5, 'explicit Head searches inside the head but never tries the chest');
+  assert.equal(points.length, 9, 'explicit Head searches inside the head but never tries the chest');
   assert.equal(blockedHead.buttons & 1, 0, 'a covered head is not replaced by a chest shot');
   h.api.setOptions({ point: 'chest' });
   points.length = 0;
   const clearChest = send(fake, [frame({ s: 25 })])[0];
   assert.equal(points.length, 1);
   assert.equal(clearChest.buttons & 1, 1);
+});
+
+test('a covered target records the first blocking world surface without changing Fire', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  let casts = 0;
+  h.register(54145, {
+    getCollisionWorld: () => ({ marker: 'world' }),
+    hasLineOfSight: () => false,
+    raycastWorld(world, origin, direction, maxDistance) {
+      casts++;
+      assert.equal(world.marker, 'world');
+      close(Math.hypot(...direction), 1);
+      assert.ok(maxDistance > 5);
+      return { dist: 4, point: [0, 1, -4], normal: [0, 0, 1], material: 'concrete' };
+    }
+  });
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 0);
+  assert.equal(casts, 1);
+  const cover = h.api.trace().fireGates.at(-1).scan.closestCover;
+  assert.equal(cover.preferredPart, 'head');
+  assert.equal(cover.blocker.material, 'concrete');
+  assert.equal(cover.blocker.distanceMeters, 4);
+  assert.equal(h.api.trace().fireGates.at(-1).scan.coverCandidate, undefined);
+  h.api.destroy();
 });
 
 test('a visible part of the requested head remains selectable behind cover', () => {
@@ -1420,6 +1488,22 @@ test('a visible part of the requested head remains selectable behind cover', () 
   close(output.pitch, Math.atan2(1.73 - 1.62, Math.hypot(2, 10)));
   assert.ok(target.point[1] < target.position[1] + target.bodyHeight,
     'the selected point stays inside the captured head hitbox');
+  h.api.destroy();
+});
+
+test('a small diagonal head opening is used without changing the requested hitbox', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  h.register(54145, { getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) { return point[0] > 2.08 && point[1] > 1.72; } });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'partial');
+  assert.ok(target.point[0] > 2.08 && target.point[0] < 2.14);
+  assert.ok(target.point[1] > 1.72 && target.point[1] < 1.8);
   h.api.destroy();
 });
 
@@ -1819,7 +1903,8 @@ test('captured Turbopack runtime preserves grouped exports and array-to-object l
   sandbox.__fake = fake.client;
   vm.runInContext(`
     TURBOPACK.push(['synthetic.js', 54145, 97294, 42, context => {
-      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true], 54145);
+      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true,
+        'raycastWorld', 0, () => null], 54145);
       context.s(['createZoneClient', 0, params => params], 97294);
       context.s(['getter', () => 7, 'direct', 0, 8, 'setter', () => 9, () => {}], 42);
     }]);
@@ -1954,6 +2039,7 @@ test('late recovery imports an already initialized physics module through the re
   assert.equal(api.runtime.client, fake.client);
   assert.equal(api.runtime.physics.getCollisionWorld, sandbox.__existingPhysics.getCollisionWorld);
   assert.equal(api.runtime.physics.hasLineOfSight, sandbox.__existingPhysics.hasLineOfSight);
+  assert.equal(api.runtime.physics.raycastWorld, sandbox.__existingPhysics.raycastWorld);
   assert.equal(api.runtime.error, '');
   assert.equal(sandbox.__physicsInitializations, 1, 'cached physics module executes only once');
   assert.equal(networkRequests, 0);
@@ -2009,6 +2095,19 @@ test('server telemetry counts authoritative self events, ignores other authors, 
   assert.equal(received[1], snapshot);
   h.api.destroy();
   assert.equal(fake.client.ingestEvents, originalEvents);
+});
+
+test('server snapshot compares acknowledged outgoing aim with server angles', () => {
+  const h = harness();
+  const fake = attach(h, fakeClient({ ingestEvents: snapshot => snapshot }));
+  send(fake, [frame({ s: 77, buttons: 0, yaw: 0.2, pitch: -0.1 })]);
+  fake.client.ingestEvents({ t: 105, me: { ack: 77, yaw: 0.22, pitch: -0.11 }, events: [] });
+  const snapshot = h.api.trace().serverSnapshots.at(-1);
+  assert.equal(snapshot.acknowledgedFrame.sequence, 77);
+  close(snapshot.acknowledgedFrame.sentYaw, 0.2);
+  close(snapshot.acknowledgedFrame.serverYawDifferenceDegrees, 0.02 * 180 / Math.PI);
+  close(snapshot.acknowledgedFrame.serverPitchDifferenceDegrees, -0.01 * 180 / Math.PI);
+  h.api.destroy();
 });
 
 test('server telemetry preserves identical pellet hits within one snapshot while deduplicating replay', () => {
@@ -2338,7 +2437,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.17');
+  assert.equal(exported.scriptVersion, '1.5.18');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2370,17 +2469,45 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.17');
+  assert.equal(payload.scriptVersion, '1.5.18');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
 
-test('new pages retain Silent AIM, migrate legacy settings, and keep Rage off', () => {
+test('active matches save bounded trace snapshots locally and Saved exports the archive', async () => {
+  const archive = archiveDbHarness();
+  let now = 1000;
+  const h = harness([], undefined, { indexedDB: archive.indexedDB, now: () => now });
+  const fake = attach(h);
+  h.mount();
+  h.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(archive.records.size, 1);
+  let payload = JSON.parse(await h.api.latestArchivedTrace());
+  assert.equal(payload.trace.match, 1);
+  assert.equal(payload.trace.frames.length, 0);
+  send(fake, [frame({ s: 99, buttons: 0 })]);
+  now += 16000;
+  h.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  payload = JSON.parse(await h.api.latestArchivedTrace());
+  assert.equal(payload.trace.frames.at(-1).sequence, 99);
+  await h.controls.get('[data-download-archive]').events.get('click')();
+  assert.equal(h.downloads.length, 1);
+  assert.equal(JSON.parse(await h.createdBlobs[0].text()).trace.frames.at(-1).sequence, 99);
+  assert.equal(h.api.inspect().archive.error, null);
+  h.api.destroy();
+});
+
+test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {
   for (const saved of [undefined, { silent: true, rage: true, xray: false, loot: false, range: 120, fov: 25, smooth: 0.1 }]) {
     const h = harness([], saved);
     assert.equal(h.api.options.silent, true);
+    assert.equal(h.api.options.rage, true);
+    assert.equal(h.api.options.agent, true);
     h.api.setOptions({ rage: false });
     assert.equal(h.api.options.rage, false);
+    assert.equal(h.api.options.agent, false);
     assert.equal(h.api.options.fov, 90);
     assert.equal(h.api.options.smooth, 1);
     assert.equal(h.api.inspect().aimRejected, false);
@@ -2397,6 +2524,18 @@ test('new pages retain Silent AIM, migrate legacy settings, and keep Rage off', 
     assert.equal(h.api.runtime.rewrites, 1);
     h.api.destroy();
   }
+  const rejected = harness([], { silent: false, rage: false, agent: false });
+  assert.equal(rejected.api.options.silent, false);
+  assert.equal(rejected.api.options.rage, false);
+  assert.equal(rejected.api.options.agent, false);
+  rejected.api.destroy();
+  const disabled = harness([], { settingsRevision: 3, silent: true, rage: true, agent: false });
+  assert.equal(disabled.api.options.agent, false);
+  disabled.api.setOptions({ agent: true });
+  assert.equal(disabled.api.options.agent, true);
+  const persisted = JSON.parse([...disabled.storage.values()][0]);
+  assert.equal(persisted.settingsRevision, 3);
+  disabled.api.destroy();
 });
 
 test('server aim rejection disables and persists aim across settings updates and a new client', () => {
@@ -2451,6 +2590,7 @@ test('attachment checks an already rejected connection with or without a state s
     assert.equal(h.api.options.silent, false);
     h.api.setOptions({ rage: false });
     assert.equal(h.api.options.rage, false);
+    assert.equal(h.api.options.agent, false);
     h.api.destroy();
     assert.equal(state.listeners.size, 0);
   }
@@ -2552,7 +2692,8 @@ test('settings deletion resets defaults without echoing storage and malformed pa
   for (const key of ['bridgezone.tools.v2', null]) {
     storage({ key, newValue: null });
     assert.equal(h.api.options.silent, true);
-    assert.equal(h.api.options.rage, false);
+    assert.equal(h.api.options.rage, true);
+    assert.equal(h.api.options.agent, true);
     assert.equal(h.api.options.xray, true);
     assert.equal(h.api.options.loot, true);
     assert.equal(h.api.options.range, 600);

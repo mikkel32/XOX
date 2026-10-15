@@ -13,7 +13,9 @@ test('trace analysis groups sent inputs while keeping server hits unattributed',
     match: 1,
     frames: [], localShots: [], fireGates: [], kicks: [], connectionStates: [], errors: [],
     serverSnapshots: [{ match: 1, ack: 11, ackLatencyMs: 80, reportedRttMs: 90,
-      server: { ads: 0.8, magazine: 5 }, predictorBeforeReconcile: { ads: 1, magazine: 4 } }],
+      server: { ads: 0.8, magazine: 5 }, predictorBeforeReconcile: { ads: 1, magazine: 4 },
+      acknowledgedFrame: { sequence: 11, sentYaw: 0, sentPitch: 0,
+        serverYawDifferenceDegrees: 1.25, serverPitchDifferenceDegrees: -0.1 } }],
     retention: { dropped: { frames: 10, aimDecisions: 0 } },
     counters: { rageSamples: 40, gateReasons: { 'ads-ramp': 5, 'fire-sampled': 20 },
       targetRejects: { range: 12 }, highestAckByMatch: { 1: 11 } },
@@ -43,6 +45,9 @@ test('trace analysis groups sent inputs while keeping server hits unattributed',
   assert.equal(report.authoritative.medianAckLatencyMs, 80);
   assert.equal(report.authoritative.adsDisagreementSamples, 1);
   assert.equal(report.authoritative.magazineDisagreementSamples, 1);
+  assert.equal(report.authoritative.acknowledgedAim.yawOverHalfDegree, 1);
+  assert.equal(report.authoritative.acknowledgedAim.pitchOverHalfDegree, 0);
+  assert.match(formatReport(report), /Acknowledged aim angles/);
   assert.equal(report.investigate[0].sequence, 11);
   assert.match(formatReport(report), /cannot be assigned to a weapon/);
 });
@@ -56,6 +61,28 @@ test('older trace format remains readable without inventing weapon or range deta
   assert.equal(report.serverEvents.hits, 1);
   assert.equal(report.retention.dropped, null);
   assert.throws(() => analyzeTrace({ formatVersion: 7, trace: {} }), /formatVersion 1 or 2/);
+});
+
+test('cover and acknowledged aim diagnostics stay separate from hit evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    fireGates: [{ match: 1, sequence: 5, reason: 'no-target',
+      scan: { closestCover: { distanceMeters: 60, preferredPart: 'head',
+        blocker: { distanceMeters: 12, material: 'concrete' } } } }],
+    serverSnapshots: [
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverYawDifferenceDegrees: 0.8, serverPitchDifferenceDegrees: -0.1 } },
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverYawDifferenceDegrees: 0.8, serverPitchDifferenceDegrees: -0.1 } }
+    ]
+  } });
+  assert.equal(report.coverEvidence.retainedGateRows, 1);
+  assert.deepEqual(report.coverEvidence.byMaterial, { concrete: 1 });
+  assert.equal(report.coverEvidence.latest.blockerDistanceMeters, 12);
+  assert.equal(report.authoritative.acknowledgedAim.uniqueAcknowledgedFrames, 1);
+  assert.equal(report.authoritative.acknowledgedAim.yawOverHalfDegree, 1);
+  assert.equal(report.serverEvents.hits, 0);
+  assert.match(formatReport(report), /Preferred-center cover blockers/);
 });
 
 test('aim report exposes explicit point overrides in old and new trace rows', async () => {
