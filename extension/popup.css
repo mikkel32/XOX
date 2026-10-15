@@ -1,0 +1,16 @@
+:root{color-scheme:light;font:13px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;color:#111;background:#fff}
+*{box-sizing:border-box}
+body{width:340px;margin:0}
+main{padding:26px}
+.eyebrow{font-size:10px;letter-spacing:.14em;font-weight:700;color:#666}
+h1{font-size:24px;line-height:1.15;letter-spacing:-.045em;margin:10px 0 9px}
+.intro{color:#555;margin:0 0 23px;max-width:270px}
+section{display:grid;grid-template-columns:24px 1fr;gap:13px;border-top:1px solid #e8e8e8;padding:18px 0 19px}
+.step{font:11px/1.6 ui-monospace,monospace;color:#777}
+h2{font-size:14px;letter-spacing:-.02em;margin:0 0 5px}
+section p{color:#666;margin:0 0 12px}
+code{display:block;padding:10px;border:1px solid #e5e5e5;background:#f8f8f8;font:11px/1.5 ui-monospace,monospace;white-space:nowrap}
+button{width:100%;border:1px solid #00a884;background:#00a884;color:#fff;border-radius:5px;padding:10px 12px;text-align:left;font:600 13px system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer;display:flex;justify-content:space-between;align-items:center}
+button:hover{background:#008d70;border-color:#008d70}
+button:focus-visible{outline:2px solid #111;outline-offset:3px}
+.footnote{color:#777;font-size:11px;margin:1px 0 0}

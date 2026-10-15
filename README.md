@@ -5,8 +5,8 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.5.** The local suite passes 50 tests when the optional
-> captured client archive is present. Live traces include both server anti-cheat
+> **Current version: 1.5.5.** The portable local suite reports 48 passes and 3
+> skips without the optional captured client archive. Live traces include both server anti-cheat
 > removals and short matches without one. They do **not** prove a general bypass.
 
 ## Explore
@@ -46,9 +46,10 @@ server removal, Aim and Rage are disabled and remain off across the next match.
 3. Refresh the Zone page. Keep the Tampermonkey variant disabled on that page so
    the two copies do not compete.
 
-After editing the source, run `./extension/build-extension.sh`, click **Reload**
-on the extension card, then refresh Zone. Edge documents this as the supported
-[local update flow](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading).
+After editing the source, build the extension and open its toolbar popup to click
+**Reload extension**, then refresh Zone. The popup cannot write files in the
+repository; run the build command locally first. Edge also supports **Reload**
+on the extension card as a [local update flow](https://learn.microsoft.com/en-us/microsoft-edge/extensions/getting-started/extension-sideloading).
 
 ### Tampermonkey
 
@@ -60,17 +61,23 @@ blocks userscripts, follow [Tampermonkey's permission instructions](https://www.
 ## Build and verify
 
 ```sh
-./extension/build-extension.sh
+node extension/build-extension.mjs
+node extension/build-extension.mjs --check
 node --check bridgezone-tools.user.js
 node --check extension/loader.js
 node --check extension/bridgezone-main.js
 node --test tests/*.test.cjs
 ```
 
+`extension/build-extension.cmd` is a Windows wrapper and
+`extension/build-extension.sh` is a shell wrapper. Both accept `--check` or
+`--watch`. Watch mode rebuilds after source edits; use the popup's reload button
+and refresh Zone to load each new build.
+
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The full local suite passed **50/50** on 2026-10-15. Three tests use locally
-captured client bundles that are intentionally not mirrored here; a fresh public
-clone should report **47 passes and 3 skips**. Tests validate local behavior and
+The portable local suite passed **48 tests with 3 skips** on 2026-10-15. Three
+tests use locally captured client bundles that are intentionally not mirrored
+here. Tests validate local behavior and
 fixtures, not a live server outcome.
 
 ## Observed results
