@@ -1,0 +1,240 @@
+{
+  "capture": "2026-10-08",
+  "method": "Edge CDP Debugger.getScriptSource for already-loaded public browser scripts",
+  "files": [
+    {
+      "file": "05lbj7mi8e3kh.js",
+      "bytes": 188847,
+      "sha256": "c37004dbb380e216c4397deb519b40f6878b0de5c1db2a5b5db7b3d61bf787ee",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/05lbj7mi8e3kh.js"
+    },
+    {
+      "file": "06ytxsojx1h0b.js",
+      "bytes": 51231,
+      "sha256": "e08d8d3115c373c696e47a81a26acb7751926a140fff27b16ea08e2c3fa4c5bd",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/06ytxsojx1h0b.js"
+    },
+    {
+      "file": "0b43l-z8fognw.js",
+      "bytes": 39832,
+      "sha256": "d8596236f711e6b966a769f663c992cef70ee2a319125bff4530c22094e1db80",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0b43l-z8fognw.js"
+    },
+    {
+      "file": "0dxvwzsyt4vmf.js",
+      "bytes": 228922,
+      "sha256": "3bd268af3cf163f3e3b9bd43d83c139ffd1b22353de92fe489c4913033299495",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0dxvwzsyt4vmf.js"
+    },
+    {
+      "file": "0e_l8aq-2ekgf.js",
+      "bytes": 153607,
+      "sha256": "a682b34c3f099103c2da2b7b60cbdc16960a1e54e926f929da8605da1d45394f",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0e_l8aq-2ekgf.js"
+    },
+    {
+      "file": "0gte2josj8y7-.js",
+      "bytes": 90856,
+      "sha256": "96627f8e3906317a36c270cb99e46f2d502a9fcd3fcfe2f27817bf2e1e462fe8",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0gte2josj8y7-.js"
+    },
+    {
+      "file": "0h9uf-id-ynlw.js",
+      "bytes": 455250,
+      "sha256": "344e40e203f4849e95d9f206721a44fbb2cad302eaffc58cfa38fd54690b2173",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0h9uf-id-ynlw.js"
+    },
+    {
+      "file": "0kdadqzuvaey5.js",
+      "bytes": 5883,
+      "sha256": "db3aa4929b9f0426ae1c2f27389724a09f19d1a206fc35a4298952b4a876807c",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0kdadqzuvaey5.js"
+    },
+    {
+      "file": "0mar69t2-loqt.js",
+      "bytes": 168140,
+      "sha256": "7addfb8b5f868b374ab903fd6ec8ecd62c7f3a7565b081fce772b6e232b72ae3",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0mar69t2-loqt.js"
+    },
+    {
+      "file": "0ozbivb7uobj6.js",
+      "bytes": 537696,
+      "sha256": "96f29cd0a2b7229b750d4d9220150cddd595a333e0601566e290efa73b166d5a",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0ozbivb7uobj6.js"
+    },
+    {
+      "file": "0v2_e-9r45l6j.js",
+      "bytes": 5404,
+      "sha256": "282a727d5c5595124056fafd57153b8974d87b1413aa24d07421607a0f60c872",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0v2_e-9r45l6j.js"
+    },
+    {
+      "file": "0won6dsg50k6u.js",
+      "bytes": 439172,
+      "sha256": "eaac3cf928b8afb4d71abfef8b38064ec453c7354d316c2189293d598c34025f",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0won6dsg50k6u.js"
+    },
+    {
+      "file": "0yll4pmil-bcy.js",
+      "bytes": 47933,
+      "sha256": "216fab20f164de7c0b89071404b494950ee2a26ecb7a1db76eac1cd33a099408",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/0yll4pmil-bcy.js"
+    },
+    {
+      "file": "1274iidllc_33.js",
+      "bytes": 452977,
+      "sha256": "99d3c698d7ddd39aac308262559188a1b2b08d8702831d839d1d2b15eaf28814",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/1274iidllc_33.js"
+    },
+    {
+      "file": "128j6mv4xu0ah.js",
+      "bytes": 19177,
+      "sha256": "88fec8a89562261dc30ae9827bab56030b0f66ca5dcc7ae0fc617f87b57028b7",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/128j6mv4xu0ah.js"
+    },
+    {
+      "file": "160oyuidzwm4u.js",
+      "bytes": 1315,
+      "sha256": "7253173af2bbb0d9f52bdf78ad8a20a08d3c50913b6ffc5bf486769959142c3f",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/160oyuidzwm4u.js"
+    },
+    {
+      "file": "1bsoeee_1rqbl.js",
+      "bytes": 31540,
+      "sha256": "09f0279e24e68eb46a222cd877d80d298028fdabe31a7687108c33d21e312fec",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/1bsoeee_1rqbl.js"
+    },
+    {
+      "file": "1j-x40p5yxc3g.js",
+      "bytes": 9251,
+      "sha256": "b9ef9df028b1ad94a87ff61a07ca86cdc36170e0b61d31887ffe06a984e4b9ce",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/1j-x40p5yxc3g.js"
+    },
+    {
+      "file": "1kc7bf-8kpep3.js",
+      "bytes": 179305,
+      "sha256": "57d75b3ae1fd0985cda62d9036cb8a10591c02eb8d0421ec023f0efb6325850b",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/1kc7bf-8kpep3.js"
+    },
+    {
+      "file": "1lfc_lr7t76i9.js",
+      "bytes": 33965,
+      "sha256": "83af104f4a664a9da80d508ababa24679d2eb8b40fb071b23921a93f4720c8ad",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/1lfc_lr7t76i9.js"
+    },
+    {
+      "file": "1x7x0_7ea4x6o.js",
+      "bytes": 29788,
+      "sha256": "bd422c7c1d962e3c58d9837b78d5583d2aeafb0172716692b36d7c509861e41f",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/1x7x0_7ea4x6o.js"
+    },
+    {
+      "file": "1zmmwc0jc6rvc.js",
+      "bytes": 117973,
+      "sha256": "8070462a46ff9d51ccc87fe1b6d8498e3c2343ebedc3f5170547c91dec2e9775",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/1zmmwc0jc6rvc.js"
+    },
+    {
+      "file": "2-p7-3dbgaflf.js",
+      "bytes": 55249,
+      "sha256": "4e6b76a400b81d5a23d38cf8e6dd19c0fd956825858546c68c7fdc12cd9ddf92",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/2-p7-3dbgaflf.js"
+    },
+    {
+      "file": "20cwhb40wsqzc.js",
+      "bytes": 39510,
+      "sha256": "e8e0aacf94451229747f9aaed96f913cd98861575df9a7afbdae9770d8b56a38",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/20cwhb40wsqzc.js"
+    },
+    {
+      "file": "2mmpezlrfmbu5.js",
+      "bytes": 34718,
+      "sha256": "91f598badaed9141b1c267e346cdd724a023add2b14f3b6d5d8e7b280825c172",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/2mmpezlrfmbu5.js"
+    },
+    {
+      "file": "2mzj59baxffwl.js",
+      "bytes": 12839,
+      "sha256": "84f76ce1ed90875e1b4bdb80f6091d12f707c0cc5d3dbaf27c0df16d0a3d83b6",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/2mzj59baxffwl.js"
+    },
+    {
+      "file": "2qei9otfein95.js",
+      "bytes": 27475,
+      "sha256": "957a57fc7a7c6fa28c06b783f98acce682d9754c31506f08d10a540a2c3006c1",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/2qei9otfein95.js"
+    },
+    {
+      "file": "2z7ypl612xr0n.js",
+      "bytes": 53339,
+      "sha256": "95fd895abb67cf63de7ca808bd6a44f9d65b948e9c24bfed768e8d9fb06597a1",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/2z7ypl612xr0n.js"
+    },
+    {
+      "file": "31u7ywsdq9tb0.js",
+      "bytes": 159418,
+      "sha256": "2bef0b30d297464f5798357e5a1cecd83cc5ddfee59df8e946f5dc36cd410252",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/31u7ywsdq9tb0.js"
+    },
+    {
+      "file": "37t_ejyor_cvd.js",
+      "bytes": 41094,
+      "sha256": "3bc3a46f362a45432ff1d97fc4f4fd12b257d40e0a473dd114589a207c0277aa",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/37t_ejyor_cvd.js"
+    },
+    {
+      "file": "3apo3lmpvua1x.js",
+      "bytes": 363795,
+      "sha256": "2695c30a6a396ed0454bc305c662c2dff784a892737de4fd229339ffa1a87ec4",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3apo3lmpvua1x.js"
+    },
+    {
+      "file": "3ep-katvfqbjo.js",
+      "bytes": 101225,
+      "sha256": "2027d73bd9daea6e44f954bfce014af3ee8b5df3550bec44a2b9c046b7b71b1e",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3ep-katvfqbjo.js"
+    },
+    {
+      "file": "3euu-fc1ymc63.js",
+      "bytes": 36572,
+      "sha256": "c34e56df41269a9f7a9a10f69e803ea22c3f69a06bc01c1e8f78b5e5687526c1",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3euu-fc1ymc63.js"
+    },
+    {
+      "file": "3f2xwar_1zlux.js",
+      "bytes": 262105,
+      "sha256": "28a031cbb98e89eec694d76dcc6e245aaaa52787ecedf7471cd06fdef55c45c9",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3f2xwar_1zlux.js"
+    },
+    {
+      "file": "3mzem-f1voh2-.js",
+      "bytes": 21682,
+      "sha256": "6343c00b9028136b56cd253856d3fe39b9b203ec0d38396265051228c402465c",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3mzem-f1voh2-.js"
+    },
+    {
+      "file": "3s6nzrbk-8mnv.js",
+      "bytes": 5598,
+      "sha256": "1d36f2e3f57740f75eb021aaec1208d7e938130e36c106a9f28678e4a98559b0",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3s6nzrbk-8mnv.js"
+    },
+    {
+      "file": "3ur8xo1gppn0x.js",
+      "bytes": 262083,
+      "sha256": "ea9fead0a5f324fc7f5a572ea027466a02991b19b9446cc37fbf169e32efacd0",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3ur8xo1gppn0x.js"
+    },
+    {
+      "file": "3y8-hwh2mivtt.js",
+      "bytes": 18894,
+      "sha256": "20fe2727bd53859d3099d88ba7524ac6145297a9809e134ac1868e60d2a26d90",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/3y8-hwh2mivtt.js"
+    },
+    {
+      "file": "turbopack-37jd2rjmtu1y9.js",
+      "bytes": 9721,
+      "sha256": "94e60212916d8b767ffa7df350c496c14eb7a0a0787028f6a207761bb27d9b11",
+      "source": "https://www.bridgegame.ai/_next/static/chunks/turbopack-37jd2rjmtu1y9.js"
+    }
+  ]
+}
