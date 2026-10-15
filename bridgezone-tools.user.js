@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.26
+// @version      1.5.27
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,7 +15,7 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.26';
+  const VERSION = '1.5.27';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
@@ -364,6 +364,24 @@
       const depth = Math.min(1, entry + 0.06 / length);
       const point = origin.map((value, axis) => value + direction[axis] * depth);
       if (hasLineOfSight(world, origin, point)) return { point, visibility: 'front-partial' };
+      if (horizontal > 0.01) {
+        // Four more rays cover near-face corner openings that the center ray
+        // misses. Keep every endpoint inside the captured hitbox; the world
+        // visibility check still rejects solid cover in front of it.
+        const lateral = part === 'head' ? 0.07 : 0.15;
+        const vertical = part === 'head' ? 0.07 : 0.15;
+        const sideX = -dz / horizontal, sideZ = dx / horizontal;
+        for (const [side, height] of [[1, 1], [-1, 1], [1, -1], [-1, -1]]) {
+          const corner = [point[0] + sideX * lateral * side,
+            point[1] + vertical * height,
+            point[2] + sideZ * lateral * side];
+          if (!corner.every((value, axis) =>
+            value >= center[axis] - half[axis] + 0.015 &&
+            value <= center[axis] + half[axis] - 0.015)) continue;
+          if (hasLineOfSight(world, origin, corner))
+            return { point: corner, visibility: 'front-corner-partial' };
+        }
+      }
     }
     return null;
   }

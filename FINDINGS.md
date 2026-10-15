@@ -551,6 +551,19 @@ automatic download. Local tests verify the trigger, duplicate suppression,
 payload version and retained input frames, including when IndexedDB is absent.
 No live browser download or new server-reported rays have been observed yet.
 
+### Version 1.5.27: near-face corner openings
+
+The prior visibility search could miss a small exposed corner of a target's
+front hitbox face after its center and interior probes were covered. It now
+tests four additional front-face corner points, each at least 1.5 cm inside
+the captured head or torso axis-aligned box. A world line-of-sight ray must
+reach the selected point. Traces identify these choices as
+`front-corner-partial` or `fallback-front-corner-partial`, allowing later
+comparison with server-reported rays and hits. A local test exposes only one
+near corner and verifies selection; a fully blocked target remains rejected.
+This is a clear opening into the hitbox, not penetration through solid world
+geometry. No live XOX 1.5.27 match trace is available yet.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

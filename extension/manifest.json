@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BridgeZone Tools",
-  "version": "1.5.26",
+  "version": "1.5.27",
   "description": "Xray, corrected aim, combat agent, and diagnostics for BridgeZone.",
   "action": {
     "default_title": "BridgeZone Tools",

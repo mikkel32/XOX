@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.26.** All 130 local tests pass with the hash-matched captured client bundles. Checks cover combat-agent deployment, weapon pickup and equip inputs, storm navigation, spread correction including 128 simulated 599.5 m Head shots, front-face cover selection, automatic trace export, and provisional server-ray comparison. The agent has not yet been tested in a live XOX match. Server-side zero spread is not established by client-side correction.
+> **Current version: 1.5.27.** All 131 local tests pass with the hash-matched captured client bundles. Checks cover combat-agent deployment, weapon pickup and equip inputs, storm navigation, spread correction including 128 simulated 599.5 m Head shots, front-face and corner visibility, automatic trace export, and provisional server-ray comparison. The agent has not yet been tested in a live XOX match. Server-side zero spread is not established by client-side correction.
 
 ## Explore
 
@@ -24,7 +24,7 @@ extension built from the same source, local tests, and the saved JSON traces.
 | --- | --- |
 | Xray | Draws player boxes, names, and distances, including opponents behind cover when they are present in client snapshots. |
 | Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
-| Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. When a hitbox center is covered, it checks interior edge, diagonal, and near-face points for a clear shot within the requested hitbox. |
+| Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. When a hitbox center is covered, it checks interior edge and diagonal points, then a bounded set of near-face center and corner points for a clear shot inside the requested hitbox. |
 | Rage | Selects a clear target across 360 degrees up to the range slider and fires after aim alignment. Hip fire is limited to stationary single-projectile shots within 40 m; moving, wider, and distant shots use ADS. Explicit Head and Chest choices remain exact. Auto can adapt between head and chest. A predicted shot keeps Fire on the wire to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
 | Combat agent | On by default with Silent AIM and Rage. After a match starts, it selects an observed land point near the middle of the plane path, waits for the door to open, sends a Jump pulse, and steers toward that point during descent. On the ground it uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the nearest safe point inside the storm, seek compatible ammo when empty, pick up a nearby weapon when under-equipped, and swap to a loaded second-slot weapon from a sidearm or an empty primary. Its short route probe checks the captured movement collision grid, body clearance, low steps, and terrain slopes; when every full route is blocked, it can take a shorter clear corridor. A stalled route takes a timed flank and checks actual goal progress. Your movement or action keys override its movement. It does not start matches or guarantee a win. |
 | Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It can request a close single-projectile shot during ADS ramp when a conservative spread bound fits inside the existing 8-degree outgoing turn. It still follows local aim alignment, weapon cooldown, and server ammunition. |
@@ -86,7 +86,7 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable suite passes 106 tests and skips 8 that need locally captured
+The portable suite passes 122 tests and skips 9 that need locally captured
 client bundles. Tests validate local behavior and fixtures, not a live server
 outcome.
 Set `XOX_CLIENT_PHYSICS` to a local copy of the captured
@@ -167,6 +167,7 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.24 | No live XOX trace yet | The combat agent moves to the nearest point safely inside the active storm circle and can keep fighting inside small circles. The analyzer groups intersections of server-reported rays with locally sampled target hitboxes by visibility. A captured-kernel simulation put 128 corrected 599.5 m still and moving Head rays inside the head box; it does not prove an authoritative hit. Live agent and shot behavior still need a new trace. |
 | 1.5.25 | No live XOX trace yet | The combat agent requests a swap when an empty active weapon has no reserve and a loaded backup is available, and keeps moving into a final circle smaller than one metre. When acknowledged shot counts diverge, outgoing aim skips stale seeded spread cancellation and records why. Local tests cover both paths; server behavior still needs a live trace. |
 | 1.5.26 | No live XOX trace yet | Automatically downloads one bounded trace when a match finishes, the local player is eliminated, or the connection is kicked. The browser archive and manual Saved fallback remain. Local tests verify download and duplicate suppression; browser download policy and live collection need a match. |
+| 1.5.27 | No live XOX trace yet | Adds four near-face corner probes after center and interior points are covered. Every selected point stays inside the captured head or torso box and must pass world visibility. The trace labels corner choices separately. This targets small exposed openings, not shots through solid cover; live hit results need a new trace. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.
