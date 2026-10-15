@@ -443,6 +443,26 @@ loaded XOX 1.5.20 with the agent enabled, but the site blocked that automated
 profile before lobby creation. No XOX live shot trace resulted from either
 test, and neither proves server-side zero spread or live agent navigation.
 
+### Version 1.5.22: item interaction and inventory receipts
+
+The public client sends Interact and Swap as bits in `zone:input` frames. The
+camera's local item highlight is not sent with those frames. The agent had
+required that highlight to match its ammo goal before pressing Interact, so an
+outgoing aim at the item could remain blocked by a stale camera target. It now
+checks the outgoing item ray, three-dimensional reach, and available local
+line of sight, and takes a side route when the item ray is blocked. An item
+directly underfoot no longer exits before the aiming step. When under-equipped
+and not in close combat or outside the safe zone, the
+agent may seek a nearby weapon; a sidearm can request Swap once a different
+weapon appears in the second slot. Tests verify outgoing Interact and Swap bits
+and the blocked-item detour.
+
+New trace snapshots record the server's two weapon slots and active slot. The
+analyzer counts observed acquisitions, replacements, and active-slot changes,
+separately from agent Interact and Swap requests. None of those observations
+prove that a particular request caused a slot change, and no 1.5.22 live XOX
+match trace exists yet.
+
 ## What changed and what was observed
 
 ### Rejected aim behavior

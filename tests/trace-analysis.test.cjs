@@ -326,6 +326,37 @@ test('ammo requests and reserve gains stay separate, and cooldown frames are not
   assert.match(formatReport(report), /Ammo assist: 1 pickup requests/);
 });
 
+test('agent item and equip requests stay separate from observed server weapon changes', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1,
+    agentDecisions: [
+      { action: 'loot-interact', goal: { kind: 'weapon' } },
+      { action: 'equip', goal: { kind: 'weapon' } },
+      { action: 'loot-interact', goal: { kind: 'ammo' } }
+    ],
+    serverSnapshots: [
+      { match: 1, tick: 100, server: { activeSlot: 0,
+        slots: [{ weapon: 'sidearm' }, null] } },
+      { match: 1, tick: 110, server: { activeSlot: 0,
+        slots: [{ weapon: 'sidearm' }, { weapon: 'vanguard' }] } },
+      { match: 1, tick: 120, server: { activeSlot: 1,
+        slots: [{ weapon: 'sidearm' }, { weapon: 'vanguard' }] } },
+      { match: 1, tick: 130, server: { activeSlot: 1,
+        slots: [{ weapon: 'hornet' }, { weapon: 'vanguard' }] } }
+    ]
+  } });
+  assert.deepEqual(report.inventoryEvidence, { observedServerInventories: 4,
+    agentInteractRequestsByKind: { weapon: 1, ammo: 1 }, agentEquipRequests: 1,
+    serverWeaponAcquisitions: 1, serverWeaponReplacements: 1,
+    serverActiveSlotChanges: 1, transitions: [
+      { match: 1, tick: 110, slot: 1, from: null, to: 'vanguard' },
+      { match: 1, tick: 130, slot: 0, from: 'sidearm', to: 'hornet' }
+    ] });
+  assert.match(formatReport(report), /Combat agent inventory/);
+  assert.match(formatReport(report), /cannot be attributed to a particular request/);
+});
+
 test('no-fire report distinguishes sampled gates, outbound frames, and server evidence', async () => {
   const { analyzeTrace, formatReport } = await analyzer;
   const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.8', trace: {

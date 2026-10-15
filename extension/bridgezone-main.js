@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BridgeZone - Xray and Silent AIM
 // @namespace    local.bridgezone.tools
-// @version      1.5.21
+// @version      1.5.22
 // @description  Xray, corrected aim, combat agent, and ammo pickup assistance.
 // @match        https://www.bridgegame.ai/*
 // @match        https://bridgegame.ai/*
@@ -15,13 +15,14 @@
   'use strict';
 
   if (window.__bridgeZoneTools) return;
-  const VERSION = '1.5.21';
+  const VERSION = '1.5.22';
   const STORAGE_KEY = 'bridgezone.tools.v2';
   const SETTINGS_REVISION = 3;
   const MAX_OUTGOING_TURN = 8 * Math.PI / 180;
   const HIP_RANGE_LIMIT = 40;
   const OUTGOING_AIM_TOLERANCE = 0.008;
   const INTERACT_BUTTON = 64;
+  const SWAP_BUTTON = 128;
   const PLANE_DOOR_TICKS = 120; // Captured client: 4 seconds at 30 ticks/second.
   const AMMO_TYPES = ['light', 'heavy', 'shells', 'sniper'];
   const AMMO_CAPS = { light: 240, heavy: 180, shells: 48, sniper: 40 };
@@ -40,7 +41,7 @@
   runtime.outgoingAim = { yaw: null, pitch: null, targetIndex: null, ready: false, pendingManualUntil: 0 };
   runtime.ammoPickup = { id: null, nextAt: 0 };
   runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
-    lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0,
+    lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0, nextSwapAt: 0,
     navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
     dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
     dropTerrainChecked: false,
@@ -211,6 +212,7 @@
     runtime.agent.navigationGoalKey = null;
     runtime.agent.lastGoalDistance = null;
     runtime.agent.detourUntil = 0;
+    runtime.agent.nextSwapAt = 0;
     runtime.agent.dropRouteKey = null;
     runtime.agent.dropTarget = null;
     runtime.agent.dropFraction = null;
@@ -628,7 +630,12 @@
       ackLatencyMs: Number.isFinite(sentAt) && now >= sentAt ? now - sentAt : null,
       reportedRttMs: Number.isFinite(client.rtt) ? client.rtt : null,
       weaponId: safeWeaponId(slot?.weapon),
-      server: { ads: Number.isFinite(me.ads) ? me.ads : null,
+      server: { activeSlot: Number.isInteger(me.active) ? me.active : null,
+        slots: Array.isArray(me.slots) ? me.slots.slice(0, 2).map(item => item ? {
+          weapon: safeWeaponId(item.weapon), rarity: safeWeaponId(item.rarity),
+          magazine: Number.isFinite(item.mag) ? item.mag : null
+        } : null) : null,
+        ads: Number.isFinite(me.ads) ? me.ads : null,
         yaw: Number.isFinite(me.yaw) ? me.yaw : null,
         pitch: Number.isFinite(me.pitch) ? me.pitch : null,
         bloom: Number.isFinite(me.bloom) ? me.bloom : null,
@@ -924,7 +931,8 @@
     let modified = false;
     const result = frames.map(frame => {
       if (!frame || ![frame.yaw, frame.pitch, frame.mx, frame.mz].every(Number.isFinite)) return frame;
-      if ((frame.buttons & INTERACT_BUTTON) || options.agent && runtime.agent.action === 'loot-aim') {
+      if ((frame.buttons & INTERACT_BUTTON) || options.agent &&
+          ['loot-aim', 'equip'].includes(runtime.agent.action)) {
         // Interaction and pickup use the player's real view. Match the next
         // turn to the angles that were actually sent during this frame.
         state.yaw = frame.yaw;
@@ -1405,6 +1413,23 @@
       mz: -Math.sin(frame.yaw) * dirX - Math.cos(frame.yaw) * dirZ };
   }
 
+  function agentWeaponLoot(client, me, slot) {
+    const ranks = { common: 0, uncommon: 1, rare: 2, epic: 3, legendary: 4 };
+    let best = null, bestScore = Infinity;
+    for (const item of client.loot?.items?.values?.() || []) {
+      if (item?.kind !== 'weapon' || !Number.isSafeInteger(item.id) &&
+          typeof item.id !== 'string' || typeof item.weapon !== 'string' ||
+          !vector3(item.pos) || Math.abs(item.pos[1] - me.pos[1]) > 2.5) continue;
+      if (item.weapon === slot?.weapon &&
+          (ranks[item.rarity] ?? 0) <= (ranks[slot.rarity] ?? 0)) continue;
+      const distance = Math.hypot(item.pos[0] - me.pos[0], item.pos[2] - me.pos[2]);
+      if (distance > 35) continue;
+      const score = distance - 1.5 * (ranks[item.rarity] ?? 0);
+      if (score < bestScore) { best = item; bestScore = score; }
+    }
+    return best;
+  }
+
   function agentInput(client, frame) {
     const agent = runtime.agent;
     agent.target = null;
@@ -1430,6 +1455,7 @@
       agent.navigationGoalKey = null;
       agent.lastGoalDistance = null;
       agent.detourUntil = 0;
+      agent.lootYaw = agent.lootPitch = null;
       agentNote('manual-override');
       return frame;
     }
@@ -1445,10 +1471,33 @@
     agent.scan = scan;
     const storm = stormCircle(client.latest?.storm, client.latest?.t);
     const stormDistance = storm ? Math.hypot(me.pos[0] - storm.center[0], me.pos[2] - storm.center[1]) : 0;
+    const stormUrgent = storm && stormDistance > storm.radius - 8;
+    const otherSlot = client.predictor?.slots?.[1 - (client.predictor?.active ?? 0)];
+    const alternateSlotReady = weapon?.class === 'pistol' && otherSlot?.weapon &&
+      otherSlot.weapon !== slot?.weapon;
+    if (!stormUrgent && alternateSlotReady && (!target || target.distance > 25) &&
+        !(client.predictor?.ws?.switching > 0) && performance.now() >= agent.nextSwapAt) {
+      agent.nextSwapAt = performance.now() + 900;
+      agent.lootYaw = agent.lootPitch = null;
+      agentNote('equip', { kind: 'weapon' });
+      return { ...frame, buttons: frame.buttons | SWAP_BUTTON };
+    }
+    const reserve = client.predictor?.ammo?.[weapon?.ammo] || 0;
+    const outOfAmmo = !!slot && slot.mag <= 0 && reserve <= 0;
+    const weakWeapon = !weapon || weapon.class === 'pistol' || outOfAmmo;
+    const weaponItem = !stormUrgent && !alternateSlotReady && weakWeapon &&
+      (!target || target.distance > 30 || !weapon || outOfAmmo)
+      ? agentWeaponLoot(client, me, slot) : null;
     let goal = null, action = 'engage', stopAt = 0, sprint = false;
-    if (storm && stormDistance > storm.radius - 8) {
+    if (stormUrgent) {
       goal = { kind: 'storm', position: [storm.center[0], storm.center[1]] };
       action = 'storm'; sprint = true;
+    } else if (weaponItem) {
+      goal = { kind: 'weapon', id: weaponItem.id,
+        position: [weaponItem.pos[0], weaponItem.pos[2]], height: weaponItem.pos[1] };
+      const itemDistance = Math.hypot(weaponItem.pos[0] - me.pos[0],
+        weaponItem.pos[1] + 0.15 - (me.pos[1] + 1.62), weaponItem.pos[2] - me.pos[2]);
+      action = itemDistance <= 2.5 ? 'loot-aim' : 'loot-travel';
     } else if (target && weapon && !(slot && slot.mag <= 0 &&
         !(client.predictor?.ammo?.[weapon.ammo] > 0))) {
       const classDistance = { sniper: 150, rifle: 70, smg: 30, pistol: 25, shotgun: 13 };
@@ -1465,14 +1514,17 @@
       if (slot && slot.mag <= 0 && reserve <= 0) {
         let nearest = null, nearestDistance = 40;
         for (const item of client.loot?.items?.values?.() || []) {
-          if (item?.kind !== 'ammo' || item.ammo !== ammoType || !vector3(item.pos)) continue;
+          if (item?.kind !== 'ammo' || item.ammo !== ammoType || !vector3(item.pos) ||
+              Math.abs(item.pos[1] - me.pos[1]) > 2.5) continue;
           const distance = Math.hypot(item.pos[0] - me.pos[0], item.pos[2] - me.pos[2]);
           if (distance < nearestDistance) { nearest = item; nearestDistance = distance; }
         }
         if (nearest) {
           goal = { kind: 'ammo', id: nearest.id, position: [nearest.pos[0], nearest.pos[2]],
             height: nearest.pos[1] };
-          action = nearestDistance < 2.1 ? 'loot-aim' : 'loot-travel';
+          const itemDistance = Math.hypot(nearest.pos[0] - me.pos[0],
+            nearest.pos[1] + 0.15 - (me.pos[1] + 1.62), nearest.pos[2] - me.pos[2]);
+          action = itemDistance <= 2.5 ? 'loot-aim' : 'loot-travel';
         }
       }
       if (!goal && slot && slot.mag <= 0 && reserve <= 0) {
@@ -1497,6 +1549,7 @@
       agent.navigationGoalKey = null;
       agent.lastGoalDistance = null;
       agent.detourUntil = 0;
+      agent.lootYaw = agent.lootPitch = null;
       agentNote(target ? 'engage' : 'idle', target ? { kind: 'opponent', index: target.index } : null,
         target?.distance ?? null);
       return frame;
@@ -1512,25 +1565,53 @@
       agent.detourUntil = 0;
       agent.stuckCount = 0;
     }
-    if (distance < 0.001) { agentNote(action, goal, distance); return frame; }
     if (action === 'loot-aim') {
-      agentNote(action, goal, distance);
       const eye = [me.pos[0], me.pos[1] + 1.62, me.pos[2]];
-      const pitch = Math.atan2(goal.height + 0.15 - eye[1], distance);
-      const yaw = Math.atan2(-dx, -dz);
+      const itemPoint = [goal.position[0], goal.height + 0.15, goal.position[1]];
+      const reach = Math.hypot(...itemPoint.map((value, index) => value - eye[index]));
+      const pitch = Math.max(-1.54, Math.min(1.54,
+        Math.atan2(itemPoint[1] - eye[1], Math.max(0.05, distance))));
+      const yaw = distance < 0.05 ? frame.yaw : Math.atan2(-dx, -dz);
       const fromYaw = agent.lootYaw ?? frame.yaw, fromPitch = agent.lootPitch ?? frame.pitch;
       const nextYaw = fromYaw + Math.max(-MAX_OUTGOING_TURN, Math.min(MAX_OUTGOING_TURN, normalizedDelta(fromYaw, yaw)));
       const nextPitch = fromPitch + Math.max(-MAX_OUTGOING_TURN, Math.min(MAX_OUTGOING_TURN, pitch - fromPitch));
       agent.lootYaw = nextYaw; agent.lootPitch = nextPitch;
       const aligned = Math.abs(normalizedDelta(nextYaw, yaw)) < 0.03 && Math.abs(nextPitch - pitch) < 0.03;
       const now = performance.now();
-      const interact = aligned && client.target?.target?.kind === 'item' &&
-        client.target.target.id === goal.id && now >= agent.nextInteractAt;
-      if (interact) agent.nextInteractAt = now + 850;
+      let clear = true;
+      if (typeof runtime.physics.getCollisionWorld === 'function' &&
+          typeof runtime.physics.hasLineOfSight === 'function') {
+        try { clear = runtime.physics.hasLineOfSight(runtime.physics.getCollisionWorld(), eye, itemPoint); }
+        catch { clear = false; }
+      }
+      if (!clear) {
+        agent.lootYaw = agent.lootPitch = null;
+        const waypoint = distance > 0.05
+          ? agentWaypoint(client, me, [dx / distance, dz / distance], true) : null;
+        if (waypoint?.direction) {
+          agentNote('loot-detour', goal, distance, waypoint.route);
+          const [x, z] = waypoint.direction;
+          return { ...frame,
+            mx: Math.cos(frame.yaw) * x - Math.sin(frame.yaw) * z,
+            mz: -Math.sin(frame.yaw) * x - Math.cos(frame.yaw) * z };
+        }
+        agentNote('blocked', goal, distance, waypoint?.route ?? { source: 'item-ray' });
+        return frame;
+      }
+      agentNote(action, goal, distance);
+      // Outgoing yaw/pitch can differ from the camera-derived local item target.
+      // The server receives the frame angles and Interact bit, not that HUD target.
+      const interact = aligned && reach <= 2.5 && clear && now >= agent.nextInteractAt;
+      if (interact) {
+        agent.nextInteractAt = now + 850;
+        agentNote('loot-interact', goal, distance,
+          { source: 'item-ray', itemReachMeters: Math.round(reach * 10) / 10 });
+      }
       return { ...frame, yaw: nextYaw, pitch: nextPitch,
         buttons: interact ? frame.buttons | INTERACT_BUTTON : frame.buttons };
     }
     agent.lootYaw = agent.lootPitch = null;
+    if (distance < 0.001) { agentNote(action, goal, distance); return frame; }
     if (distance <= stopAt + 1) { agentNote(action, goal, distance); return frame; }
     const now = performance.now();
     if (agent.lastPosition && now - agent.lastPositionAt > 650) {
@@ -1591,7 +1672,8 @@
     const target = options.agent && runtime.agent.scan
       ? runtime.agent.target : selectTarget(client, { ...frame, vt: tick }, null, scan);
     if (options.agent && runtime.agent.scan) Object.assign(scan, runtime.agent.scan);
-    if (options.agent && ['approach', 'search', 'storm', 'loot-travel', 'loot-aim', 'detour', 'blocked'].includes(runtime.agent.action)) {
+    if (options.agent && ['approach', 'search', 'storm', 'loot-travel', 'loot-aim', 'loot-detour',
+      'equip', 'detour', 'blocked'].includes(runtime.agent.action)) {
       runtime.sampleGate = { reason: 'agent-' + runtime.agent.action, target, scan };
       return frame.buttons & 1 ? { ...frame, buttons: frame.buttons & ~1 } : frame;
     }
@@ -1680,7 +1762,8 @@
   }
 
   function autoReloadFrame(client, frame) {
-    if (!options.ammo || (frame.buttons & INTERACT_BUTTON)) return frame;
+    if (!options.ammo || options.agent && runtime.agent.action === 'equip' ||
+        (frame.buttons & INTERACT_BUTTON)) return frame;
     const predictor = client.predictor;
     const weapon = predictor?.activeStats;
     if (!predictor || !weapon || !Number.isInteger(predictor.active)) return frame;
@@ -1748,7 +1831,7 @@
     runtime.target = null;
     runtime.ammoPickup = { id: null, nextAt: 0 };
     runtime.agent = { action: 'off', goal: null, lastTraceAt: 0, lastTraceKey: '',
-      lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0,
+      lastPosition: null, lastPositionAt: 0, sidestep: 1, nextInteractAt: 0, nextSwapAt: 0,
       navigationGoalKey: null, lastGoalDistance: null, detourUntil: 0, stuckCount: 0,
       dropRouteKey: null, dropTarget: null, dropFraction: null, dropTerrain: null,
       dropTerrainChecked: false,

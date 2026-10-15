@@ -1021,8 +1021,8 @@ test('combat agent aims at nearby matching ammo before issuing Interact', () => 
   fake.client.predictor.ammo.light = 0;
   fake.client.remoteFrames = [];
   fake.client.loot = { items: new Map([['ammo-1',
-    { id: 'ammo-1', kind: 'ammo', ammo: 'light', pos: [0, 0, -1] }]]) };
-  fake.client.target = { target: { kind: 'item', id: 'ammo-1' } };
+    { id: 'ammo-1', kind: 'ammo', ammo: 'light', pos: [0, 0, 0] }]]) };
+  fake.client.target = { target: null };
   attach(h, fake);
   h.api.setOptions({ agent: true, ammo: true });
   const first = fake.client.input.sample();
@@ -1032,9 +1032,11 @@ test('combat agent aims at nearby matching ammo before issuing Interact', () => 
     pickup = fake.client.input.sample();
     if (pickup.buttons & 64) break;
   }
-  assert.equal(pickup.buttons & 64, 64);
+  assert.equal(pickup.buttons & 64, 64,
+    'outgoing aim requests Interact for an item at the feet even with a stale HUD target');
   assert.equal(pickup.buttons & 1, 0, 'pickup suppresses Fire');
-  assert.equal(h.api.inspect().agent.action, 'loot-aim');
+  assert.equal(h.api.inspect().agent.action, 'loot-interact');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'item-ray');
   fake.client.loot.items.clear();
   fake.client.target = { target: null };
   fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
@@ -1042,6 +1044,53 @@ test('combat agent aims at nearby matching ammo before issuing Interact', () => 
   assert.equal(h.api.inspect().agent.action, 'no-ammo');
   assert.equal(empty.mx, 0);
   assert.equal(empty.mz, 0, 'without ammo the agent does not rush an opponent');
+  h.api.destroy();
+});
+
+test('combat agent picks a nearby weapon with outgoing aim and equips the second slot', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 818, buttons: 0, mx: 0, mz: 0 });
+  fake.client.predictor.slots[0] = { weapon: 'sidearm', rarity: 'common', mag: 10 };
+  fake.client.predictor.slots[1] = null;
+  fake.client.predictor.activeStats.class = 'pistol';
+  fake.client.remoteFrames = [];
+  fake.client.loot = { items: new Map([['weapon-1', { id: 'weapon-1', kind: 'weapon',
+    weapon: 'vanguard', rarity: 'rare', pos: [0, 0, -1] }]]) };
+  fake.client.target = { target: null };
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  let clear = false;
+  h.api.runtime.physics.getCollisionWorld = () => ({});
+  h.api.runtime.physics.hasLineOfSight = (world, from, to) =>
+    clear || Math.abs(to[1] - 0.15) > 0.01;
+  const detour = fake.client.input.sample();
+  assert.ok(Math.hypot(detour.mx, detour.mz) > 0.9,
+    'an item behind cover triggers a side route');
+  assert.equal(h.api.inspect().agent.action, 'loot-detour');
+  for (let i = 0; i < 11; i++)
+    assert.equal(fake.client.input.sample().buttons & 64, 0,
+      'blocked item rays must not trigger Interact');
+  clear = true;
+  let pickup;
+  for (let i = 0; i < 16; i++) {
+    pickup = fake.client.input.sample();
+    if (pickup.buttons & 64) break;
+  }
+  assert.equal(pickup.buttons & 64, 64, 'the outgoing item ray requests pickup');
+  assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'weapon');
+  assert.equal(send(fake, [pickup])[0].buttons & 64, 64);
+  fake.client.loot.items.clear();
+  fake.client.predictor.slots[1] = { weapon: 'vanguard', rarity: 'rare', mag: 30 };
+  const equip = fake.client.input.sample();
+  assert.equal(equip.buttons & 128, 128, 'a non-pistol in slot two is equipped');
+  assert.equal(equip.buttons & 1, 0, 'the equip frame does not Fire');
+  assert.equal(send(fake, [equip])[0].buttons & 128, 128);
+  assert.equal(fake.client.input.sample().buttons & 128, 0,
+    'Swap is released to create a fresh edge if a retry is needed');
+  fake.client.predictor.active = 1;
+  fake.client.predictor.activeStats.class = 'rifle';
+  assert.equal(fake.client.input.sample().buttons & 128, 0);
   h.api.destroy();
 });
 
@@ -2650,6 +2699,9 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(trace.serverEvents.at(-1).snapshotTick, 100);
   assert.equal(trace.serverSnapshots.at(-1).ack, 41);
   assert.equal(trace.serverSnapshots.at(-1).weaponId, 'vanguard');
+  assert.equal(trace.serverSnapshots.at(-1).server.activeSlot, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.serverSnapshots.at(-1).server.slots)),
+    [{ weapon: 'vanguard', rarity: null, magazine: 29 }]);
   assert.deepEqual({ ...trace.serverSnapshots.at(-1).server.ammo }, { light: 150, heavy: 20 });
   assert.equal(trace.serverSnapshots.at(-1).ackLatencyMs, 100);
   assert.equal(trace.counters.serverSnapshotsSeen, 1);
@@ -2664,7 +2716,7 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
   assert.equal(exported.formatVersion, 2);
-  assert.equal(exported.scriptVersion, '1.5.21');
+  assert.equal(exported.scriptVersion, '1.5.22');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
@@ -2696,7 +2748,7 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.21');
+  assert.equal(payload.scriptVersion, '1.5.22');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });

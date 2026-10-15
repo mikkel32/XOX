@@ -5,7 +5,7 @@ This repository contains a Tampermonkey userscript, an unpacked Microsoft Edge
 extension built from the same source, local tests, and the saved JSON traces.
 
 > [!IMPORTANT]
-> **Current version: 1.5.21.** All 112 local tests pass with the captured client bundles. Checks cover combat-agent routing and plane deployment, spread correction, trace archiving, and server-reported ray comparison on provisional shot pairs. The agent has not yet been tested in a live XOX match. Server-side zero spread is not established by client-side correction.
+> **Current version: 1.5.22.** All 114 local tests pass with the captured client bundles. Checks cover combat-agent deployment, weapon pickup and equip inputs, spread correction, trace archiving, and provisional server-ray comparison. The agent has not yet been tested in a live XOX match. Server-side zero spread is not established by client-side correction.
 
 ## Explore
 
@@ -26,12 +26,12 @@ extension built from the same source, local tests, and the saved JSON traces.
 | Loot vision | Marks nearby weapons, ammo, and unopened crates. Ammo for the active weapon appears first. |
 | Silent AIM | Redirects outgoing firing frames while preserving the local camera and movement. Filters teammates, spectators, dead or downed players, range, and cover. When a hitbox center is covered, it checks interior edge and diagonal points for a clear shot within the requested hitbox. |
 | Rage | Selects a clear target across 360 degrees up to the range slider and fires after aim alignment. Hip fire is limited to stationary single-projectile shots within 40 m; moving, wider, and distant shots use ADS. Explicit Head and Chest choices remain exact. Auto can adapt between head and chest. A predicted shot keeps Fire on the wire to avoid desynchronizing shot state. Sprint remains available without a target, during reload, or with an empty magazine. Server reach and hit validation still apply. |
-| Combat agent | On by default with Silent AIM and Rage. After a match starts, it selects an observed land point near the middle of the plane path, waits for the door to open, sends a Jump pulse, and steers toward that point during descent. On the ground it uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the safe zone, and seek compatible ammo when empty. Its short route probe checks the captured movement collision grid, body clearance, low steps, and terrain slopes; when every full route is blocked, it can take a shorter clear corridor. A stalled route takes a timed flank and checks actual goal progress. Your movement or action keys override its movement. It does not start matches or guarantee a win. |
+| Combat agent | On by default with Silent AIM and Rage. After a match starts, it selects an observed land point near the middle of the plane path, waits for the door to open, sends a Jump pulse, and steers toward that point during descent. On the ground it uses normal movement and action inputs to approach opponents, stop and settle before firing, move toward the safe zone, seek compatible ammo when empty, pick up a nearby weapon when under-equipped, and swap from a sidearm to a second-slot weapon. Its short route probe checks the captured movement collision grid, body clearance, low steps, and terrain slopes; when every full route is blocked, it can take a shorter clear corridor. A stalled route takes a timed flank and checks actual goal progress. Your movement or action keys override its movement. It does not start matches or guarantee a win. |
 | Fast fire | Skips XOX's local stealth delay and added aim jitter when Rage is enabled. It can request a close single-projectile shot during ADS ramp when a conservative spread bound fits inside the existing 8-degree outgoing turn. It still follows local aim alignment, weapon cooldown, and server ammunition. |
 | Adaptive hip fire | Enabled for Rage by default up to 40 m. It requires a grounded, nearly stationary player and a bounded single-projectile correction. If the server's acknowledged shot count differs from the predicted count, it falls back to ADS. The 40 m limit follows the new live trace: longer unscoped shots missed in the paired sample. This does not zero server spread. |
 | Shot correction | Before prediction, a single-projectile Fire request waits if the estimated spread correction cannot fit inside the bounded outgoing turn. A predicted shot stays on the wire for client/server state synchronization. Corrected outgoing aim is exact even with Fast fire off. For multi-pellet weapons, it tests the average and each pellet offset against the selected hitbox, then uses the angle predicted to intersect it with the most pellets. Server spread and visible camera recoil may remain. |
 | Ammo assist | Requests a normal reload and pulses Interact when the game's own pickup target is compatible ammo below the observed reserve cap. It never changes the local or server ammo count directly. |
-| Trace archive and export | Automatically saves bounded trace snapshots to browser IndexedDB every 15 seconds during a match, at match end, and on detach. Keeps the latest three local sessions; **Saved** downloads the latest archive even after a page reload. Traces include per-shot geometry, movement, weapon and ADS state, selected-point visibility, agent actions and route clearance, server shot-count and acknowledged-angle comparisons, server-reported shot directions and impacts, first blocking world surfaces for cover rejections, settings, fire gates, F/E state, button changes, acknowledgements, and combat events. The analyzer marks shot pairs provisional and groups comparable rays by weapon, selected distance, and local firing mode. |
+| Trace archive and export | Automatically saves bounded trace snapshots to browser IndexedDB every 15 seconds during a match, at match end, and on detach. Keeps the latest three local sessions; **Saved** downloads the latest archive even after a page reload. Traces include per-shot geometry, movement, weapon and ADS state, selected-point visibility, agent actions and route clearance, item Interact and weapon Swap requests, server inventory slots, shot-count and acknowledged-angle comparisons, server-reported shot directions and impacts, first blocking world surfaces for cover rejections, settings, fire gates, F/E state, button changes, acknowledgements, and combat events. The analyzer marks shot pairs provisional and groups comparable rays by weapon, selected distance, and local firing mode. |
 
 F8 toggles Xray, F9 toggles Silent AIM, and Insert toggles the panel. **Show tools**
 reopens it on keyboards without Insert. Settings persist locally and synchronize
@@ -86,13 +86,13 @@ remote build endpoint. The extension's localhost permission is used only to
 read build status while a Zone tab or popup is open.
 
 The generated `extension/bridgezone-main.js` should exactly match the userscript.
-The portable suite passes 104 tests and skips 8 that need locally captured
+The portable suite passes 106 tests and skips 8 that need locally captured
 client bundles. Tests validate local behavior and fixtures, not a live server
 outcome.
 Set `XOX_CLIENT_PHYSICS` to a local copy of the captured
 `3ep-katvfqbjo.js` bundle to run the optional firing and spread checks, and
 `XOX_CLIENT_RUNTIME` to the captured `turbopack-37jd2rjmtu1y9.js` bundle to
-run the optional loader checks. With both bundles, all 112 tests pass.
+run the optional loader checks. With both bundles, all 114 tests pass.
 The physics tests require the bundle's SHA-256 to match the recorded
 [source manifest](research/manifest.json).
 
@@ -162,6 +162,7 @@ errors are omitted. Older format v1 exports remain readable by the analyzer.
 | 1.5.19 | No live trace yet | Adds server-reported shot directions and ordered impacts to trace exports, plus provisional server/local ray comparison. Requires a new live trace to test actual ray agreement. |
 | 1.5.20 | No live trace yet | Routes around movement collision boxes that can pass bullets, handles low steps and slopes, uses shorter clear corridors, and holds a flank through stalls. Local tests cover blocker, step, partial route, and stall cases; live navigation and server shot results need a new trace. |
 | 1.5.21 | No live XOX trace yet | Adds a plane-door-aware land drop and descent steering, with manual override. Holds single-projectile Fire before prediction when a conservative spread correction exceeds the outgoing turn, and removes post-correction aim jitter when Fast fire is off. Records route source, steering angle, and clearance in agent decisions. The analyzer groups provisional local/server ray differences by weapon, selected distance, and local fire mode. Today's public physics and runtime chunk hashes match the captured bundles; live XOX deployment, shot, and navigation results still need a trace. |
+| 1.5.22 | No live XOX trace yet | The agent aims outgoing frames at nearby ammo or weapon pickups without depending on the camera's stale item target, and requests a weapon swap when a second-slot alternative is available. Server snapshots now record both weapon slots and active slot; the analyzer reports item and equip requests separately from observed inventory changes. Local tests prove input handling, not successful server pickups. |
 
 See [FINDINGS.md](FINDINGS.md) for the trace checksums, method, interpretation,
 and what remains unverified.

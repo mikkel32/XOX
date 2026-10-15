@@ -551,6 +551,43 @@ export function analyzeTrace(document) {
   }
   const ammoAssist = { pickupRequests: ammoPickups.length, requestsByType, serverReserveIncreases };
 
+  const inventoryEvidence = { observedServerInventories: 0, agentInteractRequestsByKind: {},
+    agentEquipRequests: 0, serverWeaponAcquisitions: 0, serverWeaponReplacements: 0,
+    serverActiveSlotChanges: 0, transitions: [] };
+  for (const decision of list(trace.agentDecisions)) {
+    if (decision?.action === 'loot-interact') {
+      const kind = typeof decision.goal?.kind === 'string' ? decision.goal.kind : 'unknown';
+      inventoryEvidence.agentInteractRequestsByKind[kind] =
+        (inventoryEvidence.agentInteractRequestsByKind[kind] || 0) + 1;
+    }
+    if (decision?.action === 'equip') inventoryEvidence.agentEquipRequests++;
+  }
+  const previousInventoryByMatch = new Map();
+  for (const snapshot of snapshots) {
+    const slots = snapshot?.server?.slots;
+    if (!Array.isArray(slots)) continue;
+    inventoryEvidence.observedServerInventories++;
+    const previous = previousInventoryByMatch.get(snapshot.match);
+    if (previous) {
+      for (let index = 0; index < Math.min(2, slots.length); index++) {
+        const before = previous.slots[index]?.weapon || null;
+        const after = slots[index]?.weapon || null;
+        if (!after || after === before) continue;
+        if (before) inventoryEvidence.serverWeaponReplacements++;
+        else inventoryEvidence.serverWeaponAcquisitions++;
+        if (inventoryEvidence.transitions.length < 12)
+          inventoryEvidence.transitions.push({ match: snapshot.match, tick: snapshot.tick ?? null,
+            slot: index, from: before, to: after });
+      }
+      if (Number.isInteger(previous.activeSlot) &&
+          Number.isInteger(snapshot.server.activeSlot) &&
+          previous.activeSlot !== snapshot.server.activeSlot)
+        inventoryEvidence.serverActiveSlotChanges++;
+    }
+    previousInventoryByMatch.set(snapshot.match,
+      { slots, activeSlot: snapshot.server.activeSlot });
+  }
+
   const retained = Object.fromEntries(['frames', 'localShots', 'aimDecisions', 'fireGates',
     'serverSnapshots', 'serverEvents', 'settings', 'interactions', 'ammoPickups',
     'agentDecisions', 'kicks', 'connectionStates', 'errors']
@@ -695,7 +732,8 @@ export function analyzeTrace(document) {
     gateReasons: gateCounts, gateSamples, coverEvidence,
     targetRejects: trace.counters?.targetRejects || null,
     inputButtons, firingEvidence, hipFireEvidence, correlatedShots,
-    agentActions, agentRoutes, interactionEvidence, ammoAssist, predictionConsistency,
+    agentActions, agentRoutes, interactionEvidence, ammoAssist, inventoryEvidence,
+    predictionConsistency,
     pelletProjection,
     outgoingFire: { retained: sent.length, held: held.length, heldReasons,
       ackCoverage, missingWeapon, missingDistance,
@@ -721,6 +759,7 @@ export function analyzeTrace(document) {
       'Projected pellet hits use the captured client hitboxes and locally predicted spread; they are not server-confirmed hits.',
       'Adaptive hip-fire decisions use local shot-seed and spread estimates; only server events can establish actual hits.',
       'Ammo pickup requests and server reserve increases are separate observations; the trace does not prove which request caused an increase.',
+      'Agent Interact and Swap requests and later server inventory changes are separate observations; they cannot be attributed to a particular request without a server receipt.',
       'Predictor state is sampled before server reconciliation and can temporarily differ because of network delay.',
       'Acknowledged aim compares a retained outgoing input with the server snapshot for its ACK. A mismatch suggests server clamping or state drift, but does not by itself establish which rule caused it.',
       'Cover blockers are first intersections along the preferred hitbox-center ray in the captured client world. They do not establish server penetration rules.',
@@ -778,6 +817,7 @@ export function formatReport(report) {
       : ['  No comparable rays.']),
     `Combat agent decisions (retained): ${JSON.stringify(report.agentActions)}`,
     `Combat agent routes (retained decisions): ${JSON.stringify(report.agentRoutes)}`,
+    `Combat agent inventory (retained observations): ${JSON.stringify(report.inventoryEvidence)}`,
     `Prediction/send overlap: ${report.predictionConsistency.overlappingFrames} retained frames with local shots; ` +
       `${report.predictionConsistency.predictedFireRemovedOnWire} had Fire removed before send`,
     `Local multi-pellet projection: ${JSON.stringify(report.pelletProjection)}`,
