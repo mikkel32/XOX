@@ -1,0 +1,706 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const test = require('node:test');
+const { pathToFileURL } = require('node:url');
+
+const analyzer = import(pathToFileURL(path.join(__dirname, '..', 'verification', 'analyze-trace.mjs')).href);
+
+test('trace analysis groups sent inputs while keeping server hits unattributed', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.8', trace: {
+    match: 1,
+    frames: [], localShots: [], fireGates: [], kicks: [], connectionStates: [], errors: [],
+    serverSnapshots: [{ match: 1, ack: 11, ackLatencyMs: 80, reportedRttMs: 90,
+      server: { ads: 0.8, magazine: 5 }, predictorBeforeReconcile: { ads: 1, magazine: 4 },
+      acknowledgedFrame: { sequence: 11, sentYaw: 0, sentPitch: 0,
+        serverYawDifferenceDegrees: 1.25, serverPitchDifferenceDegrees: -0.1 } }],
+    retention: { dropped: { frames: 10, aimDecisions: 0 } },
+    counters: { rageSamples: 40, gateReasons: { 'ads-ramp': 5, 'fire-sampled': 20 },
+      targetRejects: { range: 12 }, highestAckByMatch: { 1: 11 } },
+    aimDecisions: [
+      { match: 1, sequence: 10, fireSent: true, weaponId: 'sniper', targetDistance: 550,
+        movingInput: true, localAds: 1, localShotPredicted: true, correctionApplied: true,
+        geometry: { predictedInput: { meanMeters: 14 }, predictedOutgoing: { meanMeters: 0.12 } } },
+      { match: 1, sequence: 11, fireSent: true, weaponId: 'sniper', targetDistance: 555,
+        movingInput: false, localSpeed: 3, localAds: 1, localShotPredicted: true, correctionApplied: false,
+        geometry: { predictedInput: { meanMeters: 2 }, predictedOutgoing: { meanMeters: 1 } } },
+      { match: 1, sequence: 12, fireSent: false, weaponId: 'smg', targetDistance: 120,
+        movingInput: false, localShotPredicted: false, reason: 'aligning' }
+    ],
+    serverEvents: [{ type: 'shot' }, { type: 'shot' }, { type: 'hit', damage: 21 }, { type: 'kill' }],
+    agentDecisions: [
+      { action: 'approach', stuckCount: 0,
+        route: { source: 'movement-grid', steerDegrees: 0, clearanceMeters: 4 } },
+      { action: 'detour', stuckCount: 2,
+        route: { source: 'movement-grid', steerDegrees: 68.8, clearanceMeters: 2.25 } },
+      { action: 'blocked', stuckCount: 3,
+        route: { source: 'movement-grid', steerDegrees: null, clearanceMeters: 0.5 } }
+    ]
+  } });
+  assert.equal(report.outgoingFire.retained, 2);
+  assert.deepEqual(report.outgoingFire.heldReasons, { aligning: 1 });
+  assert.deepEqual(report.outgoingFire.byWeaponRangeMovement, [{
+    weapon: 'sniper', distance: '450-600 m', movement: 'moving', sent: 2,
+    predicted: 2, corrected: 1, ackCovered: 2, adsBelowReady: 0, geometricSamples: 2,
+    meanPredictedMissBeforeMeters: 8, meanPredictedMissAfterMeters: 0.56
+  }]);
+  assert.deepEqual(report.serverEvents, { shots: 2, hits: 1, kills: 1, damage: 21, headshots: 0 });
+  assert.equal(report.retention.dropped.frames, 10);
+  assert.deepEqual(report.outgoingFire.ackCoverage,
+    { covered: 2, pendingOrUnobserved: 0, unknown: 0 });
+  assert.equal(report.authoritative.medianAckLatencyMs, 80);
+  assert.equal(report.authoritative.adsDisagreementSamples, 1);
+  assert.equal(report.authoritative.magazineDisagreementSamples, 1);
+  assert.equal(report.authoritative.acknowledgedAim.yawOverHalfDegree, 1);
+  assert.equal(report.authoritative.acknowledgedAim.pitchOverHalfDegree, 0);
+  assert.deepEqual(report.agentRoutes, { observed: 3, bySource: { 'movement-grid': 3 },
+    full: 1, partial: 1, blocked: 1, maxStuckCount: 3, maxAbsSteerDegrees: 68.8,
+    dropPlans: {}, maxAbsLateralMeters: 0, dropActions: 0, observedDropDistances: 0,
+    minDropDistanceMeters: null, maxDropDistanceMeters: null });
+  assert.match(formatReport(report), /Combat agent routes/);
+  assert.match(formatReport(report), /Acknowledged aim angles/);
+  assert.equal(report.investigate[0].sequence, 11);
+  assert.match(formatReport(report), /cannot be assigned to a weapon/);
+});
+
+test('drop diagnostics distinguish nearby land from terrain fallback', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: { agentDecisions: [
+    { action: 'plane-wait', route: { source: 'plane-path', dropPlan: 'terrain-unavailable',
+      lateralMeters: null } },
+    { action: 'drop', route: { source: 'plane-path', dropPlan: 'sampled-land',
+      lateralMeters: 32, terrainHeight: 2, planeDistanceMeters: 412 } },
+    { action: 'plane-wait', route: { source: 'plane-path', dropPlan: 'no-nearby-land',
+      lateralMeters: null } }
+  ] } });
+  assert.deepEqual(report.agentRoutes.dropPlans,
+    { 'terrain-unavailable': 1, 'sampled-land': 1, 'no-nearby-land': 1 });
+  assert.equal(report.agentRoutes.maxAbsLateralMeters, 32);
+  assert.equal(report.agentRoutes.dropActions, 1);
+  assert.equal(report.agentRoutes.minDropDistanceMeters, 412);
+  assert.equal(report.agentRoutes.maxDropDistanceMeters, 412);
+});
+
+test('older trace format remains readable without inventing weapon or range detail', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 1, scriptVersion: '1.5.6', trace: {
+    match: 1, frames: [], localShots: [], serverEvents: [{ type: 'shot' }, { type: 'hit' }]
+  } });
+  assert.equal(report.outgoingFire.retained, 0);
+  assert.equal(report.serverEvents.hits, 1);
+  assert.deepEqual(report.correlatedShots.comparableRaysByWeaponDistanceMode, []);
+  assert.equal(report.retention.dropped, null);
+  assert.throws(() => analyzeTrace({ formatVersion: 7, trace: {} }), /formatVersion 1 or 2/);
+});
+
+test('cover and acknowledged aim diagnostics stay separate from hit evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    fireGates: [{ match: 1, sequence: 5, reason: 'no-target',
+      scan: { closestCover: { distanceMeters: 60, preferredPart: 'head',
+        blocker: { distanceMeters: 12, material: 'concrete' } } } }],
+    serverSnapshots: [
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverYawDifferenceDegrees: 0.8, serverPitchDifferenceDegrees: -0.1 } },
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverYawDifferenceDegrees: 0.8, serverPitchDifferenceDegrees: -0.1 } }
+    ]
+  } });
+  assert.equal(report.coverEvidence.retainedGateRows, 1);
+  assert.deepEqual(report.coverEvidence.byMaterial, { concrete: 1 });
+  assert.equal(report.coverEvidence.latest.blockerDistanceMeters, 12);
+  assert.equal(report.authoritative.acknowledgedAim.uniqueAcknowledgedFrames, 1);
+  assert.equal(report.authoritative.acknowledgedAim.yawOverHalfDegree, 1);
+  assert.equal(report.serverEvents.hits, 0);
+  assert.match(formatReport(report), /Preferred-center cover blockers/);
+});
+
+test('later ACK rows without angles do not erase measured aim differences', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    serverSnapshots: [
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverYawDifferenceDegrees: 1.25, serverPitchDifferenceDegrees: -0.8 } },
+      { match: 1, acknowledgedFrame: { sequence: 5,
+        serverPitchDifferenceDegrees: 0.2 } },
+      { match: 1, acknowledgedFrame: { sequence: 5 } }
+    ]
+  } });
+  assert.deepEqual(report.authoritative.acknowledgedAim, {
+    uniqueAcknowledgedFrames: 1, yawSamples: 1, pitchSamples: 1,
+    yawOverHalfDegree: 1, pitchOverHalfDegree: 0,
+    medianAbsoluteYawDegrees: 1.25, medianAbsolutePitchDegrees: 0.2,
+    maxAbsoluteYawDegrees: 1.25, maxAbsolutePitchDegrees: 0.2
+  });
+});
+
+test('aim report exposes explicit point overrides in old and new trace rows', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.11', trace: {
+    settings: [{ at: 1, values: { point: 'head' } }],
+    aimDecisions: [
+      { at: 10, fireSent: true, weaponId: 'longbow', target: { aimPart: 'chest' } },
+      { at: 11, fireSent: true, weaponId: 'longbow', target: { aimPart: 'head' } },
+      { at: 12, fireSent: true, weaponId: 'hornet', requestedPoint: 'chest',
+        target: { aimPart: 'chest' } }
+    ]
+  } });
+  assert.deepEqual(report.aimPointChoices.byRequested.head,
+    { head: 1, chest: 1, none: 0 });
+  assert.deepEqual(report.aimPointChoices.byRequested.chest,
+    { head: 0, chest: 1, none: 0 });
+  assert.deepEqual(report.aimPointChoices.byWeapon, [
+    { weapon: 'hornet', requested: 'chest', head: 0, chest: 1, none: 0 },
+    { weapon: 'longbow', requested: 'head', head: 1, chest: 1, none: 0 }
+  ]);
+  assert.match(formatReport(report), /Requested vs selected aim points/);
+});
+
+test('aim report counts partially visible head selections without treating them as hits', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.15', trace: {
+    aimDecisions: [
+      { fireSent: true, target: { aimPart: 'head', visibility: 'partial' } },
+      { fireSent: true, target: { aimPart: 'head', visibility: 'clear' } }
+    ],
+    serverEvents: [{ type: 'shot' }]
+  } });
+  assert.deepEqual(report.aimVisibility, { partial: 1, clear: 1 });
+  assert.equal(report.serverEvents.hits, 0);
+  assert.match(formatReport(report), /Selected point visibility.*"partial":1/);
+});
+
+test('multi-pellet report keeps local hit projections separate from server hits', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.13', trace: {
+    aimDecisions: [
+      { fireSent: true, localShotPredicted: true, weaponId: 'breacher',
+        weapon: { stats: { pellets: 8 } },
+        geometry: { projectedPelletHitsInput: 0, projectedPelletHitsOutgoing: 1 } },
+      { fireSent: true, localShotPredicted: true, weaponId: 'breacher',
+        weapon: { stats: { pellets: 8 } },
+        geometry: { projectedPelletHitsInput: 2, projectedPelletHitsOutgoing: 3 } }
+    ],
+    serverEvents: [{ type: 'shot' }]
+  } });
+  assert.deepEqual(report.pelletProjection, {
+    retainedMultiPelletShots: 2, measured: 2,
+    noProjectedHitsBefore: 1, noProjectedHitsAfter: 0,
+    projectedHitsBefore: 2, projectedHitsAfter: 4,
+    measuredByReplay: { calibrated: 0, uncalibrated: 0, unrecorded: 2 },
+    noProjectedHitsAfterByReplay: { calibrated: 0, uncalibrated: 0, unrecorded: 0 }
+  });
+  assert.equal(report.serverEvents.hits, 0);
+});
+
+test('multi-pellet diagnostics distinguish calibrated replay from fallback geometry', async () => {
+  const { analyzeTrace } = await analyzer;
+  const decision = (match, sequence, hits) => ({
+    match, sequence, fireSent: true, localShotPredicted: true,
+    weapon: { stats: { pellets: 8 } }, geometry: {
+      projectedPelletHitsInput: 0, projectedPelletHitsOutgoing: hits }
+  });
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    localShots: [
+      { match: 1, sequence: 1, spreadReplayCalibrated: true },
+      { match: 1, sequence: 2, spreadReplayCalibrated: false },
+      { match: 2, sequence: 1, spreadReplayCalibrated: false }
+    ],
+    aimDecisions: [decision(1, 1, 1), decision(1, 2, 0), decision(2, 1, 0),
+      decision(2, 2, 0)]
+  } });
+  assert.deepEqual(report.pelletProjection.measuredByReplay,
+    { calibrated: 1, uncalibrated: 2, unrecorded: 1 });
+  assert.deepEqual(report.pelletProjection.noProjectedHitsAfterByReplay,
+    { calibrated: 0, uncalibrated: 2, unrecorded: 1 });
+});
+
+test('early ADS shots are counted without treating corrected ramp fire as a failure', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.14', trace: {
+    aimDecisions: [
+      { match: 1, sequence: 1, fireSent: true, weaponId: 'vanguard', localAds: 0.3,
+        sampled: { earlyAds: true }, localShotPredicted: true, correctionApplied: true,
+        geometry: { predictedOutgoing: { meanMeters: 0.01 } } },
+      { match: 1, sequence: 2, fireSent: true, weaponId: 'vanguard', localAds: 0.3,
+        sampled: { earlyAds: true }, localShotPredicted: true, correctionApplied: false,
+        geometry: { predictedOutgoing: { meanMeters: 2 } } }
+    ]
+  } });
+  assert.equal(report.firingEvidence.earlyAdsSent, 2);
+  assert.equal(report.firingEvidence.earlyAdsPredicted, 2);
+  assert.equal(report.firingEvidence.earlyAdsCorrected, 1);
+  assert.deepEqual(report.investigate.map(item => item.sequence), [2]);
+  assert.match(formatReport(report), /Early ADS Fire.*sent 2/);
+});
+
+test('adaptive hip-fire evidence is separate from ADS ramp evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.16', trace: {
+    aimDecisions: [
+      { match: 1, sequence: 1, fireSent: true, weaponId: 'longbow',
+        adsRequested: false, localAds: 0, sampled: { hipFire: true, hipSeeded: true },
+        localShotPredicted: true, correctionApplied: true,
+        geometry: { predictedOutgoing: { meanMeters: 0.01 } } },
+      { match: 1, sequence: 2, fireSent: true, weaponId: 'hornet',
+        adsRequested: false, localAds: 0.2, sampled: { hipFire: true, hipSeeded: false },
+        localShotPredicted: false, correctionApplied: false,
+        weapon: { cooldown: 0.05 } }
+    ]
+  } });
+  assert.deepEqual(report.hipFireEvidence, { sent: 2, locallyPredicted: 1,
+    corrected: 1, seeded: 1, byWeapon: { longbow: 1, hornet: 1 } });
+  assert.equal(report.firingEvidence.earlyAdsSent, 0);
+  assert.equal(report.investigate.some(item => item.reasons.includes('ADS below ready threshold')), false);
+  assert.match(formatReport(report), /Adaptive hip Fire.*sent 2/);
+});
+
+test('tick-aligned server shots expose provisional hip and ADS hit counts', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const localShots = Array.from({ length: 12 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, sequence: index + 1,
+    tick: 100 + index * 30, player: { velocity: [0, 0, 0] },
+    yaw: 0, pitch: 0, eye: [0, 1.66, 0], directions: [[0, 0, -1]],
+    weapon: { id: 'rifle' }
+  }));
+  const serverEvents = localShots.flatMap((shot, index) => {
+    const tick = shot.tick + 9;
+    const yaw = 0.1 + (index === 11 ? 0.02 : 0);
+    const events = [{ at: shot.at + 210, match: 1, tick, type: 'shot',
+      shot: { weaponId: 'rifle', origin: [0, 1.66, 0],
+        directions: [[-Math.sin(yaw), 0, -Math.cos(yaw)]],
+        impacts: index === 0 ? [{ point: [0, 0, -5], material: 'concrete' }] : [] } }];
+    if (index === 0 || index === 6) events.push({ at: shot.at + 210,
+      match: 1, tick, type: 'hit', damage: 20 });
+    return events;
+  });
+  serverEvents.push({ at: 1210, match: 1, tick: 109, type: 'shot',
+    shot: { weaponId: 'other' } });
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, localShots, serverEvents,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0.1, 0, 0, 0] })),
+    serverSnapshots: [{ acknowledgedShot: { delta: 0 } },
+      { acknowledgedShot: { delta: 2 } }],
+    aimDecisions: localShots.map((shot, index) => ({ match: 1,
+      sequence: shot.sequence, fireSent: true, weaponId: 'rifle',
+      adsRequested: index >= 6, sampled: { hipFire: index < 6 },
+      targetDistance: index < 6 ? 20 : 80, localSpeed: 0,
+      target: { visibility: index < 3 ? 'front-partial' : index === 11 ? '__proto__' : 'clear',
+        aimPart: 'head', bodyHeight: 1.8,
+        position: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 0,
+          -Math.cos(0.1) * (index < 6 ? 20 : 80)],
+        point: [-Math.sin(0.1) * (index < 6 ? 20 : 80), 1.66,
+        -Math.cos(0.1) * (index < 6 ? 20 : 80)] } }))
+  } });
+  assert.equal(report.correlatedShots.paired, 12);
+  assert.equal(report.correlatedShots.pairedWithDecision, 12);
+  assert.equal(report.correlatedShots.pairedHits, 1);
+  assert.equal(report.correlatedShots.hitEvidence.pairedAtHitTick, 2);
+  assert.equal(report.correlatedShots.hitEvidence.pairedAtMultiShotHitTick, 1);
+  assert.deepEqual(report.correlatedShots.byModeDistanceMovement, [
+    { mode: 'ads', distance: '40-99 m', movement: 'still', shots: 6, hits: 1 },
+    { mode: 'hip', distance: '0-39 m', movement: 'still', shots: 6, hits: 0 }
+  ]);
+  assert.deepEqual(report.correlatedShots.byVisibility,
+    { 'front-partial': { shots: 3, hits: 0 }, clear: { shots: 8, hits: 1 },
+      unknown: { shots: 1, hits: 0 } });
+  assert.deepEqual(report.correlatedShots.reportedHitboxByVisibility, {
+    'front-partial': { pairs: 3, rays: 3, raysIntersecting: 3, pairsWithIntersection: 3 },
+    clear: { pairs: 8, rays: 8, raysIntersecting: 8, pairsWithIntersection: 8 },
+    unknown: { pairs: 1, rays: 1, raysIntersecting: 0, pairsWithIntersection: 0 }
+  });
+  assert.equal({}.shots, undefined);
+  assert.deepEqual(report.authoritative.acknowledgedShotCount, { aligned: 1, diverged: 1 });
+  assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithDirections, 12);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 12);
+  assert.equal(report.correlatedShots.rayEvidence.weaponAgreement.same, 12);
+  assert.equal(report.correlatedShots.rayEvidence.differencesOverHalfDegree, 1);
+  assert.equal(report.correlatedShots.rayEvidence.medianLocalToServerDegrees, 0);
+  assert.ok(report.correlatedShots.rayEvidence.maxLocalToServerDegrees > 1);
+  assert.equal(report.correlatedShots.rayEvidence.medianOriginOffsetMeters, 0);
+  assert.equal(report.correlatedShots.rayEvidence.serverShotEventsWithImpacts, 1);
+  assert.equal(report.correlatedShots.rayEvidence.impactsCloserThanSelectedPoint, 1);
+  assert.match(formatReport(report), /Provisional server-shot pairs: 12 paired/);
+  assert.match(formatReport(report), /Pairs at unique-shot server hit ticks by selected-point visibility.*"front-partial":\{"shots":3,"hits":0\}/);
+  assert.match(formatReport(report), /Server-reported rays through sampled hitboxes by visibility/);
+  assert.match(formatReport(report), /Server-reported ray comparison/);
+});
+
+test('comparable ray angles break down by weapon, selected distance, and recorded local mode', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const direction = degrees => {
+    const radians = degrees * Math.PI / 180;
+    return [-Math.sin(radians), 0, -Math.cos(radians)];
+  };
+  const localShots = Array.from({ length: 17 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, tick: 100 + index * 30,
+    sequence: index + 1, yaw: 0, pitch: 0,
+    directions: index === 15 ? undefined : index === 5
+      ? [[0, 0, -1], [0, 0, -1]] : [[0, 0, -1]],
+    weapon: { id: index >= 6 && index < 12 ? 'sniper' : 'rifle' }
+  }));
+  const rifleAngles = [0, 0.1, 0.2, 0.3, 0.4, 1];
+  const sniperAngles = [0, 0.2, 0.4, 0.6, 0.8, 1.2];
+  const serverEvents = localShots.flatMap((shot, index) => {
+    const angles = index < 6 ? index === 5 ? [1, 1.5] : [rifleAngles[index]]
+      : index < 12 ? [sniperAngles[index - 6]] : [0.75];
+    const event = { at: shot.at + 210, match: 1, tick: shot.tick + 9, type: 'shot',
+      shot: { weaponId: index === 13 ? 'other' : shot.weapon.id,
+        directions: index === 12 ? undefined : angles.map(direction) } };
+    return index === 14 ? [event, { ...event, at: event.at + 10 }] : [event];
+  });
+  const aimDecisions = localShots.slice(0, 16).map((shot, index) => ({
+    match: 1, sequence: shot.sequence, fireSent: true,
+    ...(index < 6 ? { target: { distance: 80 }, targetDistance: 500,
+      adsRequested: false, sampled: { hipFire: true } } :
+      index < 12 ? { targetDistance: 240, adsRequested: true,
+        sampled: { hipFire: false } } : {})
+  }));
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, localShots, serverEvents, aimDecisions,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0, 0, 0, 0] }))
+  } });
+  assert.equal(report.correlatedShots.paired, 15);
+  assert.equal(report.correlatedShots.rayEvidence.incompatibleUniqueCandidates, 1);
+  assert.equal(report.correlatedShots.rayEvidence.pelletCountDisagreements, 0);
+  assert.equal(report.correlatedShots.rayEvidence.missingLocalDirections, 1);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 14);
+  assert.equal(report.correlatedShots.rayEvidence.differencesOverHalfDegree, 6);
+  assert.deepEqual(report.correlatedShots.comparableRaysByWeaponDistanceMode, [
+    { weapon: 'rifle', distance: '0-149 m', localFireMode: 'hip-selected',
+      count: 7, medianDegrees: 0.3, p90Degrees: 1.5, differencesOverHalfDegree: 2 },
+    { weapon: 'rifle', distance: 'unknown', localFireMode: 'unknown',
+      count: 1, medianDegrees: 0.75, p90Degrees: 0.75, differencesOverHalfDegree: 1 },
+    { weapon: 'sniper', distance: '150-299 m', localFireMode: 'ads-requested',
+      count: 6, medianDegrees: 0.5, p90Degrees: 1.2, differencesOverHalfDegree: 3 }
+  ]);
+  assert.match(formatReport(report), /Comparable ray angular differences by weapon \/ selected distance \/ local fire mode/);
+  assert.match(formatReport(report), /rifle \| 0-149 m \| hip-selected: 7 rays, median 0\.3 deg, P90 1\.5 deg, >0\.5 deg 2/);
+  assert.match(formatReport(report), /does not establish the server scope state/);
+});
+
+test('server-reported ray fan is measured even when local shot pairing is ambiguous', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const direction = degrees => {
+    const angle = degrees * Math.PI / 180;
+    return [-Math.sin(angle), 0, -Math.cos(angle)];
+  };
+  const localShots = Array.from({ length: 12 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, tick: 100 + index * 30,
+    sequence: index + 1, yaw: 0, pitch: 0,
+    directions: [direction(0), direction(index === 0 ? 2 : 0)],
+    weapon: { id: 'rifle' }
+  }));
+  const serverEvents = localShots.map((shot, index) => ({
+    at: shot.at + 180, match: 1, tick: shot.tick + 9, type: 'shot',
+    shot: { weaponId: 'rifle', directions: [direction(0),
+      direction(index === 0 ? 2 : index === 1 ? 3 : 0)] }
+  }));
+  serverEvents.push({ ...serverEvents[0], at: serverEvents[0].at + 1,
+    shot: { weaponId: 'rifle', directions: [direction(0), direction(6)] } });
+  serverEvents.push({ at: 99999, match: 1, tick: 999, type: 'shot',
+    shot: { weaponId: 'rifle', directions: [direction(0)] } });
+  serverEvents.push({ at: 99999, match: 1, tick: 1999, type: 'shot',
+    shot: { weaponId: 'rifle', directions: Array.from({ length: 33 },
+      () => direction(0)) } });
+  const trace = { formatVersion: 2, trace: { match: 1, localShots, serverEvents,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0, 0, 0, 0] })) } };
+  const report = analyzeTrace(trace);
+  const fan = report.correlatedShots.reportedRayFan;
+  assert.equal(report.correlatedShots.paired, 11);
+  assert.equal(report.correlatedShots.pairing.unmatchedByReason.multipleCompatibleServerShots, 1);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 22);
+  assert.deepEqual(report.correlatedShots.ambiguousRayBounds, {
+    ambiguousLocalShots: 1, measuredLocalShots: 1, incompleteCandidateSets: 0,
+    overLimitCandidateSets: 0, examples: [{ match: 1, sequence: 1, tick: 100,
+      reason: 'multipleCompatibleServerShots', serverCandidates: 2,
+      competingLocalShots: 1, comparableCandidates: 2,
+      minMaxRayDifferenceDegrees: 0, maxMaxRayDifferenceDegrees: 4 }]
+  });
+  assert.equal(fan.serverShotEvents, 15);
+  assert.equal(fan.eventsWithMultipleDirections, 14);
+  assert.equal(fan.measuredEvents, 13);
+  assert.equal(fan.skippedInvalidOrOverLimit, 1);
+  assert.equal(fan.maxSeparationDegrees, 6);
+  assert.deepEqual(fan.byPairing, {
+    paired: { events: 11, overHalfDegreeEvents: 1, medianMaxSeparationDegrees: 0 },
+    ambiguousCandidate: { events: 2, overHalfDegreeEvents: 2,
+      medianMaxSeparationDegrees: 4 },
+    unpaired: { events: 0, overHalfDegreeEvents: 0,
+      medianMaxSeparationDegrees: null }
+  });
+  assert.deepEqual(fan.examples.map(item =>
+    [item.tick, item.pairingStatus, item.maxSeparationDegrees]), [
+    [109, 'ambiguousCandidate', 6],
+    [139, 'paired', 3],
+    [109, 'ambiguousCandidate', 2]
+  ]);
+  const withoutLocalShots = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, serverEvents
+  } });
+  assert.equal(withoutLocalShots.correlatedShots.paired, 0);
+  assert.equal(withoutLocalShots.correlatedShots.reportedRayFan.maxSeparationDegrees, 6);
+  assert.equal(withoutLocalShots.correlatedShots.reportedRayFan.measuredEvents, 13);
+  assert.equal(withoutLocalShots.correlatedShots.reportedRayFan.byPairing.unpaired.events, 13);
+  assert.match(formatReport(report), /Within-shot server-reported ray separation \(pairing independent\)/);
+  assert.match(formatReport(report), /Ambiguous shot candidate ray-difference ranges/);
+  assert.match(formatReport(report), /not a server spread parameter or per-shot aim error/);
+});
+
+test('single-ray ambiguity reports candidate differences without inventing spread', async () => {
+  const { analyzeTrace } = await analyzer;
+  const direction = degrees => {
+    const angle = degrees * Math.PI / 180;
+    return [-Math.sin(angle), 0, -Math.cos(angle)];
+  };
+  const localShots = Array.from({ length: 12 }, (_, index) => ({
+    at: 1000 + index * 1000, match: 1, tick: 100 + index * 30,
+    sequence: index + 1, yaw: 0, pitch: 0,
+    directions: [direction(0)], weapon: { id: 'rifle' }
+  }));
+  const serverEvents = localShots.map(shot => ({
+    at: shot.at + 180, match: 1, tick: shot.tick + 9, type: 'shot',
+    shot: { weaponId: 'rifle', directions: [direction(0)] }
+  }));
+  serverEvents.push({ ...serverEvents[0], at: serverEvents[0].at + 1,
+    shot: { weaponId: 'rifle', directions: [direction(4)] } });
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1, localShots, serverEvents,
+    frames: localShots.map(shot => ({ match: 1, sequence: shot.sequence,
+      after: [0, 0, 0, 0] }))
+  } });
+  assert.equal(report.correlatedShots.paired, 11);
+  assert.equal(report.correlatedShots.rayEvidence.comparedRays, 11);
+  assert.equal(report.correlatedShots.reportedRayFan.measuredEvents, 0);
+  assert.equal(report.correlatedShots.reportedRayFan.maxSeparationDegrees, null);
+  assert.deepEqual(report.correlatedShots.ambiguousRayBounds.examples[0], {
+    match: 1, sequence: 1, tick: 100,
+    reason: 'multipleCompatibleServerShots', serverCandidates: 2,
+    competingLocalShots: 1, comparableCandidates: 2,
+    minMaxRayDifferenceDegrees: 0, maxMaxRayDifferenceDegrees: 4
+  });
+});
+
+test('ammo requests and reserve gains stay separate, and cooldown frames are not flagged as aim failures', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.10', trace: {
+    match: 1,
+    ammoPickups: [{ match: 1, ammoType: 'light', amount: 30, reserveBefore: 20 }],
+    serverSnapshots: [
+      { match: 1, server: { ammo: { light: 20 } } },
+      { match: 1, server: { ammo: { light: 50 } } }
+    ],
+    aimDecisions: [
+      { match: 1, sequence: 1, fireSent: true, localShotPredicted: false,
+        weapon: { cooldown: 0.03 }, weaponId: 'vanguard' },
+      { match: 1, sequence: 2, fireSent: true, localShotPredicted: false,
+        weapon: { cooldown: 0 }, weaponId: 'vanguard' }
+    ]
+  } });
+  assert.deepEqual(report.ammoAssist, { pickupRequests: 1, requestsByType: { light: 1 },
+    serverReserveIncreases: { light: { transitions: 1, rounds: 30 } } });
+  assert.equal(report.outgoingFire.missingPredictionWithCooldown, 1);
+  assert.equal(report.outgoingFire.missingPredictionWithoutCooldown, 1);
+  assert.deepEqual(report.investigate.map(item => item.sequence), [2]);
+  assert.match(formatReport(report), /Ammo assist: 1 pickup requests/);
+});
+
+test('agent item and equip requests stay separate from observed server weapon changes', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1,
+    agentDecisions: [
+      { action: 'loot-interact', goal: { kind: 'weapon' } },
+      { action: 'equip', goal: { kind: 'weapon' } },
+      { action: 'loot-interact', goal: { kind: 'ammo' } }
+    ],
+    serverSnapshots: [
+      { match: 1, tick: 100, server: { activeSlot: 0,
+        slots: [{ weapon: 'sidearm' }, null] } },
+      { match: 1, tick: 110, server: { activeSlot: 0,
+        slots: [{ weapon: 'sidearm' }, { weapon: 'vanguard' }] } },
+      { match: 1, tick: 120, server: { activeSlot: 1,
+        slots: [{ weapon: 'sidearm' }, { weapon: 'vanguard' }] } },
+      { match: 1, tick: 130, server: { activeSlot: 1,
+        slots: [{ weapon: 'hornet' }, { weapon: 'vanguard' }] } }
+    ]
+  } });
+  assert.deepEqual(report.inventoryEvidence, { observedServerInventories: 4,
+    agentInteractRequestsByKind: { weapon: 1, ammo: 1 }, agentEquipRequests: 1,
+    serverWeaponAcquisitions: 1, serverWeaponReplacements: 1,
+    serverActiveSlotChanges: 1, transitions: [
+      { match: 1, tick: 110, slot: 1, from: null, to: 'vanguard' },
+      { match: 1, tick: 130, slot: 0, from: 'sidearm', to: 'hornet' }
+    ] });
+  assert.match(formatReport(report), /Combat agent inventory/);
+  assert.match(formatReport(report), /cannot be attributed to a particular request/);
+});
+
+test('recovery requests and observed server resource changes remain separate evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    match: 1,
+    agentDecisions: [{ action: 'heal' }, { action: 'plate' }],
+    serverSnapshots: [
+      { match: 1, tick: 100, server: { health: 40, armor: 50,
+        plates: 2, medkits: 1, healing: 0, plating: 0 } },
+      { match: 1, tick: 101, server: { health: 40, armor: 50,
+        plates: 2, medkits: 1, healing: 3.9, plating: 0 } },
+      { match: 1, tick: 220, server: { health: 100, armor: 50,
+        plates: 2, medkits: 0, healing: 0, plating: 1.1 } },
+      { match: 1, tick: 260, server: { health: 100, armor: 100,
+        plates: 1, medkits: 0, healing: 0, plating: 0 } }
+    ]
+  } });
+  assert.deepEqual(report.recoveryEvidence, { agentHealRequests: 1, agentPlateRequests: 1,
+    observedServerStates: 4, healthIncreases: 1, armorIncreases: 1,
+    plateStockDecreases: 1, medkitStockDecreases: 1,
+    healingStarts: 1, platingStarts: 1 });
+  assert.match(formatReport(report), /Combat agent recovery/);
+  assert.match(formatReport(report), /Health can also rise through regeneration/);
+});
+
+test('no-fire report distinguishes sampled gates, outbound frames, and server evidence', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, scriptVersion: '1.5.8', trace: {
+    match: 1,
+    localShots: [{ match: 1, sequence: 10 }, { match: 3, sequence: 1 }],
+    counters: { rageSamples: 100, gateReasons: { unplayable: 80, aligning: 20 },
+      highestAckByMatch: { 1: 10 } },
+    frames: [
+      { match: 1, sequence: 9, sampledButtons: 64, buttons: 64 },
+      { match: 1, sequence: 10, sampledButtons: 1 | 2, buttons: 2 },
+      { match: 1, sequence: 11, sampledButtons: 0, buttons: 0 },
+      { match: 2, sequence: 1, buttons: 0 }
+    ],
+    fireGates: [
+      { at: 10, match: 1, reason: 'unplayable', originalButtons: 0,
+        sampledButtons: 0, player: { mode: 'parachute' } },
+      { at: 20, match: 1, reason: 'aligning', originalButtons: 1 | 64,
+        sampledButtons: 2 | 64, player: { mode: 'ground' },
+        weapon: { id: 'sidearm' }, target: { distance: 53.2 },
+        aimState: { targetIndex: 42, ready: false, yawGapDegrees: 8,
+          pitchGapDegrees: 3, withinOneTurn: false } },
+      { at: 30, match: 1, reason: 'aligning', originalButtons: 1,
+        sampledButtons: 2, player: { mode: 'ground' },
+        weapon: { id: 'sidearm' }, target: { distance: 89.3 },
+        aimState: { targetIndex: 43, ready: true, yawGapDegrees: 0.4,
+          pitchGapDegrees: 0.5, withinOneTurn: true } }
+    ],
+    settings: [
+      { at: 1, match: 0, reason: 'change', values: { rage: true, range: 600 } },
+      { at: 2, match: 1, reason: 'match-start', values: { rage: true, range: 600 } },
+      { at: 3, match: 1, reason: 'change', values: { rage: false, range: 450 } }
+    ],
+    serverEvents: [], serverSnapshots: []
+  } });
+  assert.deepEqual(report.gateReasons, { unplayable: 80, aligning: 20 });
+  assert.equal(report.gateSamples.retained, 3);
+  assert.deepEqual(report.gateSamples.retainedReasons, { unplayable: 1, aligning: 2 });
+  assert.deepEqual(report.gateSamples.byPlayerMode,
+    { parachute: { unplayable: 1 }, ground: { aligning: 2 } });
+  assert.deepEqual(report.gateSamples.selectedTargets,
+    { retained: 2, minDistanceMeters: 53.2, maxDistanceMeters: 89.3 });
+  assert.deepEqual(report.firingEvidence, {
+    originalFireGateRows: 2, preparedFireGateRows: 0, sampledFireFrames: 1,
+    outgoingFireFrames: 0,
+    sentDecisionRows: 0, earlyAdsSent: 0, earlyAdsPredicted: 0,
+    earlyAdsCorrected: 0, serverShotEvents: 0
+  });
+  assert.equal(report.gateSamples.aimState.retained, 2);
+  assert.equal(report.gateSamples.aimState.readyTrue, 1);
+  assert.equal(report.gateSamples.aimState.withinOneTurnFalse, 1);
+  assert.equal(report.gateSamples.aimState.medianYawGapDegrees, 0.4);
+  assert.equal(report.gateSamples.aimState.maxYawGapDegrees, 8);
+  assert.equal(report.gateSamples.latestByReason.aligning.aimState.targetIndex, 43);
+  assert.equal(report.inputButtons.originalGateSamples.byButton.interact, 1);
+  assert.equal(report.inputButtons.preparedGateSamples.byButton.interact, 1);
+  assert.equal(report.inputButtons.sampledFrames.byButton.interact, 1);
+  assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 1);
+  assert.equal(report.inputButtons.frameSendChanges.comparable, 3);
+  assert.equal(report.inputButtons.frameSendChanges.removed.fire, 1);
+  assert.deepEqual(report.predictionConsistency, {
+    retainedLocalShots: 2, overlappingFrames: 1,
+    predictedFireRemovedOnWire: 1, predictedFireOnWire: 0
+  });
+  assert.equal(report.inputButtons.frameSendChanges.removed.interact, 0);
+  assert.equal(report.inputButtons.gateSampleChanges.removed.fire, 2);
+  assert.equal(report.inputButtons.gateSampleChanges.removed.interact, 0);
+  assert.deepEqual(report.inputButtons.outgoingFrameAckCoverage,
+    { covered: 2, pendingOrUnobserved: 1, unknown: 1 });
+  assert.equal(report.settingsHistory.retained, 3);
+  assert.deepEqual(report.settingsHistory.transitions, [{
+    at: 3, match: 1, reason: 'change', changed: {
+      rage: { from: true, to: false }, range: { from: 600, to: 450 }
+    }
+  }]);
+  const text = formatReport(report);
+  assert.match(text, /Fire path evidence \(retained rows\): original game samples 2, prepared samples 0, pre-send frames 1, outgoing frames 0/);
+  assert.match(text, /Interact button bit 64/);
+  assert.match(text, /absent Interact bits do not prove F\/E was never pressed/);
+});
+
+test('interaction loss is only reported when visible between original and prepared samples', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    fireGates: [
+      { originalButtons: 64, sampledButtons: 0, reason: 'no-target' },
+      { originalButtons: 64, sampledButtons: 64, reason: 'no-target' },
+      { originalButtons: null, sampledButtons: null, reason: 'no-target' }
+    ],
+    frames: [{ match: 1, sequence: 3, buttons: 64 }]
+  } });
+  assert.equal(report.inputButtons.gateSampleChanges.comparable, 2);
+  assert.equal(report.inputButtons.gateSampleChanges.removed.interact, 1);
+  assert.equal(report.inputButtons.originalGateSamples.missing, 1);
+  assert.equal(report.inputButtons.sampledFrames.observed, 0);
+  assert.equal(report.firingEvidence.sampledFireFrames, null);
+  assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 1);
+  assert.deepEqual(report.inputButtons.outgoingFrameAckCoverage,
+    { covered: 0, pendingOrUnobserved: 0, unknown: 1 });
+  assert.equal(report.serverEvents.shots, 0);
+  assert.equal(report.outgoingFire.retained, 0);
+});
+
+test('interaction key evidence separates pointer lock and input state from sent buttons', async () => {
+  const { analyzeTrace } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: {
+    interactions: [
+      { phase: 'keydown', key: 'KeyF', pointerLocked: false,
+        inputEnabled: true, fromToolsPanel: true },
+      { phase: 'pointerlockchange', pointerLocked: true },
+      { phase: 'keydown', key: 'KeyE', pointerLocked: true,
+        inputEnabled: false, fromToolsPanel: false },
+      { phase: 'keyup', key: 'KeyE', pointerLocked: true }
+    ],
+    frames: [{ match: 1, sequence: 1, sampledButtons: 0, buttons: 0 }]
+  } });
+  assert.deepEqual(report.interactionEvidence, {
+    retained: 4, keyDowns: 2, keyUps: 1,
+    keyDownsWithoutPointerLock: 1, keyDownsWithInputDisabled: 1,
+    keyDownsFromToolsPanel: 1, pointerLockChanges: 1
+  });
+  assert.equal(report.inputButtons.outgoingFrames.byButton.interact, 0);
+});
+
+test('spread replay calibration shows live eligibility without treating old traces as failures', async () => {
+  const { analyzeTrace, formatReport } = await analyzer;
+  const report = analyzeTrace({ formatVersion: 2, trace: { localShots: [
+    { weapon: { id: 'rifle' }, spreadReplayCalibrated: true },
+    { weapon: { id: 'rifle' }, spreadReplayCalibrated: false },
+    { weapon: { id: 'shotgun' }, spreadReplayCalibrated: true },
+    { weapon: { id: 'shotgun' } }
+  ] } });
+  assert.deepEqual(report.spreadReplayEvidence, {
+    calibrated: 2, uncalibrated: 1, unrecorded: 1,
+    byWeapon: { rifle: { calibrated: 1, uncalibrated: 1, unrecorded: 0 },
+      shotgun: { calibrated: 1, uncalibrated: 0, unrecorded: 1 } }
+  });
+  assert.match(formatReport(report), /Local spread replay calibration/);
+  assert.match(formatReport(report), /does not verify the private server seed or ray/);
+});

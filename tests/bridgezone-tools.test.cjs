@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -18,10 +19,11 @@ function documentHarness() {
   const downloads = [];
   const painter = { clearRect() {}, setTransform() {} };
   const controls = new Map();
+  const rootListeners = new Map();
   const root = {
     innerHTML: '',
     appendChild() {},
-    addEventListener() {},
+    addEventListener(name, listener) { rootListeners.set(name, listener); },
     querySelector(selector) {
       if (!controls.has(selector)) controls.set(selector, {
         events: new Map(),
@@ -47,7 +49,7 @@ function documentHarness() {
   };
   let nextTimer = 1;
   return {
-    document, canvases, listeners, timers, controls, downloads,
+    document, canvases, listeners, rootListeners, timers, controls, downloads,
     setInterval(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
     clearInterval(id) { timers.delete(id); },
     mount() {
@@ -58,7 +60,7 @@ function documentHarness() {
   };
 }
 
-function harness(initialChunks = [], savedSettings) {
+function harness(initialChunks = [], savedSettings, features = {}) {
   const windowListeners = new Map();
   const dom = documentHarness();
   const documentListeners = dom.listeners;
@@ -70,6 +72,7 @@ function harness(initialChunks = [], savedSettings) {
   const queue = [...initialChunks];
   const window = {
     TURBOPACK: queue,
+    indexedDB: features.indexedDB,
     addEventListener(name, listener) { windowListeners.set(name, listener); },
     removeEventListener(name, listener) {
       if (windowListeners.get(name) === listener) windowListeners.delete(name);
@@ -81,7 +84,7 @@ function harness(initialChunks = [], savedSettings) {
       getItem(key) { return storage.get(key) ?? null; },
       setItem(key, value) { storage.set(key, value); }
     },
-    performance: { now: () => 1000 },
+    performance: { now: () => features.now?.() ?? 1000 },
     Blob,
     URL: {
       createObjectURL(blob) { createdBlobs.push(blob); return 'blob:trace'; },
@@ -120,6 +123,46 @@ function harness(initialChunks = [], savedSettings) {
     windowListeners, documentListeners, ...dom,
     api: window.__bridgeZoneTools
   };
+}
+
+function archiveDbHarness() {
+  const records = new Map();
+  let created = false;
+  const db = {
+    objectStoreNames: { contains: name => name === 'sessions' && created },
+    createObjectStore(name) { assert.equal(name, 'sessions'); created = true; },
+    transaction(name) {
+      assert.equal(name, 'sessions');
+      const tx = {
+        objectStore() {
+          return {
+            put(record) { records.set(record.id, record); },
+            delete(key) { records.delete(key); },
+            getAllKeys() {
+              const request = {};
+              queueMicrotask(() => {
+                request.result = [...records.keys()];
+                request.onsuccess?.();
+                queueMicrotask(() => tx.oncomplete?.());
+              });
+              return request;
+            },
+            getAll() {
+              const request = {};
+              queueMicrotask(() => { request.result = [...records.values()]; request.onsuccess?.(); });
+              return request;
+            }
+          };
+        }
+      };
+      return tx;
+    }
+  };
+  return { records, indexedDB: { open() {
+    const request = { result: db };
+    queueMicrotask(() => { if (!created) request.onupgradeneeded?.(); request.onsuccess?.(); });
+    return request;
+  } } };
 }
 
 function opponent(i = 1, patch = {}) {
@@ -166,7 +209,7 @@ function attach(h, fake = fakeClient()) {
   const exports = h.register(97294, { createZoneClient: originalFactory });
   assert.notEqual(exports.createZoneClient, originalFactory);
   assert.equal(exports.createZoneClient({ arbitrary: true }), fake.client);
-  // Existing behavior tests opt in explicitly; production defaults remain disabled.
+  // Most behavior tests isolate manual aim from the default combat agent.
   h.api.setOptions({ silent: true, visibleOnly: false, rage: false, range: 350, point: 'head' });
   h.api.setOptions({ stealth: false, smooth: 1 });
   return fake;
@@ -294,26 +337,43 @@ test('a single manual click fires once after the outgoing aim aligns', () => {
   h.api.destroy();
 });
 
-test('an unreachable spread correction does not discard a locally predicted shot', () => {
+test('a spread correction outside the turn budget is held before prediction', () => {
   const h = harness();
   const fake = rageClient();
-  const spread = 8 * Math.PI / 180;
-  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
-    weapon: { fired: true, dirs: [[Math.sin(spread), 0, -Math.cos(spread)]] } });
+  let spread = 8 * Math.PI / 180;
+  let predictions = 0;
+  fake.client.predictor.predict = input => {
+    predictions++;
+    return { eye: [0, 1.62, 0], weapon: { fired: !!(input.buttons & 1),
+      dirs: [[Math.sin(spread), 0, -Math.cos(spread)]] } };
+  };
+  Object.assign(fake.client.predictor.ps, { grounded: true, vel: [0, 0, 0] });
+  Object.assign(fake.client.predictor.ws, { ads: 1, bloom: 0 });
+  Object.assign(fake.client.predictor.activeStats,
+    { hipSpread: 8, adsSpread: 8, moveSpread: 0, adsSeconds: 0.2 });
   attach(h, fake);
-  h.api.setOptions({ rage: true, stealth: true });
+  h.api.setOptions({ rage: true, stealth: true, hipFire: false });
   fake.client.remoteFrames = [{ snap: opponent(1, { p: [-20, 0, -34.641] }) }];
   for (let tick = 0; tick < 12; tick++) send(fake, [frame({ s: 700 + tick, buttons: 0 })]);
   assert.equal(h.api.runtime.outgoingAim.ready, true);
-  const previousYaw = h.api.runtime.outgoingAim.yaw;
   const sampled = fake.client.input.sample('sample-argument');
-  assert.equal(sampled.buttons & 1, 1);
+  assert.equal(sampled.buttons & 1, 0, 'the impossible correction waits before prediction');
+  assert.equal(h.api.runtime.sampleGate.reason, 'fire-request');
+  assert.equal(h.api.runtime.sampleHoldReason, 'spread-align');
+  assert.equal(predictions, 0);
   fake.client.predictor.predict(sampled);
   const output = send(fake, [sampled])[0];
-  assert.equal(output.buttons & 1, 1, 'the server and local predictor both see this shot');
-  assert.equal(h.api.runtime.compensated, 0, 'the excessive correction is omitted');
+  assert.equal(output.buttons & 1, 0);
+  spread = 0.1 * Math.PI / 180;
+  fake.client.predictor.activeStats.adsSpread = 0.1;
+  const ready = fake.client.input.sample('sample-argument');
+  assert.equal(ready.buttons & 1, 1, 'Fire resumes after the spread fits the turn budget');
+  fake.client.predictor.predict(ready);
+  const sent = send(fake, [ready])[0];
+  assert.equal(sent.buttons & 1, 1, 'a locally predicted shot stays on the wire');
+  assert.equal(h.api.runtime.compensated, 1);
   assert.equal(h.api.runtime.predictions.size, 0);
-  const turn = Math.atan2(Math.sin(output.yaw - previousYaw), Math.cos(output.yaw - previousYaw));
+  const turn = Math.atan2(Math.sin(sent.yaw - output.yaw), Math.cos(sent.yaw - output.yaw));
   assert.ok(Math.abs(turn) <= 8 * Math.PI / 180 + 1e-9);
   h.api.destroy();
 });
@@ -531,7 +591,7 @@ test('disabling aim preserves inputs; destroy restores methods, loader, and list
 });
 
 function rageClient(patch = {}) {
-  const sampled = Object.freeze(frame({ buttons: 16 | 64 | 8 }));
+  const sampled = Object.freeze(frame({ buttons: 16 | 8 }));
   const input = {
     enabled: true,
     sample(...args) {
@@ -542,7 +602,7 @@ function rageClient(patch = {}) {
   };
   const predictor = {
     ps: { pos: [0, 0, 0], mode: 'ground', crouch: 0, health: 100 },
-    ws: { trigger: false, cooldown: 0 },
+    ws: { trigger: false, cooldown: 0, ads: 1 },
     active: 0, slots: [{ mag: 10 }], ammo: { light: 50 },
     activeStats: { fireMode: 'auto', ammo: 'light', pellets: 1, magSize: 10 }
   };
@@ -550,29 +610,72 @@ function rageClient(patch = {}) {
   return { ...fake, sampled, originalSample: input.sample };
 }
 
-test('stealth holds Rage and manual Fire before prediction when a target is present', () => {
+test('an F interact pulse survives Rage sampling and outgoing frames', () => {
+  // The captured client maps KeyF/KeyE to Buttons.Interact (64). A pickup
+  // needs that bit on the wire during the press and absent after release.
+  for (const targetPresent of [false, true]) {
+    const h = harness();
+    const fake = rageClient();
+    let buttons = 64, sequence = 1800;
+    fake.client.input.sample = () => Object.freeze(frame({ s: sequence++, buttons }));
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+    if (!targetPresent) fake.client.remoteFrames = [];
+
+    const pressed = fake.client.input.sample();
+    assert.equal(pressed.buttons & 64, 64, `sampled F with target=${targetPresent}`);
+    const sentInteract = send(fake, [pressed])[0];
+    assert.equal(sentInteract.buttons & 64, 64,
+      `outgoing F with target=${targetPresent}`);
+    close(sentInteract.yaw, pressed.yaw);
+    close(sentInteract.pitch, pressed.pitch);
+    close(sentInteract.mx, pressed.mx);
+    close(sentInteract.mz, pressed.mz);
+    buttons = 0;
+    const released = fake.client.input.sample();
+    assert.equal(released.buttons & 64, 0, `sampled F release with target=${targetPresent}`);
+    assert.equal(send(fake, [released])[0].buttons & 64, 0,
+      `outgoing F release with target=${targetPresent}`);
+    h.api.destroy();
+  }
+});
+
+test('manual Stealth preserves F interact while holding an unaligned Fire input', () => {
+  const h = harness();
+  const original = Object.freeze(frame({ s: 1810, buttons: 1 | 64 }));
+  const fake = attach(h, fakeClient({ input: { enabled: true, sample: () => original } }));
+  h.api.setOptions({ stealth: true });
+
+  const sampled = fake.client.input.sample();
+  assert.equal(sampled.buttons & 1, 0, 'Fire waits for the outgoing aim');
+  assert.equal(sampled.buttons & 64, 64, 'F remains available while Fire waits');
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 1, 0);
+  assert.equal(outgoing.buttons & 64, 64, 'F reaches the server input');
+  assert.equal(original.buttons, 1 | 64, 'the game-owned input is not mutated');
+  h.api.destroy();
+});
+
+test('Rage predicts before its final outgoing turn while manual Stealth still holds Fire', () => {
   const h = harness();
   const fake = attach(h, rageClient());
-  h.api.setOptions({ rage: true, stealth: true });
-  h.api.runtime.stealth.cooldown = 2000;
-  const held = fake.client.input.sample('sample-argument');
-  assert.equal(held.buttons & 1, 0);
-  assert.equal(held.buttons & 2, 2, 'aiming down sights remains active');
-  assert.equal(fake.sampled.buttons, 16 | 64 | 8, 'the game sample is not mutated');
-  assert.equal(send(fake, [held])[0].buttons & 1, 0);
-  assert.equal(h.api.runtime.stealth.heldShots, 1);
-  h.api.runtime.stealth.cooldown = 0;
-  let ready;
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  const farFromAim = fake.client.input.sample('sample-argument');
+  assert.equal(farFromAim.buttons & 1, 0, 'a target beyond one outgoing turn stays held');
+  assert.equal(farFromAim.buttons & 2, 2, 'aiming down sights remains active');
+  assert.equal(fake.sampled.buttons, 16 | 8, 'the game sample is not mutated');
+  assert.equal(send(fake, [farFromAim])[0].buttons & 1, 0,
+    'the outgoing frame stays held while the turn is incomplete');
+  let predicted = false, sent = false;
   for (let attempt = 0; attempt < 8; attempt++) {
-    ready = fake.client.input.sample('sample-argument');
-    const outgoing = send(fake, [frame({ ...ready, s: 200 + attempt })])[0];
-    if (ready.buttons & 1) {
-      assert.equal(outgoing.buttons & 1, 1);
-      assert.notEqual(outgoing.yaw, 0);
-      break;
-    }
+    const sampled = fake.client.input.sample('sample-argument');
+    const outgoing = send(fake, [frame({ ...sampled, s: 200 + attempt })])[0];
+    predicted ||= !!(sampled.buttons & 1);
+    sent ||= !!(outgoing.buttons & 1);
+    if (sent) break;
   }
-  assert.equal(ready.buttons & 1, 1, 'Rage fires after the outgoing turn aligns');
+  assert.equal(predicted, true, 'Rage enables prediction once aim is within one outgoing turn');
+  assert.equal(sent, true, 'Rage sends Fire once the outgoing turn aligns');
   h.api.destroy();
 
   const manual = Object.freeze(frame({ s: 94 }));
@@ -584,6 +687,1008 @@ test('stealth holds Rage and manual Fire before prediction when a target is pres
   assert.equal(manualFake.client.input.sample().buttons & 1, 0);
   assert.equal(manual.buttons & 1, 1);
   manualHarness.api.destroy();
+});
+
+test('fast fire skips local pacing but still waits for aim and real ammunition', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  h.api.runtime.stealth.cooldown = 1e9;
+  let fired = false;
+  for (let sequence = 800; sequence < 810; sequence++) {
+    const sampled = fake.client.input.sample('sample-argument');
+    const output = send(fake, [frame({ ...sampled, s: sequence })])[0];
+    if (output.buttons & 1) { fired = true; break; }
+  }
+  assert.equal(fired, true, 'local cooldown does not throttle ready Rage shots');
+  fake.client.predictor.slots[0].mag = 0;
+  fake.client.predictor.ammo.light = 0;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0);
+  h.api.destroy();
+});
+
+test('adaptive hip fire sends Fire without Aim when spread correction fits', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20] }) }];
+  fake.client.predictor.ps.grounded = true;
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats, {
+    hipSpread: 3.2, adsSpread: 0.12, moveSpread: 1.6
+  });
+  const spread = 2 * Math.PI / 180;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: !!(input.buttons & 1), dirs: [[
+      -Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+      Math.sin(input.pitch),
+      -Math.cos(input.yaw + spread) * Math.cos(input.pitch)
+    ]]
+  } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, hipFire: true, point: 'chest' });
+  send(fake, [frame({ s: 600, buttons: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 3, 1, 'the planned shot fires without requesting scope');
+  assert.equal(sampled.buttons & 16, 0, 'sprint is released for the firing frame');
+  fake.client.predictor.predict(sampled);
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 3, 1);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.adsRequested, false);
+  assert.equal(decision.sampled.hipFire, true);
+  assert.equal(decision.sampled.hipSeeded, false);
+  assert.equal(decision.correctionApplied, true);
+  assert.ok(decision.geometry.predictedOutgoing.minMeters < 0.01);
+  assert.equal(h.api.trace().fireGates.at(-1).hipFire, true);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -100] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2,
+    'the default range cap preserves ADS for distant shots');
+  h.api.setOptions({ hipRange: 120 });
+  assert.equal(h.api.options.hipRange, 40, 'the live trace caps unscoped range at 40 m');
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2,
+    'the distance control cannot force the inaccurate 100 m hip shot');
+  h.api.destroy();
+});
+
+test('a wide seeded hip spread falls back to ADS without advancing the shot', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  const predictor = fake.client.predictor;
+  predictor.ps.grounded = true;
+  predictor.seed = 123;
+  predictor.index = 0;
+  Object.assign(predictor.ws, { ads: 1, bloom: 0, switching: 0, shots: 4 });
+  Object.assign(predictor.activeStats, {
+    hipSpread: 8, adsSpread: 0.1, moveSpread: 4
+  });
+  let random = 0.01;
+  h.api.attachClient(fake.client, { shotSeed: () => 9, mulberry32: () => () => random });
+  h.api.setOptions({ rage: true, hipFire: true });
+  const narrow = fake.client.input.sample('sample-argument');
+  assert.equal(narrow.buttons & 2, 0);
+  assert.equal(h.api.runtime.sampleGate.hipSeeded, true);
+  assert.equal(h.api.runtime.sampleGate.hipFire, true);
+  random = 0.99;
+  const wide = fake.client.input.sample('sample-argument');
+  assert.equal(wide.buttons & 2, 2);
+  assert.equal(h.api.runtime.sampleGate.hipFire, false);
+  assert.equal(predictor.ws.shots, 4, 'planning does not consume the next shot');
+  h.api.setOptions({ hipFire: false });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2);
+  h.api.destroy();
+});
+
+test('combat agent approaches an enemy, stops to fire, and yields to manual movement', () => {
+  const h = harness();
+  const fake = rageClient();
+  let manual = false;
+  fake.client.input.sample = () => frame({ s: 810, buttons: 0,
+    mx: manual ? 1 : 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  Object.assign(fake.client.predictor.activeStats,
+    { class: 'rifle', rangeEnd: 90, hipSpread: 3, adsSpread: 0.1, moveSpread: 1 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  attach(h, fake);
+  h.api.setOptions({ agent: true, hipFire: false, stealth: true });
+  assert.equal(h.api.options.rage, true);
+  assert.equal(h.api.options.silent, true);
+  const travel = fake.client.input.sample();
+  assert.ok(Math.abs(travel.mx) < 1e-9 && travel.mz > 0.9);
+  assert.equal(travel.buttons & 16, 16);
+  assert.equal(travel.buttons & 3, 0, 'travel does not fire or scope');
+  assert.equal(h.api.inspect().agent.action, 'approach');
+  send(fake, [travel]);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  fake.client.predictor.ps.vel = [0, 0, -2];
+  const settling = fake.client.input.sample();
+  assert.equal(settling.buttons & 3, 2, 'the agent waits for movement to settle');
+  assert.equal(h.api.runtime.sampleGate.reason, 'agent-settle');
+  fake.client.predictor.ps.vel = [0, 0, 0];
+  const engage = fake.client.input.sample();
+  assert.equal(engage.mx, 0);
+  assert.equal(engage.mz, 0);
+  assert.equal(engage.buttons & 3, 3, 'the agent stops and requests scoped Fire');
+  assert.equal(h.api.inspect().agent.action, 'engage');
+  manual = true;
+  const overridden = fake.client.input.sample();
+  assert.equal(overridden.mx, 1);
+  assert.equal(overridden.mz, 0);
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  h.api.setOptions({ rage: false });
+  assert.equal(h.api.options.agent, false, 'turning off Rage also stops the agent');
+  h.api.destroy();
+});
+
+test('combat agent takes a real side detour after stalling and resumes direct travel on progress', () => {
+  let now = 1000;
+  const h = harness([], undefined, { now: () => now });
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 813, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  h.api.setOptions({ agent: true, hipFire: false });
+  const direct = fake.client.input.sample();
+  assert.ok(Math.abs(direct.mx) < 0.01 && direct.mz > 0.9);
+  now += 700;
+  const detour = fake.client.input.sample();
+  assert.ok(Math.abs(detour.mx) > 0.7, 'stall changes the actual movement vector');
+  assert.equal(h.api.inspect().agent.action, 'detour');
+  assert.equal(h.api.runtime.sampleGate.reason, 'agent-detour');
+  assert.equal(detour.buttons & 1, 0);
+  assert.equal(h.api.trace().agentDecisions.at(-1).stuckCount, 1);
+  fake.client.predictor.ps.pos = [1, 0, -2];
+  now += 700;
+  const resumed = fake.client.input.sample();
+  assert.ok(Math.abs(resumed.mx) < 0.1 && resumed.mz > 0.9);
+  assert.equal(h.api.inspect().agent.action, 'approach');
+  assert.equal(h.api.runtime.agent.stuckCount, 0);
+  h.api.destroy();
+});
+
+test('combat agent respects movement boxes that let shots through and steps over low cover', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 814, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  const box = { min: [-0.5, 0, -2.2], max: [0.5, 1.6, -1.8], blocksShots: false };
+  const columns = 193, grid = new Map();
+  for (const col of [95, 96]) grid.set(95 * columns + col, [0]);
+  const world = { cellSize: 8, boxes: [box], grid };
+  h.register(54145, { getCollisionWorld: () => world, hasLineOfSight: () => true });
+  h.api.setOptions({ agent: true });
+  const around = fake.client.input.sample();
+  assert.ok(Math.abs(around.mx) > 0.4 && around.mz > 0.5,
+    'collision box changes the route even when the shot ray is clear');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'movement-grid');
+  assert.ok(Math.abs(h.api.trace().agentDecisions.at(-1).route.steerDegrees) > 30);
+  box.max[1] = 0.4;
+  const over = fake.client.input.sample();
+  assert.ok(Math.abs(over.mx) < 0.01 && over.mz > 0.9,
+    'the movement kernel can step over a low box');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.steerDegrees, 0);
+  h.api.destroy();
+});
+
+test('combat agent uses the longest safe short corridor when every full route is blocked', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 816, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  const box = { min: [-10, 0, -1.1], max: [10, 2, -0.9] };
+  const grid = new Map(), columns = 193;
+  for (const col of [94, 95, 96, 97]) grid.set(95 * columns + col, [0]);
+  const world = { cellSize: 8, boxes: [box], grid };
+  h.register(54145, { getCollisionWorld: () => world, hasLineOfSight: () => true });
+  h.api.setOptions({ agent: true });
+  const partial = fake.client.input.sample();
+  assert.ok(Math.abs(partial.mx) > 0.7 && partial.mz > 0.3,
+    'a safe lateral corridor moves the agent instead of stopping at a distant wall');
+  const route = h.api.trace().agentDecisions.at(-1).route;
+  assert.ok(route.clearanceMeters >= 0.75 && route.clearanceMeters < 4);
+  assert.equal(route.source, 'movement-grid');
+  box.min[2] = -0.5;
+  box.max[2] = -0.3;
+  const blocked = fake.client.input.sample();
+  assert.equal(blocked.mx, 0);
+  assert.equal(blocked.mz, 0);
+  assert.equal(h.api.inspect().agent.action, 'blocked');
+  assert.ok(h.api.trace().agentDecisions.at(-1).route.clearanceMeters < 0.75);
+  h.api.destroy();
+});
+
+test('combat agent holds a detour side until the full window or actual goal progress', () => {
+  let now = 1000;
+  const h = harness([], undefined, { now: () => now });
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 815, buttons: 0, mx: 0, mz: 0 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -120] }) }];
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  fake.client.input.sample();
+  now += 700;
+  const initial = fake.client.input.sample();
+  fake.client.predictor.ps.pos = [1, 0, 0];
+  now += 700;
+  const held = fake.client.input.sample();
+  assert.ok(initial.mx * held.mx > 0, 'sideways motion without goal progress keeps the same flank');
+  assert.equal(h.api.inspect().agent.action, 'detour');
+  fake.client.predictor.ps.pos = [2, 0, 0];
+  now += 900;
+  const switched = fake.client.input.sample();
+  assert.ok(initial.mx * switched.mx < 0, 'the flank changes after its unsuccessful window');
+  assert.equal(h.api.runtime.agent.stuckCount, 2);
+  h.api.destroy();
+});
+
+test('combat agent moves toward the observed safe zone and does not fire while travelling', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 811, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  fake.client.latest.storm = { state: 'waiting', center: [100, 0], radius: 10 };
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  const move = fake.client.input.sample();
+  assert.ok(move.mx > 0.9 && Math.abs(move.mz) < 1e-9);
+  assert.equal(move.buttons & 16, 16);
+  assert.equal(move.buttons & 3, 0);
+  assert.equal(h.api.inspect().agent.action, 'storm');
+  assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'storm');
+  assert.equal(h.api.trace().agentDecisions.at(-1).distanceMeters, 93.5,
+    'the agent aims just inside the near storm edge rather than the center');
+  h.api.destroy();
+});
+
+test('combat agent can engage at the center of a small storm circle', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 819, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { pos: [0, 0, 0], vel: [0, 0, 0], grounded: true });
+  fake.client.latest.storm = { state: 'waiting', center: [0, 0], radius: 4 };
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'engage',
+    'a small circle does not permanently override combat when already inside');
+  h.api.destroy();
+});
+
+test('combat agent keeps moving into a final tiny storm circle', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 821, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps,
+    { pos: [0.8, 0, 0], vel: [0, 0, 0], grounded: true });
+  fake.client.latest.storm = { state: 'waiting', center: [0, 0], radius: 0.5 };
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  const move = fake.client.input.sample();
+  assert.ok(move.mx < -0.9, 'the agent moves toward the tiny safe area');
+  assert.equal(h.api.inspect().agent.action, 'storm');
+  h.api.destroy();
+});
+
+test('combat agent drops over observed land and steers after exiting the plane', () => {
+  let now = 1000;
+  let manual = false;
+  const h = harness([], undefined, { now: () => now });
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 817, vt: 230, buttons: 0,
+    mx: manual ? 1 : 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 219,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 },
+    me: { mode: 'plane', pos: [0, 300, 0], health: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [60, 300, 0], jumpHeld: false });
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  assert.equal(fake.client.input.sample().buttons & 4, 0);
+  assert.equal(h.api.runtime.agent.dropFraction, 1 / 3,
+    'the 400 m mark is a fallback until terrain loads');
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [192, 193]) for (const col of [207, 208])
+    heights[row * 385 + col] = 2;
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  const beforeDoor = fake.client.input.sample();
+  assert.equal(beforeDoor.buttons & 4, 0, 'Jump waits for the door to open');
+  assert.equal(h.api.runtime.agent.dropFraction, 0.55, 'land beats the central water sample');
+  fake.client.latest.t = 230;
+  const dropped = fake.client.input.sample();
+  assert.equal(dropped.buttons & 4, 4, 'the agent sends a fresh Jump press');
+  assert.equal(dropped.buttons & 1, 0, 'deployment never blind-fires');
+  assert.equal(send(fake, [dropped])[0].buttons & 4, 4,
+    'the deployment pulse survives outgoing frame handling');
+  assert.equal(h.api.trace().agentDecisions.at(-1).action, 'drop');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'plane-path');
+  assert.equal(fake.client.input.sample().buttons & 4, 0, 'Jump is released next frame');
+  fake.client.predictor.ps.mode = 'freefall';
+  fake.client.predictor.ps.pos = [120, 200, 0];
+  const steering = fake.client.input.sample();
+  assert.ok(steering.mx < -0.9 && Math.abs(steering.mz) < 1e-9);
+  assert.equal(h.api.inspect().agent.action, 'air-steer');
+  fake.client.predictor.ps.mode = 'parachute';
+  manual = true;
+  const overridden = fake.client.input.sample();
+  assert.equal(overridden.mx, 1, 'manual air movement takes priority');
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  now += 1000;
+  manual = false;
+  fake.client.predictor.ps.mode = 'plane';
+  fake.client.predictor.ps.jumpHeld = true;
+  assert.equal(fake.client.input.sample().buttons & 4, 0,
+    'a held Jump cannot create a second rising edge');
+  h.api.destroy();
+});
+
+test('default agent waits until the plane has traveled 400 m before dropping', () => {
+  for (const length of [1200, 3000]) {
+    const h = harness();
+    assert.equal(h.api.options.agent, true);
+    const fake = rageClient();
+    fake.client.input.sample = () => frame({ s: 822, vt: 230, buttons: 0, mx: 0, mz: 0 });
+    fake.client.latest = { phase: 'plane', t: 230,
+      plane: { start: [-length / 2, 0], end: [length / 2, 0], departTick: 100 } };
+    Object.assign(fake.client.predictor.ps,
+      { mode: 'plane', pos: [-length / 2 + 399, 300, 0], jumpHeld: false });
+    fake.client.remoteFrames = [];
+    attach(h, fake);
+    h.api.setOptions({ agent: true });
+    const waiting = fake.client.input.sample();
+    assert.equal(waiting.buttons & 4, 0);
+    assert.equal(h.api.trace().agentDecisions.at(-1).route.plannedDropDistanceMeters, 400);
+    fake.client.predictor.ps.pos = [-length / 2 + 400, 300, 0];
+    const dropped = fake.client.input.sample();
+    assert.equal(dropped.buttons & 4, 4);
+    assert.equal(h.api.trace().agentDecisions.at(-1).route.planeDistanceMeters, 400);
+    h.api.destroy();
+  }
+});
+
+test('combat agent finds narrow land between coarse plane samples', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 818, vt: 230, buttons: 0, mx: 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 230,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [36, 300, 0], jumpHeld: false });
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [192, 193]) for (const col of [199, 200])
+    heights[row * 385 + col] = 2;
+  heights[192 * 385 + 282] = NaN;
+  attach(h, fake);
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  h.api.setOptions({ agent: true });
+  const drop = fake.client.input.sample();
+  assert.equal(drop.buttons & 4, 4);
+  assert.ok(h.api.runtime.agent.dropFraction > 0.51 &&
+    h.api.runtime.agent.dropFraction < 0.54);
+  assert.equal(h.api.runtime.agent.dropPlan, 'sampled-land');
+  assert.equal(h.api.runtime.agent.dropLateral, 0);
+  assert.ok(h.api.runtime.agent.dropTerrain > 0.1);
+  h.api.destroy();
+});
+
+test('combat agent steers to nearby land beside an all-water plane path', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 819, vt: 230, buttons: 0, mx: 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 230,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [0, 300, 0], jumpHeld: false });
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [200, 201]) for (const col of [192, 193])
+    heights[row * 385 + col] = 2;
+  attach(h, fake);
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  h.api.setOptions({ agent: true });
+  const drop = fake.client.input.sample();
+  assert.equal(drop.buttons & 4, 4);
+  assert.equal(h.api.runtime.agent.dropPlan, 'sampled-land');
+  assert.equal(h.api.runtime.agent.dropLateral, 32);
+  assert.ok(Math.abs(h.api.runtime.agent.dropTarget[0]) < 5);
+  assert.ok(Math.abs(h.api.runtime.agent.dropTarget[1] - 32) < 1);
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.lateralMeters, 32);
+  fake.client.predictor.ps.mode = 'freefall';
+  const steering = fake.client.input.sample();
+  assert.ok(Math.abs(steering.mx) < 0.1 && steering.mz < -0.9);
+  h.api.destroy();
+});
+
+test('combat agent favors reachable land ahead of the plane over distant land behind', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 820, vt: 230, buttons: 0, mx: 0, mz: 0 });
+  fake.client.latest = { phase: 'plane', t: 230,
+    plane: { start: [-600, 0], end: [600, 0], departTick: 100 } };
+  Object.assign(fake.client.predictor.ps,
+    { mode: 'plane', pos: [240, 300, 0], jumpHeld: false });
+  const heights = new Float32Array(385 * 385).fill(-1.3);
+  for (const row of [192, 193]) for (const col of [192, 193, 267, 268])
+    heights[row * 385 + col] = 2;
+  attach(h, fake);
+  h.api.runtime.physics.getCollisionWorld = () => ({ terrain: { heights } });
+  h.api.setOptions({ agent: true });
+  const waiting = fake.client.input.sample();
+  assert.equal(waiting.buttons & 4, 0);
+  assert.ok(h.api.runtime.agent.dropFraction > 0.7,
+    'the drop plan stays ahead of the current plane position');
+  assert.ok(h.api.runtime.agent.dropTarget[0] > 280);
+  h.api.destroy();
+});
+
+test('combat agent leaves a manual F/E interaction on the wire', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 815, buttons: 64, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  attach(h, fake);
+  h.api.setOptions({ agent: true, stealth: true });
+  const input = fake.client.input.sample();
+  assert.equal(input.buttons & 64, 64);
+  assert.equal(input.buttons & 1, 0);
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  assert.equal(send(fake, [input])[0].buttons & 64, 64);
+  h.api.destroy();
+});
+
+test('combat agent aims at nearby matching ammo before issuing Interact', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 812, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  fake.client.predictor.slots[0].mag = 0;
+  fake.client.predictor.ammo.light = 0;
+  fake.client.remoteFrames = [];
+  fake.client.loot = { items: new Map([['ammo-1',
+    { id: 'ammo-1', kind: 'ammo', ammo: 'light', pos: [0, 0, 0] }]]) };
+  fake.client.target = { target: null };
+  attach(h, fake);
+  h.api.setOptions({ agent: true, ammo: true });
+  const first = fake.client.input.sample();
+  assert.equal(first.buttons & 64, 0, 'the first frame turns toward the item');
+  let pickup = null;
+  for (let i = 0; i < 16; i++) {
+    pickup = fake.client.input.sample();
+    if (pickup.buttons & 64) break;
+  }
+  assert.equal(pickup.buttons & 64, 64,
+    'outgoing aim requests Interact for an item at the feet even with a stale HUD target');
+  assert.equal(pickup.buttons & 1, 0, 'pickup suppresses Fire');
+  assert.equal(h.api.inspect().agent.action, 'loot-interact');
+  assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'item-ray');
+  fake.client.loot.items.clear();
+  fake.client.target = { target: null };
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  const empty = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'no-ammo');
+  assert.equal(empty.mx, 0);
+  assert.equal(empty.mz, 0, 'without ammo the agent does not rush an opponent');
+  delete fake.client.predictor.ammo.light;
+  const unknownReserve = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'no-ammo');
+  assert.equal(unknownReserve.mz, 0,
+    'an unavailable reserve reading cannot make an empty weapon rush an opponent');
+  h.api.destroy();
+});
+
+test('combat agent replenishes a low reserve before it is empty without abandoning a nearby fight', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 816, buttons: 0, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  Object.assign(fake.client.predictor.activeStats,
+    { class: 'rifle', rangeEnd: 90, magSize: 30 });
+  fake.client.predictor.slots[0].mag = 30;
+  fake.client.predictor.ammo.light = 2;
+  fake.client.loot = { items: new Map([['ammo-2',
+    { id: 'ammo-2', kind: 'ammo', ammo: 'light', pos: [0, 0, -5] }]]) };
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  const scavenging = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'loot-travel');
+  assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'ammo');
+  assert.ok(scavenging.mz > 0.9, 'the agent moves toward observed matching ammo');
+  assert.equal(scavenging.buttons & 64, 0, 'it does not interact outside item reach');
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  const defending = fake.client.input.sample();
+  assert.equal(h.api.inspect().agent.action, 'engage');
+  assert.equal(defending.mx, 0);
+  assert.equal(defending.mz, 0, 'a nearby opponent takes priority over reserve ammo');
+  h.api.runtime.physics.getCollisionWorld = () => ({});
+  h.api.runtime.physics.hasLineOfSight = () => false;
+  fake.client.input.sample();
+  assert.equal(h.api.runtime.agent.goal?.kind, 'opponent',
+    'an observed nearby threat still takes priority when its shot is covered');
+  h.api.destroy();
+});
+
+test('combat agent uses observed recovery supplies only while safe and preserves manual recovery', () => {
+  const h = harness();
+  const fake = rageClient();
+  let buttons = 0;
+  fake.client.input.sample = () => frame({ s: 824, buttons, mx: 0, mz: 0 });
+  Object.assign(fake.client.predictor.ps, { mode: 'ground', grounded: true });
+  Object.assign(fake.client.predictor,
+    { health: 45, armor: 50, plates: 2, medkits: 1, healing: 0, plating: 0 });
+  fake.client.remoteFrames = [];
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+
+  assert.equal(fake.client.predictorReady, true);
+  assert.equal(fake.client.predictor.ps.grounded, true);
+  assert.equal(fake.client.predictor.health, 45);
+  assert.equal(fake.client.predictor.medkits, 1);
+
+  const heal = fake.client.input.sample();
+  assert.equal(heal.buttons & 512, 512);
+  assert.equal(heal.buttons & 1, 0, 'recovery does not fire');
+  assert.equal(send(fake, [heal])[0].buttons & 512, 512, 'Heal reaches outgoing frames');
+  assert.equal(h.api.inspect().agent.action, 'heal');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.api.trace().agentDecisions.at(-1).route)),
+    { source: 'normal-input', health: 45, armor: 50, plates: 2, medkits: 1 });
+  assert.equal(fake.client.input.sample().buttons & 512, 0,
+    'the agent does not hold Heal while waiting for prediction');
+  h.api.runtime.agent.nextRecoveryAt = 0;
+  assert.equal(fake.client.input.sample().buttons & 512, 0,
+    'a failed or unobserved Heal request is not retried without a state change');
+
+  fake.client.predictor.healing = 3.5;
+  assert.equal(fake.client.input.sample().buttons & (1 | 256 | 512), 0,
+    'the healing channel keeps firing and other recovery actions off');
+  assert.equal(h.api.inspect().agent.action, 'recovering');
+  fake.client.predictor.healing = 0;
+  fake.client.predictor.health = 100;
+  h.api.runtime.agent.nextRecoveryAt = 0;
+  const plate = fake.client.input.sample();
+  assert.equal(plate.buttons & 256, 256);
+  assert.equal(send(fake, [plate])[0].buttons & 256, 256, 'Plate reaches outgoing frames');
+  assert.equal(h.api.inspect().agent.action, 'plate');
+
+  fake.client.predictor.plating = 0.7;
+  assert.equal(fake.client.input.sample().buttons & (1 | 256 | 512), 0);
+  fake.client.predictor.plating = 0;
+  h.api.runtime.agent.nextRecoveryAt = 0;
+  assert.equal(fake.client.input.sample().buttons & 256, 0,
+    'a Plate request is not repeated before armor or plate stock changes');
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20] }) }];
+  assert.equal(fake.client.input.sample().buttons & (256 | 512), 0,
+    'a nearby opponent preempts automatic recovery');
+  fake.client.remoteFrames = [];
+  fake.client.latest.storm = { state: 'holding', center: [100, 0], radius: 10 };
+  assert.equal(fake.client.input.sample().buttons & (256 | 512), 0,
+    'leaving the storm takes priority over recovery');
+  delete fake.client.latest.storm;
+  buttons = 512;
+  const manual = fake.client.input.sample();
+  assert.equal(manual.buttons & 512, 512, 'manual Heal is preserved');
+  assert.equal(h.api.inspect().agent.action, 'manual-override');
+  h.api.destroy();
+});
+
+test('combat agent picks a nearby weapon with outgoing aim and equips the second slot', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.input.sample = () => frame({ s: 818, buttons: 0, mx: 0, mz: 0 });
+  fake.client.predictor.slots[0] = { weapon: 'sidearm', rarity: 'common', mag: 10 };
+  fake.client.predictor.slots[1] = null;
+  fake.client.predictor.activeStats.class = 'pistol';
+  fake.client.remoteFrames = [];
+  fake.client.loot = { items: new Map([['weapon-1', { id: 'weapon-1', kind: 'weapon',
+    weapon: 'vanguard', rarity: 'rare', pos: [0, 0, -1] }]]) };
+  fake.client.target = { target: null };
+  attach(h, fake);
+  h.api.setOptions({ agent: true });
+  let clear = false;
+  h.api.runtime.physics.getCollisionWorld = () => ({});
+  h.api.runtime.physics.hasLineOfSight = (world, from, to) =>
+    clear || Math.abs(to[1] - 0.15) > 0.01;
+  const detour = fake.client.input.sample();
+  assert.ok(Math.hypot(detour.mx, detour.mz) > 0.9,
+    'an item behind cover triggers a side route');
+  assert.equal(h.api.inspect().agent.action, 'loot-detour');
+  for (let i = 0; i < 11; i++)
+    assert.equal(fake.client.input.sample().buttons & 64, 0,
+      'blocked item rays must not trigger Interact');
+  clear = true;
+  let pickup;
+  for (let i = 0; i < 16; i++) {
+    pickup = fake.client.input.sample();
+    if (pickup.buttons & 64) break;
+  }
+  assert.equal(pickup.buttons & 64, 64, 'the outgoing item ray requests pickup');
+  assert.equal(h.api.trace().agentDecisions.at(-1).goal.kind, 'weapon');
+  assert.equal(send(fake, [pickup])[0].buttons & 64, 64);
+  fake.client.loot.items.clear();
+  fake.client.predictor.slots[1] = { weapon: 'vanguard', rarity: 'rare', mag: 30 };
+  const equip = fake.client.input.sample();
+  assert.equal(equip.buttons & 128, 128, 'a non-pistol in slot two is equipped');
+  assert.equal(equip.buttons & 1, 0, 'the equip frame does not Fire');
+  assert.equal(send(fake, [equip])[0].buttons & 128, 128);
+  assert.equal(fake.client.input.sample().buttons & 128, 0,
+    'Swap is released to create a fresh edge if a retry is needed');
+  fake.client.predictor.active = 1;
+  fake.client.predictor.activeStats.class = 'rifle';
+  assert.equal(fake.client.input.sample().buttons & 128, 0);
+  h.api.destroy();
+});
+
+test('combat agent swaps to a loaded backup when the active weapon has no ammo', () => {
+  for (const backupMag of [6, 0]) {
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => frame({ s: 820, buttons: 0, mx: 0, mz: 0 });
+    Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+    fake.client.predictor.activeStats.class = 'rifle';
+    fake.client.predictor.slots = [
+      { weapon: 'vanguard', mag: 0 }, { weapon: 'hornet', mag: backupMag }
+    ];
+    fake.client.predictor.ammo.light = 0;
+    attach(h, fake);
+    h.api.setOptions({ agent: true });
+    const input = fake.client.input.sample();
+    if (backupMag > 0) {
+      assert.equal(input.buttons & 128, 128, 'a loaded backup gets equipped before looting');
+      assert.equal(send(fake, [input])[0].buttons & 128, 128, 'Swap reaches the server');
+      assert.equal(h.api.inspect().agent.action, 'equip');
+      assert.equal(h.api.trace().agentDecisions.at(-1).route.source, 'loaded-backup');
+    } else {
+      assert.equal(input.buttons & 128, 0, 'an empty backup is not equipped');
+      assert.equal(h.api.inspect().agent.action, 'no-ammo');
+    }
+    h.api.destroy();
+  }
+});
+
+test('authoritative shot-count divergence disables adaptive hip fire', () => {
+  const h = harness();
+  const fake = rageClient();
+  Object.assign(fake.client.predictor.ps, { vel: [0, 0, 0], grounded: true });
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats,
+    { hipSpread: 2, adsSpread: 0.1, moveSpread: 1 });
+  fake.client.ingestEvents = snapshot => snapshot;
+  attach(h, fake);
+  h.api.setOptions({ rage: true, hipFire: true });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 0);
+  h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
+    sequence: 23, weapon: { shots: 1 } });
+  fake.client.ingestEvents({ t: 100, me: { ack: 23, shots: 5 }, events: [] });
+  assert.equal(h.api.inspect().seedSync.status, 'count-diverged');
+  assert.equal(h.api.trace().serverSnapshots.at(-1).acknowledgedShot.delta, 4);
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 2, 2);
+  h.api.destroy();
+});
+
+test('shot-count divergence skips seeded spread correction until ACK alignment returns', () => {
+  for (const stealth of [true, false]) {
+    let now = 1000;
+    const h = harness([], undefined, { now: () => now });
+    const fake = rageClient();
+    const spread = 1.5 * Math.PI / 180;
+    fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -550] }) }];
+    fake.client.predictor.slots[0].weapon = 'longbow';
+    fake.client.predictor.activeStats.rangeEnd = 600;
+    fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+      fired: true, dirs: [[-Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+        Math.sin(input.pitch), -Math.cos(input.yaw + spread) * Math.cos(input.pitch)]]
+    } });
+    fake.client.ingestEvents = snapshot => snapshot;
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth, agent: false, range: 600, point: 'head' });
+    h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
+      sequence: 23, weapon: { shots: 1 } });
+    fake.client.ingestEvents({ t: 100, me: { ack: 23, shots: 5 }, events: [] });
+    assert.equal(h.api.inspect().seedSync.status, 'count-diverged');
+    const first = frame({ s: 30, buttons: 1, mx: 0, mz: 0 });
+    fake.client.predictor.predict(first);
+    const unseeded = send(fake, [first])[0];
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(unseeded.buttons & 1, 1, 'a predicted Fire remains on the wire');
+    assert.equal(decision.correctionApplied, false);
+    assert.equal(decision.correctionSkipReason, 'ack-shot-count-mismatch');
+    assert.equal(decision.seedSyncStatus, 'count-diverged');
+    const [x, y, z] = decision.target.point;
+    const [ox, oy, oz] = decision.target.origin;
+    close(unseeded.yaw, Math.atan2(-(x - ox), -(z - oz)));
+    close(unseeded.pitch, Math.atan2(y - oy, Math.hypot(x - ox, z - oz)));
+
+    now += 200;
+    h.api.runtime.trace.localShots.push({ match: h.api.runtime.trace.match,
+      sequence: 31, weapon: { shots: 6 } });
+    fake.client.ingestEvents({ t: 101, me: { ack: 31, shots: 6 }, events: [] });
+    assert.equal(h.api.inspect().seedSync.status, 'count-aligned');
+    const second = frame({ s: 32, buttons: 1, mx: 0, mz: 0 });
+    fake.client.predictor.predict(second);
+    const corrected = send(fake, [second])[0];
+    const resumed = h.api.trace().aimDecisions.at(-1);
+    assert.equal(corrected.buttons & 1, 1);
+    assert.equal(resumed.correctionApplied, true,
+      `${stealth ? 'bounded' : 'direct'} path resumes correction after ACK alignment`);
+    assert.equal(resumed.correctionSkipReason, null);
+    h.api.destroy();
+  }
+});
+
+test('fast fire takes a correctable close shot during ADS ramp but waits when spread is too wide', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -10] }) }];
+  fake.client.predictor.ps.grounded = true;
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats, {
+    hipSpread: 3.2, adsSpread: 0.12, moveSpread: 1.6, rangeEnd: 90
+  });
+  const spread = 3 * Math.PI / 180;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: !!(input.buttons & 1), dirs: [[
+      -Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+      Math.sin(input.pitch),
+      -Math.cos(input.yaw + spread) * Math.cos(input.pitch)
+    ]]
+  } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, hipFire: false, point: 'chest' });
+  send(fake, [frame({ s: 610, buttons: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 3, 3, 'Fire and ADS are both requested before full ADS');
+  fake.client.predictor.predict(sampled);
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 3, 3);
+  assert.ok(Math.abs(outgoing.yaw) <= 8 * Math.PI / 180);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.ok(decision.geometry.predictedOutgoing.minMeters < 0.01);
+  assert.equal(decision.sampled.earlyAds, true);
+  assert.equal(decision.correctionApplied, true);
+
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -100] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0,
+    'a distant shot keeps the full ADS accuracy gate');
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -10] }) }];
+  Object.assign(fake.client.predictor.activeStats, { hipSpread: 8, adsSpread: 0, moveSpread: 4 });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0,
+    'an uncorrectable early spread remains held');
+  h.api.destroy();
+});
+
+test('outgoing aim remains aligned when the sampled camera kicks', () => {
+  const h = harness();
+  const fake = rageClient();
+  let cameraYaw = 0, cameraPitch = 0, sequence = 820;
+  fake.client.input.sample = () => frame({
+    s: sequence++, buttons: 0, yaw: cameraYaw, pitch: cameraPitch
+  });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  let aimed;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const sampled = fake.client.input.sample();
+    aimed = send(fake, [sampled])[0];
+    if (aimed.buttons & 1) break;
+  }
+  assert.equal(aimed.buttons & 1, 1);
+  cameraYaw = 0.12;
+  cameraPitch = 0.08;
+  const kicked = fake.client.input.sample();
+  const corrected = send(fake, [kicked])[0];
+  assert.equal(corrected.buttons & 1, 1);
+  close(corrected.yaw, aimed.yaw, 0.001);
+  close(corrected.pitch, aimed.pitch, 0.001);
+  close(kicked.yaw, cameraYaw);
+  close(kicked.pitch, cameraPitch);
+  h.api.destroy();
+});
+
+test('fast fire corrects predicted moving spread at long range without aim jitter', () => {
+  const h = harness();
+  const fake = rageClient();
+  const spread = 1.6 * Math.PI / 180;
+  fake.client.predictor.slots[0].weapon = 'longbow';
+  fake.client.predictor.activeStats.rangeEnd = 35;
+  fake.client.predictor.activeStats.moveSpread = 4;
+  fake.client.predictor.activeStats.rpm = 45;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: true, dirs: [[
+      -Math.sin(input.yaw + spread) * Math.cos(input.pitch),
+      Math.sin(input.pitch),
+      -Math.cos(input.yaw + spread) * Math.cos(input.pitch)
+    ]]
+  } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, range: 600, point: 'auto' });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2, 0, -550] }) }];
+  let input, outgoing;
+  for (let sequence = 840; sequence < 848; sequence++) {
+    input = frame({ ...fake.client.input.sample('sample-argument'), s: sequence, mx: 1, mz: 0 });
+    if (input.buttons & 1) fake.client.predictor.predict(input);
+    outgoing = send(fake, [input])[0];
+    if (outgoing.buttons & 1) break;
+  }
+  assert.equal(outgoing.buttons & 1, 1);
+  assert.equal(outgoing.buttons & 2, 2);
+  assert.equal(h.api.runtime.compensated, 1);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.ok(decision.targetDistance > 500 && decision.targetDistance < 600);
+  assert.equal(decision.weaponRangeEnd, 35);
+  assert.equal(decision.weaponId, 'longbow');
+  assert.equal(decision.weapon.idSource, 'slot');
+  assert.equal(decision.localAds, 1);
+  assert.equal(decision.movingInput, true);
+  assert.equal(decision.adsRequested, true);
+  assert.equal(decision.localShotPredicted, true);
+  assert.equal(decision.correctionApplied, true);
+  assert.equal(decision.fireSent, true);
+  assert.equal(decision.target.aimPart, 'chest');
+  assert.equal(decision.weapon.stats.rangeEnd, 35);
+  assert.equal(decision.weapon.stats.moveSpread, 4);
+  assert.equal(decision.weapon.stats.rpm, 45);
+  assert.ok(decision.geometry.predictedInput.meanMeters > 10,
+    'moving spread would miss the selected point without correction');
+  assert.ok(decision.geometry.predictedOutgoing.meanMeters < 0.01,
+    'the corrected local ray reaches the selected point');
+  const correctedDirection = [
+    -Math.sin(outgoing.yaw + spread) * Math.cos(outgoing.pitch),
+    Math.sin(outgoing.pitch),
+    -Math.cos(outgoing.yaw + spread) * Math.cos(outgoing.pitch)
+  ];
+  const toChest = [2, 1.21 - 1.62, -550];
+  const distance = Math.hypot(...toChest);
+  toChest.forEach((value, index) => close(correctedDirection[index], value / distance, 1e-6));
+  const before = worldMovement(input), after = worldMovement(outgoing);
+  close(after[0], before[0]);
+  close(after[1], before[1]);
+  h.api.destroy();
+});
+
+test('a moving target invalidates ready aim before prediction fires again', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  for (let sequence = 900; sequence < 910; sequence++) {
+    const sampled = fake.client.input.sample('sample-argument');
+    send(fake, [frame({ ...sampled, s: sequence })]);
+    if (h.api.runtime.outgoingAim.ready) break;
+  }
+  assert.equal(h.api.runtime.outgoingAim.ready, true);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [-10, 0, -2] }) }];
+  const changed = fake.client.input.sample('sample-argument');
+  assert.equal(changed.buttons & 1, 0, 'stale ready state cannot fire at the old position');
+  assert.equal(send(fake, [changed])[0].buttons & 1, 0,
+    'an outgoing turn larger than the per-frame limit still holds Fire');
+  h.api.destroy();
+});
+
+test('fast fire predicts and sends a distant shot after a small target movement', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, range: 600, point: 'auto' });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2, 0, -550] }) }];
+  const first = fake.client.input.sample('sample-argument');
+  send(fake, [frame({ ...first, s: 920 })]);
+  assert.equal(h.api.runtime.outgoingAim.ready, true);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2.35, 0, -550] }) }];
+  const moved = fake.client.input.sample('sample-argument');
+  assert.equal(moved.buttons & 1, 1,
+    'small moving-target drift may be predicted before the final outgoing aim');
+  const aligned = send(fake, [frame({ ...moved, s: 921 })])[0];
+  assert.equal(aligned.buttons & 1, 1,
+    'the final outgoing rewrite rechecks the current target and sends the aligned shot');
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1);
+  h.api.destroy();
+});
+
+test('Rage drops unpredicted Fire when the target disappears after input sampling', () => {
+  for (const stealth of [true, false]) {
+    const h = harness();
+    const fake = attach(h, rageClient());
+    h.api.setOptions({ rage: true, stealth, rapidFire: true });
+    for (let sequence = 970; sequence < 974; sequence++) {
+      send(fake, [frame({ s: sequence, buttons: 0 })]);
+    }
+    const sampled = fake.client.input.sample('sample-argument');
+    assert.equal(sampled.buttons & 1, 1);
+    fake.client.remoteFrames = [];
+    const outgoing = send(fake, [sampled])[0];
+    assert.equal(outgoing.buttons & 1, 0, `stale ${stealth ? 'stealth' : 'direct'} target`);
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(decision.fireSent, false);
+    assert.equal(decision.sampled.target.index, 1,
+      'the trace preserves the sample-time target after it disappears at send time');
+    assert.equal(decision.target, null);
+    h.api.destroy();
+  }
+});
+
+test('a predicted Rage shot keeps Fire and the sampled target when snapshots change before send', () => {
+  for (const stealth of [true, false]) {
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => Object.freeze(frame({ s: undefined, vt: undefined, buttons: 16 }));
+    fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+      weapon: { fired: !!(input.buttons & 1), dirs: [[0, 0, -1]] } });
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth, rapidFire: true });
+    if (stealth) for (let sequence = 1200; sequence < 1204; sequence++)
+      send(fake, [frame({ s: sequence, buttons: 0 })]);
+    const sampled = fake.client.input.sample();
+    assert.equal(sampled.buttons & 1, 1);
+    const predicted = frame({ ...sampled, s: 1210, vt: 100 });
+    fake.client.predictor.predict(predicted);
+    fake.client.remoteFrames = [];
+    const outgoing = send(fake, [predicted])[0];
+    assert.equal(outgoing.buttons & 1, 1,
+      `the ${stealth ? 'bounded' : 'direct'} send keeps the predicted shot`);
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(decision.localShotPredicted, true);
+    assert.equal(decision.fireSent, true);
+    assert.equal(decision.sampled.target.index, 1,
+      'sample context is tied to the real sequence after the game adds it');
+    assert.equal(decision.target.index, 1,
+      'the sampled target is retained for this already predicted shot');
+    h.api.destroy();
+  }
+});
+
+test('a retained sampled target uses the predicted shot eye for outgoing correction', () => {
+  for (const stealth of [true, false]) {
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => Object.freeze(frame({ s: undefined, vt: undefined,
+      buttons: 16, mx: 0, mz: 0 }));
+    fake.client.predictor.predict = input => ({ eye: [0.3, 1.62, 0],
+      weapon: { fired: !!(input.buttons & 1), dirs: [[0, 0, -1]] } });
+    attach(h, fake);
+    h.api.setOptions({ rage: true, stealth, rapidFire: true, point: 'head' });
+    if (stealth) for (let sequence = 1200; sequence < 1204; sequence++)
+      send(fake, [frame({ s: sequence, buttons: 0, mx: 0, mz: 0 })]);
+    const sampled = fake.client.input.sample();
+    assert.equal(sampled.buttons & 1, 1);
+    const predicted = frame({ ...sampled, s: 1212, vt: 100 });
+    fake.client.predictor.predict(predicted);
+    fake.client.remoteFrames = [];
+    const outgoing = send(fake, [predicted])[0];
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(outgoing.buttons & 1, 1);
+    close(decision.sampled.target.origin[0], 0);
+    close(decision.target.origin[0], 0.3);
+    close(decision.target.distance, Math.hypot(1.7, 0.04, 10));
+    const ray = [-Math.sin(outgoing.yaw) * Math.cos(outgoing.pitch),
+      Math.sin(outgoing.pitch), -Math.cos(outgoing.yaw) * Math.cos(outgoing.pitch)];
+    const travel = -10 / ray[2];
+    const impact = [0.3 + travel * ray[0], 1.62 + travel * ray[1]];
+    assert.ok(Math.abs(impact[0] - 2) < 0.14 && Math.abs(impact[1] - 1.66) < 0.14,
+      `${stealth ? 'bounded' : 'direct'} correction must land in the captured head box`);
+    h.api.destroy();
+  }
+});
+
+test('trace measures target movement between sampling and outgoing aim', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  for (let sequence = 980; sequence < 984; sequence++) {
+    const sampled = fake.client.input.sample('sample-argument');
+    send(fake, [frame({ ...sampled, s: sequence })]);
+  }
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 1);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [2.4, 0, -10] }) }];
+  send(fake, [sampled]);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.sampled.target.index, decision.target.index);
+  close(decision.sampled.selectionDriftMeters, 0.4, 1e-9);
+  assert.equal(decision.sampled.delayMs, 0);
+  h.api.destroy();
 });
 
 test('aim hook errors hold Fire instead of sending an unassisted shot', () => {
@@ -606,6 +1711,26 @@ test('aim hook errors hold Fire instead of sending an unassisted shot', () => {
   h.api.destroy();
 });
 
+test('a send-time aim error preserves an already predicted Rage shot', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: !!(input.buttons & 1), dirs: [[0, 0, -1]] } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true });
+  for (let sequence = 1300; sequence < 1304; sequence++)
+    send(fake, [frame({ s: sequence, buttons: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 1);
+  const predicted = frame({ ...sampled, s: 1310 });
+  fake.client.predictor.predict(predicted);
+  Object.defineProperty(fake.client, 'remoteFrames', { get() { throw new Error('lost snapshots'); } });
+  const outgoing = send(fake, [predicted])[0];
+  assert.equal(outgoing.buttons & 1, 1);
+  assert.match(h.api.runtime.error, /Aim hook: lost snapshots/);
+  h.api.destroy();
+});
+
 test('Rage scans behind the player and samples autofire with ADS', () => {
   const h = harness();
   const fake = attach(h, rageClient());
@@ -615,11 +1740,11 @@ test('Rage scans behind the player and samples autofire with ADS', () => {
   ];
   const sampled = fake.client.input.sample('sample-argument');
   assert.notEqual(sampled, fake.sampled);
-  assert.equal(fake.sampled.buttons, 16 | 64 | 8);
+  assert.equal(fake.sampled.buttons, 16 | 8);
   assert.equal(sampled.buttons & 1, 1);
   assert.equal(sampled.buttons & 2, 2);
   assert.equal(sampled.buttons & 16, 0);
-  assert.equal(sampled.buttons & 64, 64);
+  assert.equal(sampled.buttons & 64, 0);
   assert.equal(sampled.buttons & 8, 8);
   send(fake, [sampled]);
   assert.equal(h.api.runtime.target.index, 2);
@@ -627,7 +1752,7 @@ test('Rage scans behind the player and samples autofire with ADS', () => {
   assert.equal(h.api.runtime.compensated, 0);
 });
 
-test('Rage prefers a nearer aim angle and stays inside useful weapon range', () => {
+test('Rage prefers a nearer aim angle and honors the range slider beyond rangeEnd', () => {
   const h = harness();
   const fake = attach(h, rageClient());
   h.api.setOptions({ rage: true, range: 600 });
@@ -640,9 +1765,67 @@ test('Rage prefers a nearer aim angle and stays inside useful weapon range', () 
   const sampled = fake.client.input.sample('sample-argument');
   send(fake, [sampled]);
   assert.equal(h.api.runtime.target.index, 1, 'the reachable target near the current aim wins');
-  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -60] }) }];
-  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 0,
-    'Rage does not spend ammunition beyond useful sidearm range');
+  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -550] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1,
+    'weapon rangeEnd does not impose an extra client cutoff');
+  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, -0.04, -600] }) }];
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1,
+    'a target exactly 600 m from the firing eye is selectable');
+  fake.client.remoteFrames = [{ snap: opponent(3, { p: [0, 0, -610] }) }];
+  const outOfRange = fake.client.input.sample('sample-argument');
+  assert.equal(outOfRange.buttons & 1, 0, 'the selected 600 m limit still applies');
+  assert.equal(outOfRange.buttons & 2, 0, 'Rage releases scope without a target');
+  assert.equal(outOfRange.buttons & 16, 16, 'sprint remains available while travelling');
+  const gate = h.api.trace().fireGates.at(-1);
+  assert.equal(gate.reason, 'no-target');
+  assert.equal(gate.scan.closest.reason, 'range');
+  assert.ok(gate.scan.closest.distance > 600);
+});
+
+test('Rage prefers a nearer weapon-range target over a distant target near the crosshair', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, range: 600 });
+  fake.client.predictor.activeStats.rangeEnd = 90;
+  fake.client.remoteFrames = [
+    { snap: opponent(1, { p: [0, 0, -250] }) },
+    { snap: opponent(2, { p: [38, 0, -46] }) }
+  ];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.index, 2);
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -250] }) }];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.index, 1,
+    'long shots remain available when no closer target exists');
+  h.api.destroy();
+});
+
+test('Rage scopes when a target appears and holds ADS through the weapon ramp', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true });
+  const weapon = fake.client.predictor;
+  weapon.ws.ads = 0;
+  fake.client.remoteFrames = [];
+  const waiting = fake.client.input.sample('sample-argument');
+  assert.equal(waiting.buttons & 2, 0);
+  assert.equal(waiting.buttons & 16, 16);
+  assert.equal(waiting.buttons & 1, 0);
+  fake.client.remoteFrames = [{ snap: opponent() }];
+  weapon.ws.ads = 0.75;
+  const ramping = fake.client.input.sample('sample-argument');
+  assert.equal(ramping.buttons & 2, 2);
+  assert.equal(ramping.buttons & 1, 0);
+  for (let sequence = 960; sequence < 963; sequence++) {
+    send(fake, [frame({ ...ramping, s: sequence })]);
+  }
+  weapon.ws.ads = 0.995;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 1, 1);
+  const counts = h.api.trace().counters.gateReasons;
+  assert.equal(counts['no-target'], 1);
+  assert.equal(counts['ads-ramp'], 1);
+  assert.equal(counts['fire-sampled'], 1);
+  h.api.destroy();
 });
 
 test('Rage pulses semi, pump, and bolt triggers while auto holds Fire without manufacturing ammo', () => {
@@ -692,6 +1875,61 @@ test('auto reload sends the server reload input without changing predicted ammun
   h.api.setOptions({ ammo: false });
   fake.client.predictor.ammo.light = 20;
   assert.equal(fake.client.input.sample('sample-argument').buttons & 32, 0);
+});
+
+test('Rage keeps sprint available and releases automatic ADS during reload or empty reserve', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, ammo: true });
+  const predictor = fake.client.predictor;
+  predictor.slots[0].mag = 0;
+  const reload = fake.client.input.sample('sample-argument');
+  assert.equal(reload.buttons & 32, 32);
+  assert.equal(reload.buttons & (1 | 2), 0);
+  assert.equal(reload.buttons & 16, 16);
+  assert.equal(h.api.runtime.sampleGate.reason, 'reload');
+  predictor.ws.reload = 1;
+  const duringReload = fake.client.input.sample('sample-argument');
+  assert.equal(duringReload.buttons & (1 | 2 | 32), 0);
+  assert.equal(duringReload.buttons & 16, 16);
+  predictor.ws.reload = 0;
+  predictor.ammo.light = 0;
+  const empty = fake.client.input.sample('sample-argument');
+  assert.equal(empty.buttons & (1 | 2 | 32), 0);
+  assert.equal(empty.buttons & 16, 16);
+  assert.equal(h.api.runtime.sampleGate.reason, 'no-ammo');
+  h.api.destroy();
+});
+
+test('ammo assist pulses Interact only for visible matching ammo below the reserve cap', () => {
+  const h = harness();
+  const fake = attach(h, rageClient({ target: { target: { kind: 'item', id: 'a1' } },
+    loot: { items: new Map([['a1', { kind: 'ammo', ammo: 'light', amount: 30, pos: [0, 0, -1] }]]) } }));
+  h.api.setOptions({ rage: true, ammo: true });
+  const pickup = fake.client.input.sample('sample-argument');
+  assert.equal(pickup.buttons & 64, 64);
+  assert.equal(pickup.buttons & 1, 0);
+  assert.equal(pickup.buttons & 16, 16);
+  assert.equal(h.api.runtime.sampleGate.reason, 'ammo-pickup');
+  assert.equal(h.api.trace().ammoPickups[0].reserveBefore, 50);
+  assert.equal(h.api.trace().ammoPickups[0].amount, 30);
+  assert.equal(send(fake, [pickup])[0].buttons & 64, 64);
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0,
+    'the same item is not activated on every frame');
+  fake.client.loot.items.get('a1').ammo = 'heavy';
+  fake.client.target.target.id = 'a2';
+  fake.client.loot.items.set('a2', { kind: 'ammo', ammo: 'heavy', amount: 30 });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0);
+  fake.client.loot.items.get('a2').ammo = 'light';
+  fake.client.predictor.ammo.light = 240;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0);
+  fake.client.predictor.ammo.light = 20;
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 64);
+  h.api.setOptions({ ammo: false });
+  fake.client.target.target.id = 'a3';
+  fake.client.loot.items.set('a3', { kind: 'ammo', ammo: 'light', amount: 30 });
+  assert.equal(fake.client.input.sample('sample-argument').buttons & 64, 0);
+  h.api.destroy();
 });
 
 test('Rage does not fire without a clear target and low smoothing settings migrate to exact aim', () => {
@@ -749,18 +1987,487 @@ test('automatic clear-point targeting falls back from blocked head to chest', ()
   });
   const input = frame();
   const output = send(fake, [input])[0];
-  assert.equal(points.length, 2);
+  assert.equal(points.length, 19);
   close(points[0][1], 1.66);
-  close(points[1][1], 1.21);
+  close(points[18][1], 1.21);
   close(output.pitch, Math.atan2(1.21 - 1.62, Math.hypot(2, 10)));
+  h.api.setOptions({ point: 'head' });
+  points.length = 0;
+  const blockedHead = send(fake, [frame({ s: 24 })])[0];
+  assert.equal(points.length, 18, 'explicit Head searches inside the head but never tries the chest');
+  assert.equal(blockedHead.buttons & 1, 0, 'a covered head is not replaced by a chest shot');
+  h.api.setOptions({ point: 'chest' });
+  points.length = 0;
+  const clearChest = send(fake, [frame({ s: 25 })])[0];
+  assert.equal(points.length, 1);
+  assert.equal(clearChest.buttons & 1, 1);
 });
 
-const physicsPath = path.join(__dirname, '..', 'research', '3ep-katvfqbjo.js');
+test('a covered target records the first blocking world surface without changing Fire', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  let casts = 0;
+  h.register(54145, {
+    getCollisionWorld: () => ({ marker: 'world' }),
+    hasLineOfSight: () => false,
+    raycastWorld(world, origin, direction, maxDistance) {
+      casts++;
+      assert.equal(world.marker, 'world');
+      close(Math.hypot(...direction), 1);
+      assert.ok(maxDistance > 5);
+      return { dist: 4, point: [0, 1, -4], normal: [0, 0, 1], material: 'concrete' };
+    }
+  });
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 0);
+  assert.equal(casts, 1);
+  const cover = h.api.trace().fireGates.at(-1).scan.closestCover;
+  assert.equal(cover.preferredPart, 'head');
+  assert.equal(cover.blocker.material, 'concrete');
+  assert.equal(cover.blocker.distanceMeters, 4);
+  assert.equal(h.api.trace().fireGates.at(-1).scan.coverCandidate, undefined);
+  h.api.destroy();
+});
+
+test('a visible part of the requested head remains selectable behind cover', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      return point[1] > 1.7;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 2, 'a partially exposed head needs one extra visibility ray');
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'partial');
+  close(target.point[1], 1.73);
+  close(target.hitboxCenter[1], 1.66);
+  close(output.pitch, Math.atan2(1.73 - 1.62, Math.hypot(2, 10)));
+  assert.ok(target.point[1] < target.position[1] + target.bodyHeight,
+    'the selected point stays inside the captured head hitbox');
+  h.api.destroy();
+});
+
+test('an exposed near face remains targetable when the hitbox center is covered', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const wallZ = -9.925;
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      const distance = Math.hypot(...point.map((value, axis) => value - origin[axis]));
+      const wallDistance = (wallZ - origin[2]) / (point[2] - origin[2]) * distance;
+      return wallDistance >= distance - 0.05;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 10, 'front face is checked once after covered interior points');
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'front-partial');
+  assert.ok(target.point[2] > wallZ && target.point[2] < -9.86,
+    'the chosen point is inside the head hitbox before the world surface');
+  h.api.destroy();
+});
+
+test('an exposed near-face corner is selectable after covered center and interior probes', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      return point[0] > 2.04 && point[1] > 1.72 && point[2] > -9.95;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 11, 'four-corner probing stops after the first clear ray');
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'front-corner-partial');
+  for (let axis = 0; axis < 3; axis++)
+    assert.ok(Math.abs(target.point[axis] - target.hitboxCenter[axis]) < 0.14,
+      'the selected point stays strictly inside the captured head box');
+  h.api.destroy();
+});
+
+test('an exposed near-face edge midpoint can be selected through a narrow top opening', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      return point[1] > 1.74 && point[2] > -9.95 && Math.abs(point[0] - 2) < 0.03;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 15, 'the first near-face edge follows blocked corners');
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'front-edge-partial');
+  assert.ok(Math.abs(target.point[1] - target.hitboxCenter[1]) > 0.09);
+  h.api.destroy();
+});
+
+test('exact player and world ray distances reject the line-of-sight endpoint gap', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const world = { blocksShots: true };
+  let approximateCalls = 0, playerCasts = 0, worldCasts = 0;
+  h.register(54145, {
+    getCollisionWorld: () => world,
+    hasLineOfSight() { approximateCalls++; return true; },
+    raycastPlayer(origin, direction, position, crouch, maxDistance) {
+      playerCasts++;
+      assert.ok(maxDistance > 9.86);
+      return { dist: 9.86, zone: 'head' };
+    },
+    raycastWorld(currentWorld, origin, direction, maxDistance) {
+      worldCasts++;
+      assert.equal(currentWorld, world);
+      return world.blocksShots ? { dist: 9.84 } : null;
+    }
+  });
+  const blocked = send(fake, [frame({ s: 410 })])[0];
+  assert.equal(blocked.buttons & 1, 0, 'a surface before the player ray blocks Fire');
+  assert.ok(playerCasts > 0 && worldCasts > 0);
+  assert.equal(approximateCalls, 0, 'exact ray tests supersede the shortened visibility ray');
+  world.blocksShots = false;
+  const clear = send(fake, [frame({ s: 411 })])[0];
+  assert.equal(clear.buttons & 1, 1, 'a nonblocking surface leaves the player ray clear');
+  assert.equal(h.api.trace().aimDecisions.at(-1).target.visibility, 'clear');
+  h.api.destroy();
+});
+
+test('the near-face probe does not fire through cover in front of the hitbox', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) { return point[2] > -9.7; }
+  });
+  const output = fake.client.input.sample('sample-argument');
+  assert.equal(output.buttons & 1, 0);
+  assert.equal(h.api.trace().fireGates.at(-1).scan.counts.cover, 1);
+  h.api.destroy();
+});
+
+test('Auto records a chest near-face fallback when the head stays covered', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'auto', visibleOnly: true });
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) { return point[1] < 1.3 && point[2] > -9.85; }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'chest');
+  assert.equal(target.visibility, 'fallback-front-partial');
+  h.api.destroy();
+});
+
+test('a small diagonal head opening is used without changing the requested hitbox', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  h.register(54145, { getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) { return point[0] > 2.08 && point[1] > 1.72; } });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'partial');
+  assert.ok(target.point[0] > 2.08 && target.point[0] < 2.14);
+  assert.ok(target.point[1] > 1.72 && target.point[1] < 1.8);
+  h.api.destroy();
+});
+
+test('a side opening selects an interior head point without changing the requested part', () => {
+  const h = harness();
+  const fake = attach(h);
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  const points = [];
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      points.push([...point]);
+      return point[0] > 2.05;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(points.length, 3);
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.aimPart, 'head');
+  assert.equal(target.visibility, 'partial');
+  assert.ok(target.point[0] > 2.05 && target.point[0] < 2.14);
+  assert.ok(Math.abs(target.point[2] + 10) < 0.14);
+  h.api.destroy();
+});
+
+test('a fully visible head wins over a similarly placed partial opening', () => {
+  const h = harness();
+  const fake = attach(h);
+  fake.client.remoteFrames = [
+    { snap: opponent(1, { p: [2, 0, -10] }) },
+    { snap: opponent(2, { p: [3, 0, -10] }) }
+  ];
+  h.api.setOptions({ rage: true, point: 'head', visibleOnly: true });
+  h.register(54145, {
+    getCollisionWorld: () => ({}),
+    hasLineOfSight(world, origin, point) {
+      return point[0] > 2.9 || point[1] > 1.7;
+    }
+  });
+  const output = send(fake, [frame()])[0];
+  const target = h.api.trace().aimDecisions.at(-1).target;
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(target.index, 2);
+  assert.equal(target.visibility, 'clear');
+  h.api.destroy();
+});
+
+const physicsPath = process.env.XOX_CLIENT_PHYSICS ||
+  path.join(__dirname, '..', 'research', '3ep-katvfqbjo.js');
+
+test('captured weapon step accepts a shot before ADS completes', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const startMarker = '"stepWeapon",0,', endMarker = ',"stormCircleAt",0';
+  const start = kernel.indexOf(startMarker), end = kernel.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start);
+  const stepWeapon = vm.runInNewContext(`(${kernel.slice(start + startMarker.length, end)})`, {
+    te: 1 / 30, t: { Buttons: { Fire: 1, Aim: 2, Reload: 32 } },
+    tG: () => 0, tU: () => [[0, 0, -1]], tn: () => 1
+  });
+  const state = { cooldown: 0, reload: 0, reloadTotal: 0, switching: 0,
+    ads: 0, bloom: 0, burst: 0, trigger: false, shots: 0 };
+  const weapon = { magSize: 30, reloadSeconds: 2, adsSeconds: 0.24,
+    fireMode: 'auto', rpm: 760, recoilV: 0.5 };
+  const player = { mode: 'ground', vault: 0, mantle: 0, sprinting: false,
+    yaw: 0, pitch: 0 };
+  const result = stepWeapon(state, weapon, { buttons: 3 }, player, 30, 90, 1, 0);
+  assert.equal(result.fired, true);
+  assert.ok(state.ads > 0 && state.ads < 1);
+  assert.ok(state.cooldown > 0);
+  const hipState = { cooldown: 0, reload: 0, reloadTotal: 0, switching: 0,
+    ads: 0, bloom: 0, burst: 0, trigger: false, shots: 0 };
+  const hipResult = stepWeapon(hipState, weapon, { buttons: 1 }, player, 30, 90, 1, 0);
+  assert.equal(hipResult.fired, true, 'the captured kernel does not require Aim for Fire');
+  assert.equal(hipState.ads, 0);
+});
+
+test('captured pre-ADS spread is corrected through the bounded outgoing path', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const directions = vm.runInNewContext(['tl', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') + ';tU', {
+    tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value))
+  });
+  const weapon = { pellets: 1, pelletSpread: 0 };
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -10] }) }];
+  fake.client.predictor.ps.grounded = true;
+  Object.assign(fake.client.predictor.ws, { ads: 0, bloom: 0, switching: 0 });
+  Object.assign(fake.client.predictor.activeStats, {
+    hipSpread: 3.2, adsSpread: 0.12, moveSpread: 1.6, rangeEnd: 90
+  });
+  let seed = 1;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: true, dirs: directions(weapon, input.yaw, input.pitch, 4.8, seed) } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true, hipFire: false, point: 'chest' });
+  for (seed = 1; seed <= 64; seed++) {
+    send(fake, [frame({ s: 7000 + seed * 2, buttons: 0 })]);
+    const input = { ...fake.client.input.sample('sample-argument'), s: 7001 + seed * 2 };
+    assert.equal(input.buttons & 1, 1, `seed ${seed} should reach prediction before ADS completes`);
+    fake.client.predictor.predict(input);
+    const output = send(fake, [input])[0];
+    const ray = directions(weapon, output.yaw, output.pitch, 4.8, seed)[0];
+    const distance = -10 / ray[2];
+    assert.ok(ray[2] < 0 && Math.abs(distance * ray[0]) <= 0.25 &&
+      1.62 + distance * ray[1] >= 0.9 && 1.62 + distance * ray[1] <= 1.52,
+    `seed ${seed} should intersect the captured torso box`);
+  }
+  h.api.destroy();
+});
+
+test('captured long-range Head correction intersects the hitbox while still or moving', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const shotDirections = vm.runInNewContext(
+    ['tl', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') + ';tU',
+    { tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value)) }
+  );
+  const spreadDegrees = vm.runInNewContext(capturedFunction('tG') + ';tG',
+    { e9: { walkSpeed: 5 }, tr: (a, b, amount) => a + (b - a) * amount });
+  for (const [caseIndex, motion] of [{ speed: 0, mx: 0 },
+    { speed: 4, mx: 1 }].entries()) {
+    const weaponStats = { hipSpread: 8, adsSpread: 0.12, moveSpread: 4 };
+    const spread = spreadDegrees({ ads: 1, bloom: 0 }, weaponStats,
+      { vel: [motion.speed, 0, 0], grounded: true, crouch: 0 });
+    const h = harness();
+    const fake = rageClient();
+    fake.client.input.sample = () => frame({ buttons: 0, mx: motion.mx, mz: 0 });
+    fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -599.5] }) }];
+    Object.assign(fake.client.predictor.ps,
+      { grounded: true, vel: [motion.speed, 0, 0] });
+    Object.assign(fake.client.predictor.ws,
+      { ads: 1, bloom: 0, switching: 0 });
+    Object.assign(fake.client.predictor.activeStats, {
+      class: 'sniper', pellets: 1, ...weaponStats, rangeEnd: 600
+    });
+    let seed = 1;
+    fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+      weapon: { fired: !!(input.buttons & 1),
+        dirs: shotDirections({ pellets: 1 }, input.yaw, input.pitch, spread, seed) } });
+    attach(h, fake);
+    h.api.setOptions({ rage: true, agent: false, stealth: true, rapidFire: true,
+      hipFire: false, point: 'head', range: 600 });
+    for (seed = 1; seed <= 64; seed++) {
+      const sequence = 8000 + caseIndex * 1000 + seed * 2;
+      send(fake, [frame({ s: sequence, buttons: 0, mx: motion.mx, mz: 0 })]);
+      const input = { ...fake.client.input.sample('sample-argument'), s: sequence + 1 };
+      assert.equal(input.buttons & 1, 1, `case ${caseIndex}, seed ${seed} requests Fire`);
+      fake.client.predictor.predict(input);
+      const output = send(fake, [input])[0];
+      const ray = shotDirections({ pellets: 1 }, output.yaw, output.pitch,
+        spread, seed)[0];
+      const distance = -599.5 / ray[2];
+      assert.ok(ray[2] < 0 && Math.abs(distance * ray[0]) <= 0.14 &&
+        1.62 + distance * ray[1] >= 1.52 && 1.62 + distance * ray[1] <= 1.8,
+      `case ${caseIndex}, seed ${seed} intersects the 599.5 m head box`);
+    }
+    h.api.destroy();
+  }
+});
+
+test('captured shot seed selects correctable unscoped Longbow shots and scopes wider ones', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const source = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = source.indexOf(`function ${name}(`);
+    const end = source.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return source.slice(start, end);
+  };
+  const kernel = vm.runInNewContext(
+    ['ti', 'tl', 'tn', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') +
+    ';({shotSeed:tn,mulberry32:tl,shotDirections:tU})',
+    { tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value)) }
+  );
+  const h = harness();
+  const fake = rageClient();
+  const predictor = fake.client.predictor;
+  predictor.ps.grounded = true;
+  predictor.index = 0;
+  predictor.slots[0].weapon = 'longbow';
+  Object.assign(predictor.ws, { ads: 0, bloom: 0, switching: 0, shots: 0 });
+  Object.assign(predictor.activeStats, {
+    hipSpread: 8, adsSpread: 0.1, moveSpread: 4
+  });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -30] }) }];
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0], weapon: {
+    fired: !!(input.buttons & 1),
+    dirs: kernel.shotDirections({ pellets: 1 }, input.yaw, input.pitch, 12,
+      kernel.shotSeed(predictor.seed, predictor.index, predictor.ws.shots + 1))
+  } });
+  attach(h, fake);
+  h.api.attachClient(fake.client, kernel);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: true,
+    hipFire: true, hipRange: 40, point: 'head', range: 600 });
+  let hip = 0, scoped = 0;
+  for (let seed = 1; seed <= 96; seed++) {
+    predictor.seed = seed;
+    send(fake, [frame({ s: 10000 + seed * 2, buttons: 0 })]);
+    const input = { ...fake.client.input.sample('sample-argument'), s: 10001 + seed * 2 };
+    if (!(input.buttons & 1)) {
+      assert.equal(input.buttons & 2, 2, 'wide samples use normal ADS');
+      scoped++;
+      continue;
+    }
+    assert.equal(input.buttons & 2, 0, 'safe samples do not request Aim');
+    fake.client.predictor.predict(input);
+    const output = send(fake, [input])[0];
+    const decision = h.api.trace().aimDecisions.at(-1);
+    const ray = kernel.shotDirections({ pellets: 1 }, output.yaw, output.pitch, 12,
+      kernel.shotSeed(seed, predictor.index, predictor.ws.shots + 1))[0];
+    const difference = decision.target.point.map((value, i) => value - decision.target.origin[i]);
+    const travel = difference.reduce((sum, value, i) => sum + value * ray[i], 0);
+    const miss = Math.hypot(...difference.map((value, i) => value - travel * ray[i]));
+    assert.ok(miss < 0.001, `seed ${seed} should land on the locally selected Head point`);
+    assert.equal(decision.sampled.hipSeeded, true);
+    assert.equal(decision.target.aimPart, 'head');
+    hip++;
+  }
+  assert.ok(hip > 10 && scoped > 10, `expected both modes, got hip ${hip}, ADS ${scoped}`);
+  h.api.destroy();
+});
 
 test('captured single-projectile spread is inverted against the actual game function', {
   skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
 }, () => {
-  const kernel = fs.readFileSync(physicsPath, 'utf8');
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected,
+    'the optional physics bundle must match the captured public client');
+  const kernel = bytes.toString('utf8');
   const start = kernel.indexOf('function tW('), end = kernel.indexOf('function tU(', start);
   assert.ok(start >= 0 && end > start, 'captured spread function remains identifiable');
   const spread = vm.runInNewContext(kernel.slice(start, end) + ';tW', {
@@ -831,7 +2538,202 @@ test('captured single-projectile spread is inverted against the actual game func
   assert.equal(fake.client.input.sample, fake.originalSample);
 });
 
-test('multiple projectile predictions retain center aim and do not count exact compensation', () => {
+test('corrected long-range Rage shot stays exact with Fast fire disabled', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const start = kernel.indexOf('function tW('), end = kernel.indexOf('function tU(', start);
+  assert.ok(start >= 0 && end > start);
+  const spread = vm.runInNewContext(kernel.slice(start, end) + ';tW', {
+    tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value))
+  });
+  const ray = (yaw, pitch) => {
+    const direction = [-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch),
+      -Math.cos(yaw) * Math.cos(pitch)];
+    let index = 0;
+    return spread(direction, 0.5, () => [0.61, 0.17][index++]);
+  };
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -550] }) }];
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: !!(input.buttons & 1), dirs: [ray(input.yaw, input.pitch)] } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, rapidFire: false,
+    hipFire: false, point: 'head', range: 600 });
+  send(fake, [frame({ buttons: 0, mx: 0, mz: 0 })]);
+  const sampled = fake.client.input.sample('sample-argument');
+  assert.equal(sampled.buttons & 1, 1);
+  fake.client.predictor.predict(sampled);
+  const outgoing = send(fake, [sampled])[0];
+  assert.equal(outgoing.buttons & 1, 1);
+  const actualRay = ray(outgoing.yaw, outgoing.pitch);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  const toPoint = decision.target.point.map((value, axis) =>
+    value - decision.target.origin[axis]);
+  const travel = toPoint.reduce((sum, value, axis) => sum + value * actualRay[axis], 0);
+  const miss = Math.hypot(...toPoint.map((value, axis) => value - travel * actualRay[axis]));
+  assert.ok(miss < 0.001, `Fast fire off added ${miss.toFixed(3)} m of miss at 550 m`);
+  h.api.destroy();
+});
+
+test('captured eight-pellet spread lands a chest ray after outgoing correction', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const bytes = fs.readFileSync(physicsPath);
+  const expected = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'research', 'manifest.json'), 'utf8'))
+    .files.find(entry => entry.file === '3ep-katvfqbjo.js').sha256;
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), expected);
+  const kernel = bytes.toString('utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const pellets = vm.runInNewContext(['tl', 'tz', 'tW', 'tU'].map(capturedFunction).join('\n') + ';tU', {
+    tt: Math.PI / 180, ta: (value, min, max) => Math.min(max, Math.max(min, value))
+  });
+  const weapon = { pellets: 8, pelletSpread: 3.6 };
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -200] }) }];
+  let seed = 1;
+  fake.client.predictor.predict = input => ({ eye: [0, 1.62, 0],
+    weapon: { fired: true, dirs: pellets(weapon, input.yaw, input.pitch, 3.2, seed) } });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, point: 'chest', range: 600 });
+  for (seed = 1; seed <= 32; seed++) {
+    const input = frame({ s: 5000 + seed, yaw: 0, pitch: 0, buttons: 1 });
+    fake.client.predictor.predict(input);
+    const output = send(fake, [input])[0];
+    const actual = pellets(weapon, output.yaw, output.pitch, 3.2, seed);
+    assert.ok(actual.some(direction => {
+      if (direction[2] >= 0) return false;
+      const distance = -200 / direction[2];
+      const x = distance * direction[0], y = 1.62 + distance * direction[1];
+      return Math.abs(x) <= 0.25 && y >= 0.9 && y <= 1.52;
+    }), `seed ${seed} should land at least one pellet in the captured torso box`);
+  }
+  h.api.destroy();
+});
+
+test('calibrated spread replay matches the captured kernel at varied elevation and seeds', {
+  skip: !fs.existsSync(physicsPath) && 'Captured game physics is optional for portable tests'
+}, () => {
+  const kernel = fs.readFileSync(physicsPath, 'utf8');
+  const capturedFunction = name => {
+    const start = kernel.indexOf(`function ${name}(`);
+    const end = kernel.indexOf('function ', start + name.length + 10);
+    assert.ok(start >= 0 && end > start);
+    return kernel.slice(start, end);
+  };
+  const { shotSeed, mulberry32, directions, spreadDegrees } = vm.runInNewContext(
+    ['ti', 'tl', 'tn', 'tz', 'tW', 'tU', 'tG'].map(capturedFunction).join('\n') +
+      ';({shotSeed:tn,mulberry32:tl,directions:tU,spreadDegrees:tG})', {
+      tt: Math.PI / 180, e9: { walkSpeed: 5 },
+      tr: (from, to, amount) => from + (to - from) * amount,
+      ta: (value, min, max) => Math.min(max, Math.max(min, value))
+    });
+  const rayHitsBox = (origin, ray, center, half) => {
+    let near = 0, far = 600;
+    for (let axis = 0; axis < 3; axis++) {
+      const low = center[axis] - half[axis], high = center[axis] + half[axis];
+      if (Math.abs(ray[axis]) < 1e-9) {
+        if (origin[axis] < low || origin[axis] > high) return false;
+      } else {
+        const first = (low - origin[axis]) / ray[axis];
+        const last = (high - origin[axis]) / ray[axis];
+        near = Math.max(near, Math.min(first, last));
+        far = Math.min(far, Math.max(first, last));
+        if (near > far) return false;
+      }
+    }
+    return far >= 0;
+  };
+  for (const pellets of [1, 8]) {
+    const h = harness();
+    const fake = rageClient();
+    const predictor = fake.client.predictor;
+    const weapon = { ...predictor.activeStats, class: pellets === 1 ? 'rifle' : 'shotgun',
+      hipSpread: 3, adsSpread: 1.2, moveSpread: 0.7,
+      pellets, pelletSpread: 3.6, rangeEnd: 600 };
+    predictor.activeStats = weapon;
+    predictor.index = 0;
+    Object.assign(predictor.ws, { ads: 1, bloom: 0, shots: 0 });
+    Object.assign(predictor.ps, { vel: [0, 0, 0], grounded: true, crouch: 0 });
+    predictor.predict = input => {
+      const seed = shotSeed(predictor.seed, predictor.index, predictor.ws.shots + 1);
+      predictor.ws.shots++;
+      return { eye: [0, 1.62, 0], weapon: { fired: true,
+        dirs: directions(weapon, input.yaw, input.pitch,
+          spreadDegrees(predictor.ws, weapon, predictor.ps), seed) } };
+    };
+    attach(h, fake);
+    h.api.runtime.physics.shotSeed = shotSeed;
+    h.api.runtime.physics.mulberry32 = mulberry32;
+    h.api.runtime.physics.shotDirections = directions;
+    h.api.runtime.physics.spreadDegrees = spreadDegrees;
+    h.api.setOptions({ rage: true, point: 'head', range: 600 });
+    let caseIndex = 0;
+    const conditions = [
+      { ads: 1, bloom: 0, vel: [0, 0, 0], grounded: true, crouch: 0 },
+      { ads: 0.65, bloom: 0.4, vel: [2, 0, 1], grounded: true, crouch: 0 },
+      { ads: 1, bloom: 0.2, vel: [0, 0, 0], grounded: true, crouch: 1 },
+      { ads: 0.2, bloom: 0.5, vel: [3, 0, 0], grounded: false, crouch: 0 }
+    ];
+    for (const distance of pellets === 1 ? [100, 599.5] : [100])
+      for (const condition of conditions) for (const elevation of [0, 4, 10])
+      for (const seed of [...Array.from({ length: 12 }, (_, index) => index + 1), 102]) {
+      predictor.seed = seed;
+      predictor.ws.shots = 0;
+      predictor.ws.ads = condition.ads;
+      predictor.ws.bloom = condition.bloom;
+      Object.assign(predictor.ps, { vel: condition.vel,
+        grounded: condition.grounded, crouch: condition.crouch });
+      fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, elevation, -distance] }) }];
+      const input = frame({ s: 5200 + ++caseIndex, yaw: 0, pitch: 0, buttons: 1 });
+      predictor.predict(input);
+      assert.equal(h.api.trace().localShots.at(-1).spreadReplayCalibrated, true,
+        `kernel replay calibrates for ${pellets} pellets, ${distance} m, ` +
+          `elevation ${elevation}, seed ${seed}`);
+      const output = send(fake, [input])[0];
+      const decision = h.api.trace().aimDecisions.at(-1);
+      const center = decision.target.hitboxCenter;
+      const actual = directions(weapon, output.yaw, output.pitch,
+        spreadDegrees(predictor.ws, weapon, predictor.ps),
+        shotSeed(seed, predictor.index, 1));
+      assert.equal(decision.outgoingReplay?.calibrated, true);
+      assert.equal(decision.outgoingReplay.directions.length, actual.length);
+      assert.ok(Math.max(...actual.flatMap((ray, index) =>
+        ray.map((value, axis) => Math.abs(value -
+          decision.outgoingReplay.directions[index][axis])))) < 1e-12,
+      'the trace keeps the calibrated outgoing rays without exporting the seed');
+      const hits = actual.filter(ray =>
+        rayHitsBox([0, 1.62, 0], ray, center, [0.14, 0.14, 0.14])).length;
+      assert.equal(decision.geometry.projectedPelletHitsOutgoing, hits,
+        `replayed intersections match the captured kernel for ${pellets} pellets, ` +
+          `${distance} m, elevation ${elevation}, seed ${seed}`);
+      if (pellets === 1) assert.equal(hits, 1,
+        `single-projectile correction lands inside the sampled head at ${distance} m, ` +
+          `elevation ${elevation}, seed ${seed}`);
+      if (pellets === 8 && elevation <= 4) assert.ok(hits >= 1,
+        `a replay-refined pellet lands in the low-elevation head box for seed ${seed}`);
+    }
+    h.api.destroy();
+  }
+  const sameCountDifferentSeed = [101, 102].map(seed =>
+    directions({ pellets: 1 }, 0, 0, 3, shotSeed(seed, 0, 1))[0]);
+  assert.ok(Math.hypot(...sameCountDifferentSeed[0].map((value, axis) =>
+    value - sameCountDifferentSeed[1][axis])) > 0.001,
+  'equal shot counts do not establish that the spread seeds match');
+});
+
+test('multiple projectile predictions center a pellet when their average misses the hitbox', () => {
   const h = harness();
   const fake = rageClient();
   fake.client.predictor.predict = () => ({
@@ -840,12 +2742,54 @@ test('multiple projectile predictions retain center aim and do not count exact c
   attach(h, fake);
   const input = frame();
   fake.client.predictor.predict(input);
-  const output = send(fake, [input])[0];
-  close(output.yaw, Math.atan2(-2, 10));
-  assert.equal(h.api.runtime.compensated, 0);
+  send(fake, [input]);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.geometry.projectedPelletHitsInput, 0);
+  assert.equal(decision.geometry.projectedPelletHitsOutgoing, 1,
+    'centering one pellet lands a local ray that the average would miss');
+  assert.ok(decision.geometry.predictedOutgoing.minMeters < 0.001);
+  assert.equal(h.api.runtime.compensated, 1);
 });
 
-const runtimePath = path.join(__dirname, '..', 'research', 'turbopack-37jd2rjmtu1y9.js');
+test('bounded stealth correction lands a predicted pellet without exceeding one turn', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -200] }) }];
+  fake.client.predictor.predict = () => ({
+    eye: [0, 1.62, 0], weapon: { fired: true, dirs: [[0, 0, -1], [0.1, 0, -0.99]] }
+  });
+  attach(h, fake);
+  h.api.setOptions({ rage: true, stealth: true, point: 'chest', range: 600 });
+  const input = frame({ s: 24 });
+  fake.client.predictor.predict(input);
+  const output = send(fake, [input])[0];
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(output.buttons & 1, 1);
+  assert.equal(decision.geometry.projectedPelletHitsInput, 0);
+  assert.equal(decision.geometry.projectedPelletHitsOutgoing, 1);
+  assert.ok(Math.abs(output.yaw) <= 8 * Math.PI / 180);
+  assert.ok(Math.abs(output.pitch) <= 8 * Math.PI / 180);
+  h.api.destroy();
+});
+
+test('multiple projectile correction keeps the average when it lands more pellets', () => {
+  const h = harness();
+  const fake = rageClient();
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -5] }) }];
+  fake.client.predictor.predict = () => ({
+    eye: [0, 1.62, 0], weapon: { fired: true, dirs: [[-0.02, 0, -1], [0.02, 0, -1]] }
+  });
+  attach(h, fake);
+  const input = frame({ s: 26 });
+  fake.client.predictor.predict(input);
+  send(fake, [input]);
+  const decision = h.api.trace().aimDecisions.at(-1);
+  assert.equal(decision.geometry.projectedPelletHitsOutgoing, 2);
+  assert.equal(decision.target.aimPart, 'head');
+});
+
+const runtimePath = process.env.XOX_CLIENT_RUNTIME ||
+  path.join(__dirname, '..', 'research', 'turbopack-37jd2rjmtu1y9.js');
 
 test('captured Turbopack runtime preserves grouped exports and array-to-object loader handoff', {
   skip: !fs.existsSync(runtimePath) && 'Captured runtime is optional for portable tests'
@@ -872,7 +2816,9 @@ test('captured Turbopack runtime preserves grouped exports and array-to-object l
   sandbox.__fake = fake.client;
   vm.runInContext(`
     TURBOPACK.push(['synthetic.js', 54145, 97294, 42, context => {
-      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true], 54145);
+      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true,
+        'raycastWorld', 0, () => null, 'raycastPlayer', 0, () => ({ dist: 9, zone: 'head' }),
+        'shotDirections', 0, () => [], 'spreadDegrees', 0, () => 0], 54145);
       context.s(['createZoneClient', 0, params => params], 97294);
       context.s(['getter', () => 7, 'direct', 0, 8, 'setter', () => 9, () => {}], 42);
     }]);
@@ -892,6 +2838,9 @@ test('captured Turbopack runtime preserves grouped exports and array-to-object l
   assert.equal(sandbox.__runtimeResult.setter, 9);
   assert.equal(api.runtime.client, fake.client);
   assert.equal(api.runtime.physics.hasLineOfSight, sandbox.__runtimeResult.physics.hasLineOfSight);
+  assert.equal(api.runtime.physics.raycastPlayer, sandbox.__runtimeResult.physics.raycastPlayer);
+  assert.equal(api.runtime.physics.shotDirections, sandbox.__runtimeResult.physics.shotDirections);
+  assert.equal(api.runtime.physics.spreadDegrees, sandbox.__runtimeResult.physics.spreadDegrees);
   api.setOptions({ silent: true, rage: false, visibleOnly: true, point: 'head' });
   const inputs = [frame()];
   assert.notEqual(send(fake, inputs), inputs);
@@ -983,7 +2932,10 @@ test('late recovery imports an already initialized physics module through the re
   vm.runInContext(`
     TURBOPACK.push(['existing-kernel.js', 54145, context => {
       window.__physicsInitializations++;
-      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true], 54145);
+      context.s(['getCollisionWorld', 0, () => ({}), 'hasLineOfSight', 0, () => true,
+        'raycastPlayer', 0, () => ({ dist: 9, zone: 'head' }),
+        'shotDirections', 0, () => [],
+        'spreadDegrees', 0, () => 0], 54145);
     }]);
     TURBOPACK.push(['existing-entry.js', 101, context => {
       window.__existingPhysics = context.i(54145);
@@ -1007,6 +2959,10 @@ test('late recovery imports an already initialized physics module through the re
   assert.equal(api.runtime.client, fake.client);
   assert.equal(api.runtime.physics.getCollisionWorld, sandbox.__existingPhysics.getCollisionWorld);
   assert.equal(api.runtime.physics.hasLineOfSight, sandbox.__existingPhysics.hasLineOfSight);
+  assert.equal(api.runtime.physics.raycastWorld, sandbox.__existingPhysics.raycastWorld);
+  assert.equal(api.runtime.physics.raycastPlayer, sandbox.__existingPhysics.raycastPlayer);
+  assert.equal(api.runtime.physics.shotDirections, sandbox.__existingPhysics.shotDirections);
+  assert.equal(api.runtime.physics.spreadDegrees, sandbox.__existingPhysics.spreadDegrees);
   assert.equal(api.runtime.error, '');
   assert.equal(sandbox.__physicsInitializations, 1, 'cached physics module executes only once');
   assert.equal(networkRequests, 0);
@@ -1036,7 +2992,9 @@ test('server telemetry counts authoritative self events, ignores other authors, 
   fake.client.team.isAlly = index => index === 2;
   attach(h, fake);
   const events = Object.freeze([
-    { type: 'shot', t: 100, by: 0, weapon: 'sidearm' },
+    { type: 'shot', t: 100, by: 0, weapon: 'sidearm', rarity: 'common',
+      from: [0, 1, 0], dirs: [[0, 0, -1]] },
+    { type: 'impact', t: 100, pos: [0, 1, -10], normal: [0, 0, 1], material: 'concrete' },
     { type: 'hit', t: 100, by: 0, target: 1, head: true, damage: 25 },
     { type: 'kill', t: 100, by: 0, victim: 1 },
     { type: 'shot', t: 100, by: 2, weapon: 'sidearm' },
@@ -1049,6 +3007,11 @@ test('server telemetry counts authoritative self events, ignores other authors, 
   assert.notEqual(wrapped, originalEvents);
   assert.equal(wrapped.call(fake.client, snapshot, 'event-argument'), 'ingested');
   assert.deepEqual({ ...h.api.runtime.server }, { shots: 1, hits: 1, headshots: 1, kills: 1, damage: 25 });
+  assert.deepEqual(JSON.parse(JSON.stringify(h.api.trace().serverEvents[0].shot)), {
+    weaponId: 'sidearm', rarity: 'common', origin: [0, 1, 0],
+    directions: [[0, 0, -1]], impacts: [{ point: [0, 1, -10],
+      normal: [0, 0, 1], material: 'concrete' }]
+  });
   assert.equal(fake.client.ingestEvents(snapshot, 'event-argument'), 'ingested');
   assert.deepEqual({ ...h.api.runtime.server }, { shots: 1, hits: 1, headshots: 1, kills: 1, damage: 25 });
   const subsequent = {
@@ -1062,6 +3025,19 @@ test('server telemetry counts authoritative self events, ignores other authors, 
   assert.equal(received[1], snapshot);
   h.api.destroy();
   assert.equal(fake.client.ingestEvents, originalEvents);
+});
+
+test('server snapshot compares acknowledged outgoing aim with server angles', () => {
+  const h = harness();
+  const fake = attach(h, fakeClient({ ingestEvents: snapshot => snapshot }));
+  send(fake, [frame({ s: 77, buttons: 0, yaw: 0.2, pitch: -0.1 })]);
+  fake.client.ingestEvents({ t: 105, me: { ack: 77, yaw: 0.22, pitch: -0.11 }, events: [] });
+  const snapshot = h.api.trace().serverSnapshots.at(-1);
+  assert.equal(snapshot.acknowledgedFrame.sequence, 77);
+  close(snapshot.acknowledgedFrame.sentYaw, 0.2);
+  close(snapshot.acknowledgedFrame.serverYawDifferenceDegrees, 0.02 * 180 / Math.PI);
+  close(snapshot.acknowledgedFrame.serverPitchDifferenceDegrees, -0.01 * 180 / Math.PI);
+  h.api.destroy();
 });
 
 test('server telemetry preserves identical pellet hits within one snapshot while deduplicating replay', () => {
@@ -1110,6 +3086,53 @@ test('automatic targeting prefers chest at long range or high speed and head for
     const output = send(fake)[0];
     close(output.pitch, Math.atan2(scenario.height - 1.62, Math.hypot(scenario.pos[0], scenario.pos[2])));
   }
+});
+
+test('explicit Head and Chest override Auto adaptation for every weapon', () => {
+  const h = harness();
+  const fake = attach(h, rageClient());
+  h.api.setOptions({ rage: true, point: 'head', smartAim: true, range: 600 });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -180], v: [5, 0, 0] }) }];
+  fake.client.predictor.ps.vel = [4, 0, 0];
+  for (const weapon of ['sniper', 'rifle', 'smg']) {
+    fake.client.predictor.activeStats.class = weapon;
+    fake.client.input.sample('sample-argument');
+    assert.equal(h.api.runtime.sampleGate.target.aimPart, 'head', `${weapon} respects Head`);
+    send(fake, [frame({ s: 1500 + ['sniper', 'rifle', 'smg'].indexOf(weapon), buttons: 1 })]);
+    const decision = h.api.trace().aimDecisions.at(-1);
+    assert.equal(decision.requestedPoint, 'head');
+    assert.equal(decision.target.aimPart, 'head',
+      `${weapon} sends Head on the wire`);
+  }
+  h.api.setOptions({ point: 'chest' });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20], v: [0, 0, 0] }) }];
+  fake.client.predictor.ps.vel = [0, 0, 0];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'chest');
+  h.api.setOptions({ point: 'auto' });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -80] }) }];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'chest');
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -20] }) }];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'head');
+  h.api.setOptions({ smartAim: false });
+  fake.client.remoteFrames = [{ snap: opponent(1, { p: [0, 0, -80] }) }];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.aimPart, 'head');
+  h.api.setOptions({ smartAim: true });
+  fake.client.remoteFrames = [
+    { snap: opponent(1, { p: [0, 20, -40] }) },
+    { snap: opponent(2, { p: [2, 0, -40] }) }
+  ];
+  fake.client.input.sample('sample-argument');
+  assert.equal(h.api.runtime.sampleGate.target.index, 2,
+    'a small yaw difference should not beat a large pitch correction');
+  h.mount();
+  assert.equal(h.controls.get('[name="smartAim"]').disabled, false);
+  h.api.setOptions({ point: 'head' });
+  assert.equal(h.controls.get('[name="smartAim"]').disabled, true);
+  h.api.destroy();
 });
 
 test('Jump fire frames and active movement actions are not silently rotated', () => {
@@ -1307,7 +3330,13 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   attach(h, fake);
   const original = frame({ s: 41 });
   const outgoing = send(fake, [original])[0];
-  fake.client.ingestEvents({ t: 100, events: [
+  fake.client.sentAt = new Map([[41, 900]]);
+  fake.client.rtt = 80;
+  fake.client.ingestEvents({ t: 100, me: { ack: 41, active: 0,
+    slots: [{ weapon: 'vanguard', mag: 29 }], ads: 0.9,
+    ammo: { light: 150, heavy: 20 },
+    pos: [0, 0, 0], vel: [1, 0, 0], health: 100, armor: 50,
+    plates: 2, medkits: 1, plating: 0.7, healing: 0 }, events: [
     { t: 100, by: 0, type: 'shot' },
     { t: 100, by: 0, type: 'hit', damage: 12 }
   ] });
@@ -1317,16 +3346,41 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   assert.equal(trace.frames.at(-1).sequence, 41);
   assert.deepEqual(Array.from(trace.frames.at(-1).before), [0, 0, 1, 1]);
   assert.equal(trace.frames.at(-1).after[0], outgoing.yaw);
+  assert.equal(trace.aimDecisions.at(-1).sequence, 41);
+  assert.equal(trace.aimDecisions.at(-1).targetDistance > 10, true);
+  assert.equal(trace.aimDecisions.at(-1).target.origin.length, 3);
+  assert.equal(trace.aimDecisions.at(-1).geometry.outgoingAim.centerOffsetMeters < 1, true);
   assert.deepEqual(Array.from(trace.serverEvents, event => event.type), ['shot', 'hit']);
+  assert.equal(trace.serverEvents.at(-1).snapshotTick, 100);
+  assert.equal(trace.serverSnapshots.at(-1).ack, 41);
+  assert.equal(trace.serverSnapshots.at(-1).weaponId, 'vanguard');
+  assert.equal(trace.serverSnapshots.at(-1).server.activeSlot, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(trace.serverSnapshots.at(-1).server.slots)),
+    [{ weapon: 'vanguard', rarity: null, magazine: 29 }]);
+  assert.deepEqual({ ...trace.serverSnapshots.at(-1).server.ammo }, { light: 150, heavy: 20 });
+  assert.deepEqual(Array.from(['health', 'armor', 'plates', 'medkits', 'plating', 'healing'],
+    key => trace.serverSnapshots.at(-1).server[key]), [100, 50, 2, 1, 0.7, 0]);
+  assert.equal(trace.serverSnapshots.at(-1).ackLatencyMs, 100);
+  assert.equal(trace.counters.serverSnapshotsSeen, 1);
+  assert.equal(trace.counters.highestAckByMatch[1], 41);
+  assert.equal(trace.settings.some(setting => setting.reason === 'match-start'), true);
+  assert.equal(trace.settings.at(-1).values.silent, false,
+    'the trace records the post-rejection settings transition');
+  assert.equal(trace.connectionStates.at(-1).errorKind, 'aim-assistance');
+  assert.equal(trace.connectionStates.at(-1).error, undefined,
+    'raw connection errors are not included in shared traces');
   assert.equal(trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(trace).includes('test-match'), false, 'match identifiers stay out of the trace');
   const exported = JSON.parse(h.api.exportTrace());
-  assert.equal(exported.formatVersion, 1);
-  assert.equal(exported.scriptVersion, '1.5.5');
+  assert.equal(exported.formatVersion, 2);
+  assert.equal(exported.scriptVersion, '1.5.33');
   assert.equal(exported.trace.kicks.at(-1).lastSequence, 41);
   assert.equal(JSON.stringify(exported).includes('test-match'), false);
   trace.frames[0].before[0] = 999;
+  trace.aimDecisions[0].target.origin[0] = 999;
   assert.equal(h.api.trace().frames[0].before[0], 0, 'callers cannot mutate retained evidence');
+  assert.equal(h.api.trace().aimDecisions[0].target.origin[0], 0,
+    'callers cannot mutate retained shot geometry');
   for (let batch = 0; batch < 17; batch++) {
     const frames = Array.from({ length: 256 }, (_, index) =>
       frame({ s: batch * 256 + index, buttons: 0 }));
@@ -1334,6 +3388,8 @@ test('bounded trace connects outgoing frames, server events, and a rejection wit
   }
   assert.equal(h.api.trace().frames.length, 4096);
   assert.equal(h.api.trace().frames.at(-1).sequence, 4351);
+  assert.equal(h.api.trace().retention.dropped.frames, 257,
+    'the export reports older frames displaced by the bounded buffer');
   h.api.destroy();
 });
 
@@ -1346,20 +3402,89 @@ test('Save trace button downloads the current local evidence', async () => {
   assert.equal(h.downloads.length, 1);
   assert.match(h.downloads[0].download, /^bridgezone-trace-.*\.json$/);
   assert.equal(h.downloads[0].href, 'blob:trace');
+  assert.ok(h.api.inspect().archive.downloadRequestedAt);
   assert.equal(h.createdBlobs[0].type, 'application/json');
   assert.equal(h.revokedUrls[0], 'blob:trace');
   const payload = JSON.parse(await h.createdBlobs[0].text());
-  assert.equal(payload.scriptVersion, '1.5.5');
+  assert.equal(payload.scriptVersion, '1.5.33');
   assert.equal(payload.trace.match, 0);
   h.api.destroy();
 });
 
-test('new pages retain Silent AIM, migrate legacy settings, and keep Rage off', () => {
+test('active matches save bounded trace snapshots locally and Saved exports the archive', async () => {
+  const archive = archiveDbHarness();
+  let now = 1000;
+  const h = harness([], undefined, { indexedDB: archive.indexedDB, now: () => now });
+  const fake = attach(h);
+  h.mount();
+  h.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(archive.records.size, 1);
+  let payload = JSON.parse(await h.api.latestArchivedTrace());
+  assert.equal(payload.trace.match, 1);
+  assert.equal(payload.trace.frames.length, 0);
+  send(fake, [frame({ s: 99, buttons: 0 })]);
+  now += 16000;
+  h.tick();
+  await new Promise(resolve => setImmediate(resolve));
+  payload = JSON.parse(await h.api.latestArchivedTrace());
+  assert.equal(payload.trace.frames.at(-1).sequence, 99);
+  await h.controls.get('[data-download-archive]').events.get('click')();
+  assert.equal(h.downloads.length, 1);
+  assert.equal(JSON.parse(await h.createdBlobs[0].text()).trace.frames.at(-1).sequence, 99);
+  assert.equal(h.api.inspect().archive.error, null);
+  h.api.destroy();
+});
+
+test('a terminal match downloads one trace even when IndexedDB is unavailable', async () => {
+  for (const ending of ['finished', 'eliminated', 'kicked']) {
+    const archive = ending === 'finished' ? archiveDbHarness() : null;
+    const h = harness([], undefined, { indexedDB: archive?.indexedDB });
+    const fake = attach(h);
+    h.mount();
+    send(fake, [frame({ s: 199, buttons: 0 })]);
+    h.tick();
+    assert.equal(h.downloads.length, 0, 'an active match does not export early');
+    if (ending === 'finished') fake.client.latest.phase = 'finished';
+    if (ending === 'eliminated') fake.client.localDead = () => true;
+    if (ending === 'kicked') fake.client.connection.state = 'kicked';
+    h.tick();
+    assert.equal(h.downloads.length, 1, `${ending} triggers one automatic download`);
+    assert.ok(h.api.inspect().archive.downloadRequestedAt);
+    const payload = JSON.parse(await h.createdBlobs[0].text());
+    assert.equal(payload.scriptVersion, '1.5.33');
+    assert.equal(payload.trace.frames.at(-1).sequence, 199);
+    h.tick();
+    assert.equal(h.downloads.length, 1, `${ending} does not duplicate the download`);
+    if (archive) {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(archive.records.size, 1);
+    }
+    h.api.destroy();
+  }
+});
+
+test('detaching an eliminated client exports the trace before the next timer tick', async () => {
+  const h = harness();
+  const fake = attach(h);
+  send(fake, [frame({ s: 200, buttons: 0 })]);
+  fake.client.localDead = () => true;
+  h.api.destroy();
+  assert.equal(h.downloads.length, 1);
+  const payload = JSON.parse(await h.createdBlobs[0].text());
+  assert.equal(payload.trace.frames.at(-1).sequence, 200);
+  assert.equal(payload.scriptVersion, '1.5.33');
+});
+
+test('new pages start the combat agent and migrate legacy settings without reviving rejected aim', () => {
   for (const saved of [undefined, { silent: true, rage: true, xray: false, loot: false, range: 120, fov: 25, smooth: 0.1 }]) {
     const h = harness([], saved);
     assert.equal(h.api.options.silent, true);
+    assert.equal(h.api.options.rage, true);
+    assert.equal(h.api.options.agent, true);
     h.api.setOptions({ rage: false });
     assert.equal(h.api.options.rage, false);
+    assert.equal(h.api.options.agent, false);
     assert.equal(h.api.options.fov, 90);
     assert.equal(h.api.options.smooth, 1);
     assert.equal(h.api.inspect().aimRejected, false);
@@ -1376,6 +3501,18 @@ test('new pages retain Silent AIM, migrate legacy settings, and keep Rage off', 
     assert.equal(h.api.runtime.rewrites, 1);
     h.api.destroy();
   }
+  const rejected = harness([], { silent: false, rage: false, agent: false });
+  assert.equal(rejected.api.options.silent, false);
+  assert.equal(rejected.api.options.rage, false);
+  assert.equal(rejected.api.options.agent, false);
+  rejected.api.destroy();
+  const disabled = harness([], { settingsRevision: 3, silent: true, rage: true, agent: false });
+  assert.equal(disabled.api.options.agent, false);
+  disabled.api.setOptions({ agent: true });
+  assert.equal(disabled.api.options.agent, true);
+  const persisted = JSON.parse([...disabled.storage.values()][0]);
+  assert.equal(persisted.settingsRevision, 3);
+  disabled.api.destroy();
 });
 
 test('server aim rejection disables and persists aim across settings updates and a new client', () => {
@@ -1430,6 +3567,7 @@ test('attachment checks an already rejected connection with or without a state s
     assert.equal(h.api.options.silent, false);
     h.api.setOptions({ rage: false });
     assert.equal(h.api.options.rage, false);
+    assert.equal(h.api.options.agent, false);
     h.api.destroy();
     assert.equal(state.listeners.size, 0);
   }
@@ -1485,12 +3623,39 @@ test('Insert before mounting applies the initial hidden state and the next Inser
   keys(event);
   assert.equal(panel.hidden, false);
   assert.equal(showButton.hidden, true);
-  h.controls.get('button').events.get('click')();
+  h.controls.get('[data-hide-panel]').events.get('click')();
   assert.equal(panel.hidden, true);
   assert.equal(showButton.hidden, false);
   showButton.events.get('click')();
   assert.equal(panel.hidden, false);
   assert.equal(showButton.hidden, true);
+  h.api.destroy();
+});
+
+test('the panel leaves gameplay keys alone and Resume restores pointer lock', () => {
+  let lockRequests = 0;
+  const canvas = { requestPointerLock() { lockRequests++; } };
+  const h = harness();
+  attach(h, fakeClient({ canvas }));
+  h.mount();
+  assert.equal(h.rootListeners.has('keydown'), false);
+  assert.equal(h.rootListeners.has('keyup'), false);
+  const gameplayKey = { type: 'keydown', code: 'KeyF', repeat: false,
+    target: { tagName: 'CANVAS' }, composedPath: () => [canvas] };
+  h.windowListeners.get('keydown')(gameplayKey);
+  assert.equal(h.api.trace().interactions.at(-1).key, 'KeyF');
+  assert.equal(h.api.trace().interactions.at(-1).pointerLocked, false);
+  h.controls.get('[data-resume-game]').events.get('click')();
+  assert.equal(lockRequests, 1);
+  h.controls.get('[data-hide-panel]').events.get('click')();
+  assert.equal(lockRequests, 2);
+  h.document.pointerLockElement = canvas;
+  h.listeners.get('pointerlockchange')();
+  h.windowListeners.get('keyup')({ ...gameplayKey, type: 'keyup' });
+  assert.equal(h.api.trace().interactions.at(-2).phase, 'pointerlockchange');
+  assert.equal(h.api.trace().interactions.at(-1).pointerLocked, true);
+  h.controls.get('[data-resume-game]').events.get('click')();
+  assert.equal(lockRequests, 2, 'no new request is needed while locked');
   h.api.destroy();
 });
 
@@ -1504,7 +3669,8 @@ test('settings deletion resets defaults without echoing storage and malformed pa
   for (const key of ['bridgezone.tools.v2', null]) {
     storage({ key, newValue: null });
     assert.equal(h.api.options.silent, true);
-    assert.equal(h.api.options.rage, false);
+    assert.equal(h.api.options.rage, true);
+    assert.equal(h.api.options.agent, true);
     assert.equal(h.api.options.xray, true);
     assert.equal(h.api.options.loot, true);
     assert.equal(h.api.options.range, 600);

@@ -39,6 +39,12 @@ trace ended, not that the server would never kick.
 | [First trace](verification/live-trace-v1.5.4-2026-10-15.json) | 1.5.4 | 19 shots, 13 hits, 2 kills, 198.8 damage | No recorded kick before bot elimination |
 | [Second trace](verification/live-trace-v1.5.4-active-2026-10-15.json) | 1.5.4 | 51 shots, 14 hits, 228.2 damage | No recorded kick before bot elimination |
 | [Early export](verification/live-trace-v1.5.5-2026-10-15.json) and [later export](verification/live-trace-v1.5.5-25bots-2026-10-15.json) | 1.5.5 | 1 shot, 1 hit, 32 damage | Two snapshots of **one short match**, with no recorded kick |
+| User-supplied export, not mirrored | 1.5.6 | 88 shots, 27 hits, 6 kills | Mixed weapons in one match; no recorded kick |
+| User-supplied export, not mirrored | 1.5.8 | 0 shots, 0 hits | No outgoing Fire; 202 Rage samples held at alignment after ADS, no recorded kick |
+| User-supplied export, not mirrored | 1.5.9 | 351 shots, 82 hits, 13 kills, 2295.8 damage | Mixed weapons in one match; no recorded kick |
+| User-supplied export, not mirrored | 1.5.10 | 520 shots, 117 hits, 12 kills, 2536.2 damage | One match; no recorded kick |
+| User-supplied export, not mirrored | 1.5.11 | 378 shots, 138 hits, 15 kills, 14 headshots | One match; no recorded kick |
+| Local saved export, not mirrored | 1.5.31 | 6 shots, 3 hits, 2 head hits, 0 kills | Short XOX-enabled match; Stealth was turned off before an `aim-assistance` kick; trigger unconfirmed |
 
 The two 1.5.5 files share `trace.startedAt =
 2026-10-15T14:33:31.561Z`, the same match counter, and the same two server
@@ -57,6 +63,687 @@ these SHA-256 values.
 | `live-trace-v1.5.4-active-2026-10-15.json` | `086b22e02bb463ada8dce29f2ebe501e5e313bfcf77fa2dedc433925f151aa69` |
 | `live-trace-v1.5.5-2026-10-15.json` | `16b1d73a03af12b52e193c5e636a39a9ec84febf1822d76d160980d3dbdbde51` |
 | `live-trace-v1.5.5-25bots-2026-10-15.json` | `5f19f7a7845711351b3040e0ede3f91ee868252a8a8f98857675f773870f7284` |
+
+The user-supplied 1.5.8 export `bridgezone-trace-2026-10-15T17-58-42-665Z.json`
+has SHA-256 `15e714ce62166969f4b019ff06ce114a4d505c7a44e19ee72bb2d96ad16399f8`.
+It is kept in the user's Downloads folder rather than mirrored here.
+The user-supplied 1.5.9 export `bridgezone-trace-2026-10-15T18-16-25-542Z.json`
+has SHA-256 `dda31783653b3f8898b6cb56fcfb22d2491428b4c1cc60f3a7426611f46c1084`.
+It also remains in the user's Downloads folder.
+The user-supplied 1.5.10 export `bridgezone-trace-2026-10-15T18-30-20-852Z.json`
+has SHA-256 `000b9edde85c856b7f715ab47b7c2adf5cedfb0a3070cc123dc4a99609b45e15`.
+It remains in the user's Downloads folder.
+The user-supplied 1.5.11 export `bridgezone-trace-2026-10-15T19-19-19-684Z.json`
+has SHA-256 `ca13f73e6307b0471959c6a710abc13ba0c4a3d8f9cd4154071bf9aeb7019de6`.
+It remains in the user's Downloads folder.
+
+### Version 1.5.9 mixed-weapon trace
+
+The server recorded 351 shots, 82 hits, 32 headshots, and 13 kills. This
+confirms that the earlier no-fire regression was fixed in this match; it does
+not establish accurate shots at every distance. The retained outgoing input
+included Interact on 11 frames. Three F keydowns and three keyups were
+recorded while pointer lock and input were enabled, so the F path reached the
+outgoing frame. The export does not separately confirm a completed pickup.
+
+The saved target setting was Head for the full trace. All 512 retained sent
+aim decisions used the head aim point, including decisions for targets hundreds
+of metres away. The new Smart Rage aim setting adapts that saved preference to
+chest when either player moves quickly or the target is over 50 metres away,
+and scores pitch as well as yaw when choosing a target. The 1.5.10 trace below
+provides the next bounded result.
+
+There were 579 Rage samples classified as reload and 86 as no-ammo. Earlier
+code could request ADS on a selected target while reloading or empty; 1.5.10
+releases that automatic ADS request and keeps sprint available in those states.
+The captured shared game physics also applies a movement slowdown while ADS
+is held for an active shot. The browser client cannot make the server treat
+continuous ADS as full-speed movement or grant an unlimited reserve through a
+supported input. Ammo assist now requests nearby compatible ground-ammo
+pickups and normal reloads, while leaving ammunition authoritative to the
+server. New traces record pickup requests and server reserve changes as
+separate observations.
+
+The 1.5.9 trace had 282 outgoing Fire decisions without a local shot prediction.
+Every one of those decisions recorded active weapon cooldown. Holding Fire
+through cooldown is normal for automatic weapons, so the analyzer now reports
+these separately from unexplained prediction gaps.
+
+### Version 1.5.10 aim and prediction trace
+
+The server recorded 520 shots, 117 hits, 22 headshots, and 12 kills. The trace
+recorded no kick or hook error. Smart Rage aim selected chest in 439 of the 503
+retained outgoing Fire decisions and head in 64. Three automatic pickup requests
+were recorded. The observed server reserve increases cannot be attributed to
+those requests alone.
+
+The input pipeline predicts each shot before XOX rewrites the outgoing frame.
+The retained frame window contains 18 cases where Fire was present before send
+and absent on the wire. Eleven of those cases overlap a retained local shot
+prediction. In the captured shared physics, a predicted shot advances the shot
+number, bloom, cooldown, and trigger state. Removing Fire after prediction can
+therefore leave the local seed and weapon state ahead of the server until
+reconciliation. The trace cannot establish how much of the missed-hit count
+this explains, but it confirms the mismatch occurred. Version 1.5.11 keeps
+Fire after a shot has been predicted and reuses the sample-time target if the
+current target disappears or changes substantially before send. It also repairs
+the sample-to-sequence trace link: the game adds the sequence number after XOX's
+sample hook returns.
+
+Within this match, a nine-tick offset plus a 100–260 ms event delay linked 210
+retained predicted shots to server shot events; all 63 same-tick hits in that
+subset named the selected target. This is an observed match pattern, not a
+protocol guarantee for assigning hits to future input sequences. In that
+subset, chest shots at 50–99 m were 31/45 while still and 6/40 while moving;
+at 250–299 m, shots were 2/43. These groups differ in target, range, movement,
+and weapon state, so they are diagnostic rather than controlled hit-rate
+comparisons. Version 1.5.11 weights target distance by the active weapon's
+damage range while keeping the selected 600 m maximum available when no
+closer target exists. A new server trace is needed to measure its effect.
+
+### Version 1.5.11 explicit point trace
+
+The server recorded 378 shots, 138 hits, 14 headshots, and 15 kills in one match
+with no recorded kick. The saved Target point was Head throughout, with Adaptive
+Smart Rage aim enabled. Of 512 retained outgoing Fire decisions, only 31 aimed
+at head and 481 aimed at chest. The Longbow sniper aimed at chest in 15 of 17
+decisions. The other weapons showed the same override. This was caused by the
+1.5.10 rule that silently converted explicit Head to chest beyond 50 m or when
+either player moved quickly. Two Longbow head decisions were cover fallbacks
+from chest, not proof that the explicit Head preference was honored.
+
+The 1.5.11 prediction/send fix held within the retained overlapping window:
+36 locally predicted shots had corresponding retained frames, and none had Fire
+removed before send. The trace buffers cover different periods, so this does
+not prove every shot in the match used that path. The 1.5.11 server hit fraction
+is higher than in the earlier export, but the matches and target conditions
+differ; it is not a controlled estimate of the fix's effect.
+
+Version 1.5.12 makes explicit Head and Chest strict choices for all weapons.
+The movement and distance rule now applies only to Auto. If a chosen body part
+is behind cover, the manual choice will skip that target rather than silently
+switch body parts. The analyzer now reports requested and selected aim points
+by weapon, using saved settings for older traces and a direct per-decision
+field in new traces. Server headshot and hit outcomes for 1.5.12 remain untested.
+
+### Version 1.5.13 multi-pellet correction
+
+The 1.5.11 export retained three locally predicted Breacher shotgun shots at
+188.7, 207.4, and 206.1 m. Although 1.5.11 corrected the *average* pellet
+direction toward the selected chest, the nearest projected pellets still missed
+the selected point by 2.58, 3.25, and 5.16 m respectively. A local replay of the
+1.5.13 correction functions using those recorded pellet directions, shot eyes,
+and target points projects zero intersections with the captured client's torso
+box under the old outgoing angles and one under the new candidate angle for
+each shot. The captured client defines the torso box as 0.5 m wide in both
+horizontal axes, with height derived from crouch. The replay used standing
+height because the older target snapshots did not retain crouch. Even at a
+crouched height, the new candidate centers one pellet in the selected box.
+An independent 1,000-seed local sweep used the hash-matched captured spread
+function with the Breacher's eight pellets, 3.6-degree pellet spread, and a
+standing chest at 200 m. The old average-direction angle produced a local
+hitbox intersection in 10 of 1,000 simulated shots; the new angle did so in
+1,000 of 1,000. This checks the spread rotation against the captured kernel,
+not the current server or its target rewind.
+
+Version 1.5.13 evaluates the average and each sampled pellet offset, then
+chooses the reachable outgoing angle with the most projected intersections.
+It records projected pellet counts before and after correction in future traces.
+Single-projectile correction and the existing Fire cadence remain unchanged.
+These are local geometric predictions, not server-confirmed hits; no 1.5.13
+server match has been recorded. The captured weapon model still enforces its
+fire mode, cooldown, and ammunition; this change does not create extra shots.
+
+### Version 1.5.14 guarded fire during ADS ramp
+
+The hash-matched captured shared physics fires when Fire is pressed and the
+weapon is ready, even before ADS reaches 1. ADS instead changes the spread
+used for that shot. XOX previously waited until local ADS reached 0.995 for
+every Rage shot. The retained 1.5.11 trace counted 496 `ads-ramp` samples
+among 13,898 Rage samples; those are input ticks, not proven missed shots.
+
+With Fast fire enabled, 1.5.14 can request a close single-projectile shot
+during ADS ramp when the current aim turn, an upper bound on the captured
+spread formula, and a one-degree margin fit inside the existing eight-degree
+outgoing turn. It still requests ADS on that input. Distant targets,
+multi-pellet weapons, switching, jump, reload, or an insufficient turn budget
+retain the full-ADS gate. The semi/pump/bolt trigger and cooldown checks remain
+in place. New traces label these early-ADS decisions and report how many were
+predicted and corrected locally.
+
+An optional test executes the captured `stepWeapon` function with ADS below 1
+and observes a shot. A second optional test sends 64 captured-kernel spread
+samples through XOX's bounded correction and projects each corrected ray
+through the captured standing torso box at 10 m. These tests establish the
+local mechanics, not current server timing or hit rate. The user-supplied
+1.5.14 match below did not retain an early-ADS firing decision: its retained
+selected targets were 72–226 m away, outside the guarded close-shot path.
+
+The captured shared `startSwitch` helper clears cooldown, but the actual
+client predictor's swap path sets switching time without calling that helper
+or clearing cooldown. That code does not support claiming a quick-swap firing
+rate exploit, so 1.5.14 does not automate weapon swapping.
+
+### Version 1.5.15 partial-head targeting
+
+The user-supplied 1.5.14 export from 2026-10-15 19:57 UTC has SHA-256
+`450160431fc8239dc5bd3c4cc299386860ecc06caa838058d13e34c985df34db`.
+It covers one match with 188 server shot events, 83 hit events, 53 head hits,
+24 kills, no recorded kick, and no retained errors. All 353 retained outgoing
+Fire decisions requested and selected Head. The 189 retained local shot
+predictions all projected into the selected head box after correction, but
+those projections are local geometry, not a measured server hit rate. The
+trace counted 55,781 candidate rejections for blocked center sight lines;
+it did not record whether any other point inside those hitboxes was visible.
+
+The trace also suggests a moving-fire problem. In a conservative offline
+association, a local prediction and server shot were paired only when they
+were the sole candidates for each other in the same match, 7–12 ticks and
+100–350 ms apart. This yielded 47 unambiguous pairs: the Sidearm had 1 hit
+in 11 pairs at own speed of at least 3 m/s versus 2 in 4 slower pairs; the
+Longbow had 0 in 3 faster pairs versus 28 in 29 slower pairs. These groups
+are small, and server events carry no input sequence, so even these pairings
+are provisional. The trace cannot distinguish spread-state differences,
+rewind error, cover, or another cause. No movement compensation was changed
+on this evidence alone.
+
+Version 1.5.15 probes the upper, lower, and two lateral interior points of
+the selected head or chest when its center is behind world cover. A clear
+center still takes one visibility ray and scores ahead of a comparable
+partial exposure. Explicit Head never falls back to
+Chest; Auto may still use its existing opposite-part fallback. The target
+snapshot records the selected point and true hitbox center separately, so
+multi-pellet projections continue to use the captured box geometry. New
+trace reports count `partial` and `fallback-partial` firing decisions. Local
+tests cover exposed upper and side head points, a fully covered head, and
+selection preference for a fully visible target.
+The 1.5.15 match below tests this path but does not isolate its hit-rate effect.
+
+### Version 1.5.16 adaptive hip fire
+
+The user-supplied 1.5.15 export from 2026-10-15 20:14 UTC has SHA-256
+`de953f9a8eab1bb4c42d45b5dc0b543842c73a7209b281c09ea137bc8b261fac`.
+It covers one match with 241 server shot events, 68 hit events, 44 head hits,
+12 kills, and no recorded kick or error. The 503 retained outgoing Fire
+decisions all requested and selected Head; 13 used a partially visible
+interior point. All 246 retained locally predicted shots were scoped. The
+server events lack input sequences, so neither the 13 partial selections nor
+individual weapon shots have a confirmed per-shot outcome. The overall
+68/241 event ratio cannot be compared causally with the earlier 83/188 match
+because the engagements, weapons, and distances differed.
+
+The captured shared weapon step accepts Fire without Aim. It computes a
+larger spread from hip spread, movement, and bloom, and draws the next radial
+offset deterministically from the predictor's seed and shot count. Version
+1.5.16 uses that next random draw, when the matching client physics exports
+are available, to decide whether a single-projectile unscoped shot can fit
+inside the existing eight-degree outgoing turn after a one-degree margin.
+Without those exports, it uses the full spread bound. It keeps normal ADS for
+wider samples, multi-pellet weapons, airborne shots, and targets beyond the
+hip-fire distance limit. The default limit is 40 m because the supplied trace
+starts around 82 m and provides no live hip-fire hit evidence. The panel can
+raise the limit to 600 m for explicit experiments. Trace exports now identify
+unscoped Fire, seed-assisted planning, and planned deviation separately from
+server combat events.
+
+Hash-matched captured-kernel tests show Fire without Aim and correct local
+ray alignment for seeded unscoped Longbow samples while wider samples fall
+back to scope. They do not establish server acceptance, perfect hits, or
+zero server spread. A new live trace is needed to judge actual hit rate and
+whether the scope-free path helps in a match.
+
+### Version 1.5.17: live hip-fire evidence and combat agent
+
+The user-supplied 1.5.16 trace from 2026-10-15 20:30 UTC has SHA-256
+`0e49e5ff56e2b16c3b15a541fd7dc14e3fa4781454012a4d4747a5d39566adaf`.
+It retained 382 server shot events, 70 hits, 36 head hits, and 11 kills in
+the observed match, with no recorded kick. The user changed the hip-fire
+distance during the match from 80 m to 600 m and later to 40 m. The 207
+retained unscoped Fire decisions all used a seeded spread estimate; 106
+had a locally predicted and corrected shot. These are input observations,
+not proof of server zero spread.
+
+The new analyzer infers a nine-tick offset between local prediction and
+server shot events for this match and pairs 328 retained shots by match,
+tick and plausible arrival delay. Of those, 192 also retain a Fire decision.
+The provisional pairs show 0 hits in 47 hip shots at 100–149 m, 1 in 21
+moving hip shots under 40 m, and 2 in 3 stationary hip shots under 40 m.
+Scoped paired shots with decisions show 37 hits in 121 shots across their
+recorded distances. The modes used different weapons, ranges, target motion,
+and times, so these counts support a conservative hip-fire gate but are not
+a controlled experiment or guaranteed per-shot attribution.
+
+Version 1.5.17 caps adaptive hip fire at 40 m, requires ground movement below
+0.5 m/s, and falls back to ADS if an acknowledged server shot count differs
+from the local shot count. The trace now includes server bloom and shot count,
+the local pre-reconcile shot count, and ACK-aligned shot-count differences.
+This can test whether deterministic correction uses the same shot number as
+the server. The new opt-in combat agent uses the game's normal input frames:
+it approaches visible opponents, stops and settles before firing, steers
+toward the safe zone, seeks compatible ammo when empty, and yields movement
+to player keys. The captured client identifies bot players in its roster but
+does not expose a callable bot controller; this agent is new client code.
+Local tests verify its input behavior. No 1.5.17 live match has yet confirmed
+its navigation, pickup, hit rate, or server acceptance.
+
+The captured weapon simulation computes spread from ADS, movement, bloom and
+weapon stats on each shot. The client sends aim and button inputs, with no
+spread parameter. Rotating a locally predicted ray can cancel its estimated
+deviation, but client code alone cannot set authoritative server spread to
+zero. The 1.5.16 live misses demonstrate why local zero-miss geometry must
+not be described as guaranteed server hits.
+
+### Version 1.5.18: default agent, cover openings, and persistent diagnostics
+
+Version 1.5.18 starts the combat agent, Silent AIM, and Rage on by default. A
+one-time settings migration enables them for ordinary older saved settings;
+previously rejected configurations with both aim modes off remain off. The
+agent still uses the game's normal input frames, yields to manual movement or
+action, and needs live match testing. It does not start a match on its own.
+
+The captured client raycast tests terrain and map boxes, skips boxes with
+`blocksShots === false`, and returns the nearest blocking hit. Its exported
+`raycastWorld(world, origin, unitDirection, maxDistance)` returns distance,
+point, normal, and material for that hit. The input frame has aim angles and
+button bits, not a penetration setting. There is no demonstrated client-side
+"magic bullet" path through solid world geometry. The targeting code now
+checks four additional diagonal points inside the captured head or torso box
+when its center is blocked. This can use a genuine narrow opening; server hit
+acceptance still requires a new trace. Coalesced fire gates record the first
+blocker along the preferred hitbox-center ray to diagnose misses near cover.
+
+Server snapshots now compare acknowledged outgoing yaw and pitch with the
+server's reported angles. The analyzer deduplicates by match and ACK sequence
+and reports angular differences separately from hits. These differences can
+suggest turn clamping or state drift, but cannot identify the server rule on
+their own. Traces are automatically archived every 15 seconds during play and
+at match end and detach; the code also attempts to save on page hide. Browser
+IndexedDB retains the latest three local sessions; the panel can download the latest saved trace after a
+reload. Local tests cover archiving, export, settings migration, cover probes,
+acknowledged-angle math, and the diagonal point selection. There is no 1.5.18
+live match trace yet, so neither zero spread nor a higher server hit rate is
+verified.
+
+### Version 1.5.19: server-reported ray evidence
+
+The captured client consumes `shot` events from server snapshots and uses
+their `from` and `dirs` fields for remote shot effects. Separate `impact`
+events are grouped with the preceding shot by event order; the renderer uses
+their positions and materials to place impacts. A replay-only `ends` array is
+assembled locally and is not treated as a live server endpoint. These events
+are server-reported visual data; the captured client does not prove the exact
+vectors used for server hit adjudication.
+
+Version 1.5.19 saves only allowlisted own-player shot origins, direction
+vectors, weapon IDs, and ordered impact positions. For a provisionally paired
+server shot, the analyzer rotates local predicted rays from sampled aim to the
+final outgoing aim, then compares them with the reported directions. It
+requires a compatible weapon and projectile count, and leaves ambiguous pairs
+unmatched. The report also measures reported rays against outgoing aim and the
+locally selected target point, and counts impacts closer than that point.
+This makes seed divergence, rejected aim angles, and cover more observable.
+No 1.5.19 live trace exists yet, so ray agreement and true server-side zero
+spread remain unverified.
+
+### Version 1.5.20: movement-aware combat-agent routing
+
+The captured client movement kernel uses a 0.3 m body radius, 1.8 m standing
+height, and 0.5 m step height. Its collision grid includes boxes that the shot
+ray deliberately skips when `blocksShots` is false. The previous agent used
+only a shot ray at standing eye height to pick a walking direction, so a clear
+shot path could still leave it walking into a movement blocker. Its stall
+response changed the preferred side without removing the direct route.
+
+Version 1.5.20 probes the nearby movement grid across a four-metre corridor,
+checks body clearance, step height, and terrain ascent, and then picks a clear
+direction or the longest short corridor with enough clearance. On a stall it
+sends a side route for a bounded window and only
+resumes direct travel after meaningful progress toward the goal; lateral
+movement alone does not count. Local tests cover a `blocksShots:false`
+obstacle, a low step, a short corridor, a stationary stall, and an unsuccessful
+flank. These are client-side navigation predictions. No 1.5.20 live trace
+exists yet to confirm navigation or server hits.
+
+### Version 1.5.21: deployment, route, and ray diagnostics
+
+Agent decision rows now include the source of each short route probe, chosen
+steering angle, tested candidates, and clear distance. The analyzer summarizes
+full, partial, and blocked routes from retained rows, along with the largest
+reported stall count. For unambiguously comparable provisional shot pairs, it
+groups server/local ray angle differences by weapon, locally selected distance
+band, and recorded local hip/ADS choice. Each group reports ray count, median,
+P90, and a count over 0.5 degrees; these local flags do not establish server
+scope state or per-weapon hit rates.
+
+A read-only audit found an assisted single-projectile Fire path that could reach
+local prediction when the target center fit an eight-degree outgoing turn but
+the predicted spread correction did not. Once predicted, Fire must stay on the
+wire to keep shot seed, bloom, and cooldown synchronized. Version 1.5.21 now
+uses the captured spread formula and available shot seed before prediction to
+wait for more turn room. It also sends exact corrected angles when Fast fire is
+off; the previous post-correction jitter could move a 550 m ray beyond a head
+hitbox. Local tests cover the pre-prediction hold and an exact long-range ray
+using the hash-matched captured spread function. A server trace is still needed
+to check whether the server accepts the same ray and records a hit.
+
+A hands-off baseline in the in-app browser stayed in the plane until the game
+ejected the player offshore. The captured client requires a fresh Jump press
+after the four-second plane-door delay. Version 1.5.21 chooses a land sample
+near the center of the observed flight path when terrain is available, pulses
+Jump only after the door opens and the plane reaches that point, and steers
+toward it during freefall and parachuting. Tests cover the door timing, a
+land sample beside central water, release of Jump, air steering, and manual
+override. The baseline browser did not have XOX installed, so this deployment
+behavior still needs a live XOX match trace.
+
+On 2026-10-15, the public BridgeZone page served the same physics and Turbopack
+runtime chunk hashes as the [capture manifest](research/manifest.json). A
+private ten-player bot lobby was created and entered in the in-app browser,
+but that browser did not have XOX installed. A separate isolated Edge profile
+loaded XOX 1.5.20 with the agent enabled, but the site blocked that automated
+profile before lobby creation. No XOX live shot trace resulted from either
+test, and neither proves server-side zero spread or live agent navigation.
+
+### Version 1.5.22: item interaction and inventory receipts
+
+The public client sends Interact and Swap as bits in `zone:input` frames. The
+camera's local item highlight is not sent with those frames. The agent had
+required that highlight to match its ammo goal before pressing Interact, so an
+outgoing aim at the item could remain blocked by a stale camera target. It now
+checks the outgoing item ray, three-dimensional reach, and available local
+line of sight, and takes a side route when the item ray is blocked. An item
+directly underfoot no longer exits before the aiming step. When under-equipped
+and not in close combat or outside the safe zone, the
+agent may seek a nearby weapon; a sidearm can request Swap once a different
+weapon appears in the second slot. Tests verify outgoing Interact and Swap bits
+and the blocked-item detour.
+
+New trace snapshots record the server's two weapon slots and active slot. The
+analyzer counts observed acquisitions, replacements, and active-slot changes,
+separately from agent Interact and Swap requests. None of those observations
+prove that a particular request caused a slot change, and no 1.5.22 live XOX
+match trace exists yet.
+
+### Version 1.5.23: near-face visibility on covered targets
+
+The captured `playerHitboxes` and `raycastPlayer` functions intersect an
+axis-aligned head or torso box at its first exposed surface. The old cover
+filter tested the hitbox center and eight interior offsets, all near the
+center depth. A world surface behind the near face could make all those points
+look covered even though the shot ray would enter the hitbox first. After the
+interior probes fail, the filter now tests one point 6 cm inside the box along
+the eye-to-center ray. The captured `hasLineOfSight` rule still checks world
+collision on that ray. Local tests cover an exposed near face, cover in front
+of the box, and an Auto fallback from covered head to chest near face.
+
+The trace records these decisions as `front-partial` or
+`fallback-front-partial`; the analyzer counts retained selections and
+provisional shot/hit pairs by visibility. The paired hit counts depend on
+inferred tick alignment and cannot assign a server hit with certainty. This is
+a geometrically valid exposed-hitbox case, not a
+method for passing a shot through solid cover. There is no live XOX 1.5.23
+trace or server hit receipt yet.
+
+### Version 1.5.24: storm routing and reported-ray hitbox estimates
+
+The combat agent previously treated every position as urgent when the storm
+radius fell below eight metres, even at its center. It also travelled to the
+center when outside a larger circle. The urgency margin now scales down with
+small circles, and the goal is the nearest point just inside that margin.
+Local tests verify that the agent can keep engaging at the center of a small
+circle and that an outside route stops short of the center.
+
+When a trace contains a provisionally paired server shot with reported ray
+directions, a reported origin, and a retained target position, the analyzer
+checks each ray against the captured head or chest box geometry. It groups
+intersections by selected-point visibility so a future trace can show whether
+near-face choices actually put reported rays through the locally sampled box.
+An independent test calls the hash-matched captured spread and shot-direction
+functions for 64 seeds while still and another 64 while moving at 4 m/s, then
+checks the actual outgoing corrected rays against a head box 599.5 m away. All
+128 simulated rays intersect the box. This isolates the local correction math;
+it does not establish server seed agreement, target rewind, cover, or hits.
+The target may have occupied a different position on the server, and a box
+intersection does not establish a server hit or an unobstructed path. The
+latest user trace predates reported-ray capture, so this measurement still
+needs a new live XOX export.
+
+### Version 1.5.25: loaded backup and tiny storm circles
+
+The combat agent could report `no-ammo` with an empty active magazine and no
+reserve even while a second slot held a loaded weapon. It now requests a normal
+Swap before seeking ground loot in that case. The same loaded-backup check also
+prevents a sidearm upgrade from selecting an empty second weapon. Agent traces
+record `loaded-backup` or `sidearm-upgrade` as the equip route source.
+
+Storm routing now scales its arrival tolerance with the circle radius. A
+sub-metre circle no longer makes the agent stop up to one metre from the goal,
+which could leave it outside the safe area. Local tests verify the input
+decisions; no live XOX 1.5.25 match or authoritative inventory transition has
+been observed.
+
+An acknowledged shot-count mismatch also warns that the server may use a
+different spread seed than the local predictor. Version 1.5.25 keeps a
+predicted Fire on the wire but skips local spread cancellation while that
+mismatch persists; it aims exactly at the selected target point instead. The
+decision trace records the skip reason and seed-sync status. A local test
+checks both bounded and direct outgoing paths, then confirms correction
+resumes after an aligned acknowledgment. A count mismatch does not prove the
+server seed differs, and aiming at the point cannot eliminate unknown server
+spread. Reported rays and hit events from a new match are still required.
+
+The trace analyzer now reports which local and server shots are eligible for
+pairing, the inferred tick offset and delay range, and why candidates are left
+unmatched. It excludes a pair when several local or server shots could explain
+the same event. A server hit on a tick with multiple own-player shots is kept
+separate from the provisional paired-hit groups. Reported rays are compared
+only for retained, uniquely compatible pairs, and missing directions or angles
+are counted. Tests use synthetic ambiguity and missing-data cases; the latest
+user trace predates server-reported ray capture.
+
+### Version 1.5.26: automatic trace export
+
+The script now downloads a bounded JSON trace once when it observes a finished
+match, local elimination, or a kicked connection. It also attempts export when
+a terminal client detaches before the next periodic tick. The panel reports the
+last download request time. IndexedDB continues to save the latest session in the
+background; the **Saved** button remains available if the browser blocks an
+automatic download. Local tests verify the trigger, duplicate suppression,
+payload version and retained input frames, including when IndexedDB is absent.
+No live browser download or new server-reported rays have been observed yet.
+
+### Version 1.5.27: near-face corner openings
+
+The prior visibility search could miss a small exposed corner of a target's
+front hitbox face after its center and interior probes were covered. It now
+tests four additional front-face corner points, each at least 1.5 cm inside
+the captured head or torso axis-aligned box. A world line-of-sight ray must
+reach the selected point. Traces identify these choices as
+`front-corner-partial` or `fallback-front-corner-partial`, allowing later
+comparison with server-reported rays and hits. A local test exposes only one
+near corner and verifies selection; a fully blocked target remains rejected.
+This is a clear opening into the hitbox, not penetration through solid world
+geometry. No live XOX 1.5.27 match trace is available yet.
+
+### Version 1.5.28: proactive ammo and more useful ray evidence
+
+The default combat agent now seeks observed matching ammo within 45 m before
+reserve falls to zero, if reserve is below one magazine and no enemy is
+observed within 45 m. With an empty magazine and no reserve it can seek ammo
+within 75 m. An urgent storm move, loaded backup, or nearby fight still takes
+priority. A local test checks ammo travel and that a nearby visible or covered
+opponent keeps priority; no live pickup or survival outcome has been observed.
+
+The analyzer can measure the maximum angle between rays reported in the same
+server shot event without pairing that event to a local shot. For ambiguous
+local/server shot candidates it reports a bounded range of angular differences
+for comparable candidate rays and keeps those candidates unpaired. Neither
+measurement proves a server spread setting, hit, or shot-specific aim error.
+The latest live trace has no server-reported directions, so these new fields
+remain empty for it. Two synthetic trace tests exercise multi-ray, ambiguous,
+single-ray, and over-limit cases.
+
+The captured kernel adds pellet spread around an already perturbed base ray.
+Rigidly rotating final predicted rays could therefore count a hit at the
+outgoing angle that the kernel did not produce. Version 1.5.28 captures only
+the in-memory shot seed and spread inputs, replays the kernel at a candidate
+angle, and uses that replay for local pellet scoring only when it reproduces
+the predictor's original directions within a small numerical tolerance.
+Single-projectile correction iterates against the calibrated replay. A
+captured-kernel test checks 312 combinations of shot seed, elevation, ADS,
+movement, crouch, airborne state, and pellet count; replayed intersections
+matched the kernel in every case, and all tested single-projectile rays
+intersected the sampled head box. The trace exports a calibration flag but
+never the seed. Equal server/client shot counts do not prove equal spread
+seeds: a same-count, different-seed negative control produced different rays.
+These are local predictor results, not server hit or zero-spread proof.
+
+On 2026-10-16 the live lobby loaded public physics chunk `3ep-katvfqbjo.js`
+and runtime chunk `turbopack-37jd2rjmtu1y9.js`. Fresh downloads matched the
+captured test inputs at SHA-256
+`2027d73bd9daea6e44f954bfce014af3ee8b5df3550bec44a2b9c046b7b71b1e`
+and `94e60212916d8b767ffa7df350c496c14eb7a0a0787028f6a207761bb27d9b11`.
+This checks the current public client chunks, not the private server code or
+its hit validation. No live XOX 1.5.28 match trace exists yet.
+
+### Version 1.5.29: exact replay, cover order, and recovery inputs
+
+The aim correction now calls the captured game's exported `shotDirections` and
+`spreadDegrees` functions instead of maintaining a second spread formula. It
+still enables replay only when those functions reproduce the predictor's
+original shot rays within numerical tolerance. Candidate correction now
+iteratively refines each pellet, not only single-projectile shots. The expanded
+captured-kernel test covers 468 combinations of distance, elevation, shot
+seed, ADS, movement, crouch, airborne state, and pellet count; projected
+intersections match the captured kernel, and every tested single-projectile
+ray intersects the sampled head box. These are local predictor results, not
+server hits or proof of zero server spread.
+
+Requested-zone cover probes now use the exported `raycastPlayer` and
+`raycastWorld` functions when both are present. A point is accepted only when
+the first player hit is in the requested zone and no world hit precedes it.
+Four extra front-face edge midpoints can find a narrow clear opening after
+center, interior, and corner probes fail. A local test rejects a blocker in
+the short endpoint gap left by `hasLineOfSight`, and another selects an exposed
+edge midpoint. Neither path penetrates solid world geometry.
+
+The captured input constants assign Plate to bit 256 and Heal to bit 512.
+The predictor exposes health, armor, carried plates and medkits, and timed
+plating and healing channels. The default combat agent now pulses those normal
+inputs when grounded, supplies are predicted available, no opponent is nearby,
+and the storm move is not urgent. It pauses during a predicted recovery
+channel, waits for a health, armor, or stock change before another request,
+and yields to manual input. The trace records both predicted and
+server-reported recovery state; the analyzer counts agent requests separately
+from observed server health, armor, stock, and channel transitions. Health
+can also regenerate, so an increase is not attributed to a particular Heal
+request. Local tests cover outgoing inputs and priorities, but no live XOX
+1.5.29 match trace exists yet.
+
+### Version 1.5.30: correction origin and ACK diagnostics
+
+When a predicted Rage shot retained its sampled target across a snapshot
+change, the outgoing correction previously kept the target geometry relative
+to the eye position at input sampling. The local predicted shot can start from
+a different eye position. The correction now recomputes target direction,
+distance, yaw, and pitch from that shot eye in both outgoing modes. A focused
+test moves the eye 0.3 m and checks that the outgoing ray still intersects the
+captured head box. This is a local geometry check, not a server-confirmed hit.
+
+Repeated snapshots can carry the same acknowledged input sequence without
+repeating both aim-angle measurements. The analyzer now keeps the latest
+finite yaw and pitch difference separately, instead of replacing an earlier
+measurement with a missing field. A regression test checks the report values.
+
+All 143 local tests pass with the hash-matched captured public physics and
+runtime bundles. A private match was started in the Codex in-app browser, but
+that browser did not have XOX loaded or capture pointer lock. The game
+auto-ejected the player, who was later eliminated by the storm. The match
+does not measure XOX aim, movement, shots, or server spread. A live XOX trace
+is still needed.
+
+### Version 1.5.31: nearby-land drop planning
+
+The combat agent previously sampled nine points directly below the middle of
+the plane path. It could miss a narrow land strip between samples or a shore
+beside an all-water flight path, leaving the default drop target in water.
+It now samples the observed height grid at roughly 2 m intervals along the
+middle 60% of the path and checks fixed lateral offsets up to 256 m. Candidate
+scores favor land near the route center and penalize points far behind the
+plane's current position. A chosen off-route point becomes the descent
+steering target. When terrain is missing or no nearby land is found, the
+midpoint fallback remains and the trace labels that condition. The analyzer
+counts those labels and the largest selected lateral offset.
+
+Synthetic height-grid tests cover narrow on-route land, land beside a water
+path, and a choice between land ahead of and behind the plane. All 147 local
+tests pass with the captured public client bundles. These tests do not prove
+the landing succeeds in a live match.
+
+### Version 1.5.31: short live trace
+
+The saved export `bridgezone-trace-2026-10-15T22-54-47-134Z.json` has SHA-256
+`30ce11e91e416b5514e616578ddfc95603b8b111e1cf55971e5e67a0ae5a4224`.
+It remains in the user's Downloads folder. The trace reports script version
+1.5.31 and one match. It contains 636 outgoing frames, eight retained local
+Fire decisions, six server shot events, three server hit events (two marked
+head), no kill event, and a `kicked` state classified as `aim-assistance`.
+No raw connection error was exported, and the trace does not reveal which
+behavior triggered the server's decision. The settings rows confirm Stealth
+was turned off before the kick. The player reports that this was the likely
+cause; the trace establishes timing, not causation.
+
+The agent logged nine `plane-wait` decisions with `sampled-land` plans and
+three `air-steer` decisions. A manual override and an `off` decision followed;
+the agent setting was later switched off before the recorded sidearm shots.
+The game later reported ground mode, but the trace cannot attribute that
+landing to the agent's plan. There is no ground combat-agent action or pickup
+in this trace. All eight retained Fire decisions selected Head and a clear local
+point at 51–57 m. Six server shots used the sidearm. The analyzer's bounded
+short-trace rule finds six distinct, compatible local candidates at one
+unanimous nine-tick offset. These are **provisional** pairs: three share ticks
+with hit events, but the protocol still does not link a hit to an input frame.
+Across the six reported rays, the median angular difference from the rotated
+local prediction is 0.43 degrees and the maximum is 0.65 degrees. Two rays
+intersect the locally sampled target boxes. The residual ray difference can
+reflect seed, bloom, aim state, timing, or pairing error; it is not a measured
+server spread parameter. These observations do not establish long-range
+accuracy or server zero spread.
+
+### Version 1.5.32: 400 m deployment and short-trace diagnostics
+
+The default agent now prefers the point 400 m along the observed plane route,
+or 80% of the route when it is shorter than 500 m. It samples
+land at and beyond that point, keeping a later reachable land choice when the
+400 m point is water. It sends Jump only after the plane door opens and the
+plane reaches the selected point. Each plane decision records traveled and
+planned drop distance; the analyzer summarizes the actual distances of
+recorded Jump actions. A local 1,200 m route test confirms no Jump at 399 m
+and one Jump at 400 m. Other terrain tests cover narrow, lateral, and ahead
+land choices. This is a local result; no 1.5.32 match trace exists yet.
+
+The trace analyzer now accepts a short export's tick offset for **provisional**
+ray comparison only when six to nine server shots each have a distinct
+compatible local candidate at one unanimous offset. Competing or duplicated
+candidates remain unmatched. On the 1.5.31 trace, this yields six limited
+pairs and the angular differences reported above, without treating same-tick
+hit events as proof of individual shot causation. All 149 local tests pass with
+the hash-matched captured physics and runtime bundles.
+
+### Version 1.5.33: exact outgoing-ray replay evidence
+
+The short 1.5.31 trace shows a 0.12–0.65 degree difference between reported
+server rays and rotated local predictions. Matching acknowledged shot counts
+do not prove matching shot seeds. Version 1.5.33 therefore records the exact
+outgoing directions produced by a locally calibrated replay for each sent
+predicted shot, plus the spread magnitude and pellet parameters used for that
+replay. It does not export the seed. The analyzer compares these outgoing
+rays with provisionally paired reported rays separately from its existing
+rotated-prediction comparison. Captured-kernel tests verify that the exported
+directions match the local outgoing replay across varied conditions; all 150
+local tests pass. No 1.5.33 server trace exists, so the new comparison cannot
+yet determine whether the earlier residual came from replay approximation,
+seed or state drift, or an invalid provisional pairing.
 
 ## What changed and what was observed
 
@@ -95,6 +782,115 @@ ended too early to measure sustained accuracy or anti-cheat acceptance: the
 server confirmed one shot and one hit. Local tests cover its input and prediction
 paths, but no broader live conclusion follows from the short trace.
 
+Version 1.5.6 adds automatic local build/reload while a Zone tab is open,
+removes XOX's extra stealth delay when Fast fire and Rage are enabled, checks
+alignment against a moving target before predicting a shot, and corrects the
+average direction of multiple predicted pellets. A user-supplied 1.5.6 export
+contains 88 server shots, 27 hits, six kills, no kick, and no recorded errors.
+Its SHA-256 is `ea7066c1aefc4f9f2f75ebbfbaa520a5e72ebbbcc7fa3792ad625252b2daa425`.
+The raw export stays outside this public repository. It covers one match with
+sniper, SMG, gun, and rifle use, but records no weapon or target distance per
+shot. It cannot establish accuracy by weapon or at 600 m.
+
+In the part of the export where both a local prediction and its input frame are
+retained, 18 moving predictions average 0.56 degrees of deviation from the
+sampled aim and 18 stationary predictions average 0.06 degrees. For 36 server
+shot events whose ticks overlap retained input frames, 10 ticks have nonzero
+movement input and one same-tick hit; the other 26 have 11 same-tick hits.
+Server events can be delayed relative to input, and weapon, distance, and target
+movement are mixed. These figures show a problem worth testing, not a causal
+hit-rate comparison.
+
+The captured public physics bundle (SHA-256
+`2027d73bd9daea6e44f954bfce014af3ee8b5df3550bec44a2b9c046b7b71b1e`)
+uses `rangeEnd` as the end of damage falloff, then applies `minDamage`; it does
+not use that field as a maximum hit distance. Its weapon simulation ramps ADS
+over `adsSeconds` and adds movement and bloom to spread even when ADS reaches 1.
+That is static client evidence, not proof that the current server uses the same
+code or that arbitrary distant shots can hit.
+
+Version 1.5.7 removes XOX's `1.35 × rangeEnd` target-selection cap and uses
+the selected range up to 600 m. Rage holds ADS input before a target appears and
+waits until its local ADS state reaches 0.995 before firing. Fast fire uses exact
+corrected angles without XOX's added jitter. At long range it also requires
+tighter alignment after a target moves. Trace exports now record target distance,
+weapon ID, local ADS state, movement input, ADS request, prediction, and whether
+correction and Fire were sent. These are local code and test results; no 1.5.7
+server trace verifies distant hits. The server still owns shot reach, spread,
+fire cadence, and hit validation. Visible camera recoil is unchanged.
+
+Version 1.5.8 expands the bounded export to distinguish selection, sample-time
+fire gating, local prediction, outgoing Fire, and server events. Each recorded
+Fire decision includes the selected aim point and target velocity, local player
+and weapon state, sample-to-send target movement when the sequence matches,
+input and outgoing angles, and a local geometric estimate of projectile distance
+from the selected point before and after correction. Rage gate counters cover
+all observed samples, while detailed gate records are retained on changes and
+at short intervals. Settings transitions are retained alongside match starts.
+The export reports per-buffer dropped counts. Connection
+errors are classified instead of exporting raw error strings. The local
+`verification/analyze-trace.mjs` command groups outgoing Fire by weapon, range,
+and movement and identifies missing predictions or large geometric deviations.
+It keeps server events separate because the observed protocol does not provide
+a guaranteed shot-to-input sequence link. These diagnostics have local test
+coverage. The user-supplied 1.5.8 trace below supplies a bounded live result.
+
+Server snapshots additionally record the authoritative input ACK, ADS, weapon,
+magazine, position, and observed acknowledgement latency. The analyzer shows
+which retained outgoing Fire sequences the highest observed ACK covers. An ACK
+only shows that the server advanced past an input sequence; it does not prove
+the server accepted Fire, produced a shot, or registered a hit. Predictor state
+is captured before reconciliation and can temporarily disagree with the server
+because of network delay.
+
+The hash-matched captured client chunk `0ozbivb7uobj6.js` (SHA-256
+`96f29cd0a2b7229b750d4d9220150cddd595a333e0601566e290efa73b166d5a`)
+derives active weapon stats from `slots[active].weapon` and its rarity. The new
+weapon ID field therefore reads the active slot first and reports its source;
+it falls back to a stats ID if the slot is unavailable. The same captured
+snapshot path uses `me.ack` and `sentAt` to update its RTT estimate, supporting
+the input acknowledgement and latency fields above. This is static evidence
+for the captured client; the 1.5.8 trace contains slot weapon IDs and input ACKs.
+
+### The 1.5.8 no-fire trace and the 1.5.9 fix
+
+The user-supplied format-v2 trace recorded 1,338 outgoing frames, 789 server
+snapshots observed, no outgoing Fire, no local shot prediction, and no server
+shot event. Rage gate counters show 1,131 unplayable samples, five ADS ramp
+samples, and 202 alignment holds. Many unplayable samples occurred during the
+pre-ground or dead phases. Once on the ground, selected target distances in the
+retained gates ranged from 53.18 to 89.2 m. Two retained gate rows show a manual
+Fire press entering the hook and being removed before prediction. The trace
+contains no Interact bit, which does not prove whether F/E was pressed: it has
+no raw keyboard events and the panel could have lost pointer lock.
+
+Source inspection found that Rage's pre-prediction hold required its previous
+outgoing angle to satisfy a tight tolerance against a freshly sampled moving
+target. The outgoing rewrite could aim at that fresh position but never saw a
+Fire request. Version 1.5.9 allows a shot into prediction when the selected
+target is reachable within one bounded outgoing turn. The outgoing rewrite
+still checks current alignment and suppresses Fire if the turn is incomplete.
+Tests cover a moving target at long range, a large sudden target change, and
+the final outgoing safety check. No 1.5.9 server match has been recorded yet.
+
+Captured client controls map F/E to Interact bit 64 and require pointer lock.
+Version 1.5.9 passes an interaction frame through using the player's real view,
+stops automatic fire and reload during that press, and lets F/E keys leave the
+panel. The panel's Resume button requests pointer lock after settings changes.
+Loot vision now includes nearby ammo and prioritizes the active weapon's ammo.
+New bounded trace fields distinguish sampled and sent buttons and record only
+F/E and pointer-lock state, so the next export can locate an interaction loss
+without recording unrelated keyboard input.
+
+The captured movement simulation reduces speed while ADS is held and disables
+sprint. Version 1.5.9 releases automatic ADS when there is no selected target,
+allowing normal travel and sprint between engagements. Full-speed movement
+while continuously scoped is not supported by the captured movement model.
+The captured ammo reserve has finite caps and snapshots reconcile ammo state;
+auto reload requests a real reload when reserve exists. A client-only ammo
+counter change cannot establish infinite ammunition on the server. These
+mechanics were captured on 2026-10-08 and may differ from the current server.
+
 ### Local display and movement limits
 
 The client predicts a shot locally before an outgoing input frame may be
@@ -120,13 +916,13 @@ node --check extension/bridgezone-main.js
 node --test tests/*.test.cjs
 ```
 
-The 2026-10-15 local run passed 50 tests with the captured public client archive
-available. Three tests use that optional archive; in a fresh clone without it,
-those three skip. The JSON trace files are exports of observed input frames,
-local shot predictions, server events, and connection state. The trace is
-bounded, contains no session token or match ID, and cannot reveal an unshipped
-server detector. The panel's **Save trace** button exports the current in-memory
-buffer; save it before leaving a match.
+The 2026-10-15 portable 1.5.9 run passed 67 tests with three optional tests
+skipped. One optional test can use the hash-matched captured physics bundle;
+two need the captured runtime. The JSON traces contain allowlisted game-state
+diagnostics, no session token or match ID, and cannot reveal an unshipped server
+detector. The panel's **Save trace** button exports the current in-memory
+buffers; save them before leaving a match. The analyzer reads both format v1
+and v2 exports without treating local geometric estimates as server hits.
 
 ## Publication choices
 
